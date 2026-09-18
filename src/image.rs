@@ -338,6 +338,40 @@ impl HeifFrame {
         })
     }
 
+    /// Promote to 4:4:4 (chroma replicated, or neutral chroma added
+    /// for monochrome), keeping depth and alpha.
+    pub fn promote_to_444(&self) -> Result<Self> {
+        let fmt = HeifPixelFormat {
+            chroma: Chroma::Yuv444,
+            ..self.format
+        };
+        let mid = 1u16 << (self.format.bit_depth - 1);
+        let mut out = HeifFrame::filled(self.width, self.height, fmt, mid)?;
+        // Luma.
+        for y in 0..self.height {
+            let row = self.row(0, y).to_vec();
+            let stride = out.planes[0].stride;
+            out.planes[0].data[y as usize * stride..y as usize * stride + row.len()]
+                .copy_from_slice(&row);
+        }
+        if self.format.chroma != Chroma::Mono {
+            let (sx, sy) = self.format.chroma.shift();
+            for p in 1..3 {
+                for y in 0..self.height {
+                    for x in 0..self.width {
+                        let v = self.sample(p, x >> sx, y >> sy);
+                        out.set_sample(p, x, y, v);
+                    }
+                }
+            }
+        }
+        if let Some(a) = self.format.alpha_plane() {
+            let dst = out.format.alpha_plane().expect("alpha kept");
+            out.planes[dst] = self.planes[a].clone();
+        }
+        Ok(out)
+    }
+
     /// Attach `alpha` (a monochrome frame of the same size and depth)
     /// as the alpha plane.
     pub fn with_alpha_plane(&self, alpha: &HeifFrame) -> Result<Self> {
@@ -517,40 +551,6 @@ pub mod core_bridge {
             };
             f.validate()?;
             Ok(f)
-        }
-
-        /// Promote to 4:4:4 (chroma replicated, or neutral chroma added
-        /// for monochrome), keeping depth and alpha.
-        pub fn promote_to_444(&self) -> Result<Self> {
-            let fmt = HeifPixelFormat {
-                chroma: Chroma::Yuv444,
-                ..self.format
-            };
-            let mid = 1u16 << (self.format.bit_depth - 1);
-            let mut out = HeifFrame::filled(self.width, self.height, fmt, mid)?;
-            // Luma.
-            for y in 0..self.height {
-                let row = self.row(0, y).to_vec();
-                let stride = out.planes[0].stride;
-                out.planes[0].data[y as usize * stride..y as usize * stride + row.len()]
-                    .copy_from_slice(&row);
-            }
-            if self.format.chroma != Chroma::Mono {
-                let (sx, sy) = self.format.chroma.shift();
-                for p in 1..3 {
-                    for y in 0..self.height {
-                        for x in 0..self.width {
-                            let v = self.sample(p, x >> sx, y >> sy);
-                            out.set_sample(p, x, y, v);
-                        }
-                    }
-                }
-            }
-            if let Some(a) = self.format.alpha_plane() {
-                let dst = out.format.alpha_plane().expect("alpha kept");
-                out.planes[dst] = self.planes[a].clone();
-            }
-            Ok(out)
         }
     }
 }

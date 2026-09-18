@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `compose`: pixel composition — `grid` (row-major tiling, right/bottom
+  trim, tile alpha), `iovl` (sRGB `canvas_fill_value` converted with
+  the H.273 matrix of the output `colr`, per-input offsets with
+  clipping, §6.9.1 straight / pre-multiplied alpha blending, canvas
+  opacity → output alpha for translucent fills), `iden`, `clap`
+  (exact rational aperture), `irot`, `imir`, alpha auxiliary
+  attachment (resize + depth match). Sub-sample chroma positions
+  (odd crops / offsets / tile sizes / rotations, alpha edges) promote
+  to 4:4:4 per the MIAF §7.3.6.7 rule.
+- `decode` (`registry`): `decode_item` / `decode_primary` →
+  `DecodedImage` (output image with alpha plane, depth auxiliary,
+  effective `nclx` incl. the MIAF default, ICC, Exif with the offset
+  word resolved, XMP, thumbnail ids, properties); shared inputs decode
+  once; decode-count cap.
+- Tests: all 14 corpus bundles against their `expected.png` oracle
+  (five sample-exact, the rest within 8-bit colour-conversion noise),
+  grid composition byte-exact against a black-box decoder, burst items,
+  thumbnails / Exif / XMP / ICC surfacing.
+
 - `image`: crate-local planar `HeifFrame` / `HeifPixelFormat` (4:0:0 /
   4:2:0 / 4:2:2 / 4:4:4 at 8–16 bits, optional alpha plane), bridged to
   `oxideav_core::VideoFrame` + `PixelFormat` under `registry` (with a

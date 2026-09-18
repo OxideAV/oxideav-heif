@@ -17,14 +17,19 @@ use oxideav_core::{
     CodecId, CodecParameters, CodecRegistry, Decoder, Error as CoreError, Frame, Packet, TimeBase,
 };
 
+use std::collections::HashMap;
+
 use crate::av1c::Av1Config;
-use crate::derived::{ImageKind, ImageNode};
+use crate::compose::{
+    apply_transforms, attach_alpha, composite_grid, composite_overlay, OverlayInput,
+};
+use crate::derived::{build_graph, ImageKind, ImageNode};
 use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
 use crate::hvcc::HevcConfig;
 use crate::image::{Chroma, HeifFrame, HeifPixelFormat, HeifPlane};
 use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_HEV1, ITEM_TYPE_HVC1};
-use crate::props::ItemProperties;
+use crate::props::{Colr, ItemProperties};
 
 /// Codec id the HEVC decoder is registered under.
 pub const CODEC_ID_HEVC: &str = "h265";
@@ -292,6 +297,213 @@ fn frame_from_planes(
     };
     f.validate()?;
     Ok(f)
+}
+
+/// A fully reconstructed image item: the output image (§6.3) with its
+/// alpha auxiliary attached, plus the descriptive metadata a renderer
+/// needs.
+#[derive(Clone, Debug)]
+pub struct DecodedImage {
+    /// The item that was decoded.
+    pub item_id: u32,
+    /// The output image; carries an alpha plane when the item (or the
+    /// top of its derivation) has an alpha auxiliary.
+    pub frame: HeifFrame,
+    /// `prem`: colour samples are pre-multiplied by the alpha plane.
+    pub premultiplied_alpha: bool,
+    /// The depth-map auxiliary (its own output image), when present.
+    pub depth: Option<HeifFrame>,
+    /// Effective CICP colour information: the item's `nclx`, else the
+    /// MIAF §7.3.6.4 default.
+    pub nclx: Colr,
+    /// `true` when `nclx` came from the file rather than the default.
+    pub nclx_explicit: bool,
+    /// ICC profile (`rICC` / `prof` colr), when present.
+    pub icc_profile: Option<Vec<u8>>,
+    /// Exif payload with the HEIF offset word resolved (Annex A.2.1):
+    /// the bytes from the TIFF header on.
+    pub exif: Option<Vec<u8>>,
+    /// XMP packet (Annex A.3), when present.
+    pub xmp: Option<String>,
+    /// Item ids of the thumbnails (`thmb`) of this image.
+    pub thumbnail_ids: Vec<u32>,
+    /// The item's typed properties (for `pixi`, `clli`, `mdcv`, …).
+    pub properties: ItemProperties,
+}
+
+impl DecodedImage {
+    /// Output width in pixels.
+    pub fn width(&self) -> u32 {
+        self.frame.width
+    }
+
+    /// Output height in pixels.
+    pub fn height(&self) -> u32 {
+        self.frame.height
+    }
+}
+
+/// Decodes an item and everything it derives from, caching coded
+/// reconstructions so shared inputs decode once.
+struct Session<'a, 'r> {
+    file: &'a HeifFile,
+    decoder: ItemDecoder<'r>,
+    cache: HashMap<u32, HeifFrame>,
+    decodes: usize,
+}
+
+impl Session<'_, '_> {
+    /// Reconstructed image of a node (§6.3, first bullet): decoded
+    /// picture or derivation result, *before* the node's own
+    /// transformative properties.
+    fn reconstruct(&mut self, node: &ImageNode) -> Result<HeifFrame> {
+        match &node.kind {
+            ImageKind::Coded(_) => {
+                if let Some(f) = self.cache.get(&node.item.id) {
+                    return Ok(f.clone());
+                }
+                if self.decodes >= MAX_ITEM_DECODES {
+                    return Err(HeifError::exhausted(format!(
+                        "more than {MAX_ITEM_DECODES} coded items in one image"
+                    )));
+                }
+                self.decodes += 1;
+                let f = self.decoder.decode_coded(self.file, node)?;
+                self.cache.insert(node.item.id, f.clone());
+                Ok(f)
+            }
+            ImageKind::Grid(g) => {
+                let mut tiles = Vec::with_capacity(node.inputs.len());
+                for t in &node.inputs {
+                    tiles.push(self.output(t)?);
+                }
+                composite_grid(g, &tiles)
+            }
+            ImageKind::Overlay(o) => {
+                let mut frames = Vec::with_capacity(node.inputs.len());
+                for i in &node.inputs {
+                    frames.push((self.output(i)?, i.premultiplied_alpha && i.alpha.is_some()));
+                }
+                let inputs: Vec<OverlayInput<'_>> = frames
+                    .iter()
+                    .map(|(f, prem)| OverlayInput {
+                        frame: f,
+                        premultiplied: *prem,
+                    })
+                    .collect();
+                composite_overlay(o, &inputs, node.properties.nclx())
+            }
+            ImageKind::Identity => {
+                let input = node.inputs.first().ok_or_else(|| {
+                    HeifError::invalid(format!("iden item {} has no input", node.item.id))
+                })?;
+                self.output(input)
+            }
+            ImageKind::ToneMap(_) => {
+                // ISO/IEC 21496-1 gain-map application is out of scope;
+                // the base image (first input) is the SDR rendition.
+                let input = node.inputs.first().ok_or_else(|| {
+                    HeifError::invalid(format!("tmap item {} has no input", node.item.id))
+                })?;
+                self.output(input)
+            }
+        }
+    }
+
+    /// Output image of a node (§6.3, second bullet): reconstruction
+    /// with the transformative chain applied, then the alpha
+    /// auxiliary attached (its own output image, §6.9.1).
+    fn output(&mut self, node: &ImageNode) -> Result<HeifFrame> {
+        let unsupported = node.properties.unsupported_essential();
+        if !unsupported.is_empty() {
+            return Err(HeifError::unsupported(format!(
+                "item {}: essential properties not recognised: {}",
+                node.item.id,
+                unsupported
+                    .iter()
+                    .map(crate::boxes::fourcc_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        let rec = self.reconstruct(node)?;
+        let mut out = apply_transforms(&rec, node.properties.transformative(), false)?;
+        if let Some(a) = &node.alpha {
+            let alpha = self.output(a)?;
+            out = attach_alpha(&out, &alpha)?;
+        }
+        Ok(out)
+    }
+}
+
+/// Decode `item_id` (coded or derived) to its output image with alpha,
+/// depth, colour information and metadata resolved.
+pub fn decode_item(
+    file: &HeifFile,
+    item_id: u32,
+    decoder: ItemDecoder<'_>,
+) -> Result<DecodedImage> {
+    let node = build_graph(file, item_id)?;
+    let mut session = Session {
+        file,
+        decoder,
+        cache: HashMap::new(),
+        decodes: 0,
+    };
+    let frame = session.output(&node)?;
+    let depth = match &node.depth {
+        Some(d) => Some(session.output(d)?),
+        None => None,
+    };
+    let (nclx, nclx_explicit) = match node.properties.nclx() {
+        Some(c) => (c.clone(), true),
+        None => (Colr::MIAF_DEFAULT, false),
+    };
+    let icc_profile = node.properties.icc_profile().map(<[u8]>::to_vec);
+    let mut exif = None;
+    let mut xmp = None;
+    for m in &node.metadata {
+        if m.item_type == crate::meta::ITEM_TYPE_EXIF && exif.is_none() {
+            exif = Some(exif_payload(&file.item_data(m.id)?)?);
+        } else if m.is_xmp() && xmp.is_none() {
+            xmp = Some(String::from_utf8_lossy(&file.item_data(m.id)?).into_owned());
+        }
+    }
+    Ok(DecodedImage {
+        item_id,
+        premultiplied_alpha: node.premultiplied_alpha && node.alpha.is_some(),
+        frame,
+        depth,
+        nclx,
+        nclx_explicit,
+        icc_profile,
+        exif,
+        xmp,
+        thumbnail_ids: node.thumbnails.iter().map(|t| t.item.id).collect(),
+        properties: node.properties.clone(),
+    })
+}
+
+/// Decode the primary item (`pitm`).
+pub fn decode_primary(file: &HeifFile, decoder: ItemDecoder<'_>) -> Result<DecodedImage> {
+    let id = file.primary_item()?.id;
+    decode_item(file, id, decoder)
+}
+
+/// Strip the `exif_tiff_header_offset` word of an `Exif` item body
+/// (HEIF Annex A.2.1) and return the bytes from the TIFF header on.
+pub fn exif_payload(item: &[u8]) -> Result<Vec<u8>> {
+    if item.len() < 4 {
+        return Err(HeifError::invalid("Exif item shorter than its offset word"));
+    }
+    let off = u32::from_be_bytes([item[0], item[1], item[2], item[3]]) as usize;
+    let start = 4usize
+        .checked_add(off)
+        .filter(|s| *s <= item.len())
+        .ok_or_else(|| {
+            HeifError::invalid(format!("Exif tiff header offset {off} past the item"))
+        })?;
+    Ok(item[start..].to_vec())
 }
 
 #[cfg(test)]

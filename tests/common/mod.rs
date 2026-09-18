@@ -7,6 +7,8 @@
 //! stays green while the local run exercises every bundle.
 #![allow(dead_code)]
 
+pub mod png;
+
 use std::path::{Path, PathBuf};
 
 /// The 14 bundles of the staged corpus, in the order the corpus README
