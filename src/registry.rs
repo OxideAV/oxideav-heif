@@ -17,6 +17,7 @@
 use oxideav_core::{CodecCapabilities, CodecId, CodecInfo, RuntimeContext};
 
 use crate::demux::{make_decoder, open, probe, CODEC_ID, CONTAINER_NAME};
+use crate::encode::make_encoder;
 
 /// Resolution priority of the container probe (lower wins ties).
 pub const PROBE_PRIORITY: i32 = oxideav_core::DEFAULT_PRIORITY - 50;
@@ -41,15 +42,17 @@ pub fn register_containers(reg: &mut oxideav_core::ContainerRegistry) {
     }
 }
 
-/// Codec-only registration: the `"heif"` still-image decoder.
+/// Codec-only registration: the `"heif"` still-image decoder + encoder.
 pub fn register_codecs(reg: &mut oxideav_core::CodecRegistry) {
     let caps = CodecCapabilities::video("heif_container")
         .with_decode()
+        .with_encode()
         .with_intra_only(true);
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID))
             .capabilities(caps)
-            .decoder(make_decoder),
+            .decoder(make_decoder)
+            .encoder(make_encoder),
     );
 }
 

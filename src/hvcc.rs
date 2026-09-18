@@ -384,7 +384,7 @@ pub const NAL_PREFIX_SEI: u8 = 39;
 pub const NAL_SUFFIX_SEI: u8 = 40;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A record with the layout the corpus uses (3 arrays, one NAL each).

@@ -39,6 +39,11 @@
 //!   (still stream + sequence tracks) and the `"heif"` codec.
 //! * [`registry`] (`registry`) — [`register`] / the `oxideav_core::register!`
 //!   entry point, probe priority, extension hints.
+//! * [`writer`] — [`HeifWriter`] (MIAF-conformant still files from coded
+//!   payloads) and [`SequenceWriter`] (`msf1` image sequences).
+//! * [`encode`] (`registry`) — pixels → HEVC / AV1 items through the
+//!   oxideav encoders ([`encode::encode_still`]) and the `"heif"`
+//!   framework [`Encoder`](oxideav_core::Encoder).
 //!
 //! The standalone build (`default-features = false`) exposes all of the
 //! above — parsed structure and item bytes — without any framework or
@@ -59,11 +64,14 @@ pub mod meta;
 pub mod miaf;
 pub mod props;
 pub mod sequence;
+pub mod writer;
 
 #[cfg(feature = "registry")]
 pub mod decode;
 #[cfg(feature = "registry")]
 pub mod demux;
+#[cfg(feature = "registry")]
+pub mod encode;
 #[cfg(feature = "registry")]
 pub mod registry;
 
@@ -86,6 +94,8 @@ pub use miaf::{MiafProfile, MiafReport, MiafViolation};
 pub use decode::{decode_item, decode_primary, DecodedImage, ItemDecoder};
 #[cfg(feature = "registry")]
 pub use demux::{make_decoder, HeifCodec, HeifDemuxer};
+#[cfg(feature = "registry")]
+pub use encode::{encode_still, make_encoder, EncodeOptions, HeifEncoder, StillCodec};
 pub use props::{
     AuxC, AuxKind, Clap, Colr, CropRect, Imir, Irot, Ispe, ItemProperties, Pasp, Pixi, Property,
     PropertyEntry,
@@ -96,6 +106,7 @@ pub use registry::__oxideav_entry;
 #[cfg(feature = "registry")]
 pub use registry::{register, register_codecs, register_containers};
 pub use sequence::{Movie, Sample, SampleEntry, Track};
+pub use writer::{HeifWriter, SequenceWriter};
 
 /// Parse a HEIF file held in memory. Direct entry point of the
 /// standalone container surface; see [`HeifFile`] for what it exposes.

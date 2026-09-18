@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `writer`: `HeifWriter` — MIAF-conformant still files from coded
+  payloads (coded / `grid` / `iovl` / `iden` items, thumbnails, alpha
+  and depth auxiliaries with `auxC` + `prem`, Exif / XMP items, entity
+  groups, de-duplicated `ipco`, `ipma` essential flags, `iloc` v1/v2
+  with cm 0 / 1, `infe` v2/v3, MIAF §7.2.1.13 `mdat` ordering,
+  brand auto-selection); `SequenceWriter` — `msf1` / `hevc` image
+  sequences (`pict` track, `hvc1` / `av01` entry with `ccst`, sample
+  table, optional cover-image `meta`).
+- `encode` (`registry`): `encode_still` — pixels → HEVC items through
+  `oxideav-h265` (Annex B → `hvcC` + length-prefixed AU; `pcm`
+  lossless or `intra` at a QP) or AV1 items through `oxideav-av1`
+  (lossless key frame → `av1C` from the sequence header); padding +
+  `clap` for unaligned sizes, `grid` tiling, thumbnails, alpha
+  auxiliary, Exif / XMP, ICC, transformative properties as an `iden`
+  item; `HeifEncoder` — the `"heif"` framework encoder (frame in,
+  complete file out; options `codec` / `mode` / `qp` / `grid` /
+  `thumbnail`), registered alongside the decoder.
+- Tests: HEVC-lossless and AV1 round trips are pixel-exact, odd sizes
+  round-trip through `clap`, grid + thumbnail + alpha + metadata
+  round trip, transforms via `iden`, framework encoder → decoder, and
+  a black-box decoder reproduces the written file byte-exact.
+
 - `sequence`: `moov` / `trak` / `stbl` walk — `mvhd` / `tkhd` (flags,
   §7.2.1 matrix → rotation / mirror) / `mdhd` / `hdlr` / `stsd` visual
   sample entries (`hvcC`, `av1C`, `ccst`, `auxi`, `colr`, `clap`,
