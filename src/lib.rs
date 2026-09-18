@@ -1,36 +1,52 @@
 //! oxideav-heif — HEIF / HEIC / MIAF image container (ISO/IEC 23008-12,
 //! ISO/IEC 23000-22) for the oxideav framework.
 //!
-//! Bootstrap scaffold: the item model, derivations, property surface and
-//! registry integration land in the implementer rounds (see CHANGELOG).
+//! This crate owns the *container*: the ISOBMFF box tree, the `meta`
+//! item model (items, locations, references, properties, entity
+//! groups), derived images (`grid` / `iovl` / `iden`), auxiliaries
+//! (alpha / depth), thumbnails, Exif / XMP / ICC metadata and the
+//! `moov` image-sequence tracks. It never decodes an HEVC or AV1
+//! bitstream itself — coded items are handed to `oxideav-h265` /
+//! `oxideav-av1` through the registry when the default-on `registry`
+//! feature is enabled.
+//!
+//! # Layers
+//!
+//! * [`boxes`] — bounds-checked ISOBMFF box reader / writer helpers.
+//! * [`ftyp`] — brands and the container probe.
+//! * [`meta`] — the `meta` box tree model.
+//! * [`file`](mod@file) — [`HeifFile`]: whole-file parse + item payload resolution
+//!   across all three `iloc` construction methods.
+//!
+//! The standalone build (`default-features = false`) exposes the parsed
+//! structure and item bytes without any framework or codec dependency.
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
-/// Crate error type (placeholder until the parser lands).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HeifError {
-    /// The feature is not implemented yet.
-    NotImplemented(&'static str),
-}
+pub mod boxes;
+pub mod error;
+pub mod file;
+pub mod ftyp;
+pub mod meta;
 
-impl core::fmt::Display for HeifError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            HeifError::NotImplemented(what) => write!(f, "not implemented: {what}"),
-        }
-    }
-}
+pub use error::{HeifError, Result};
+pub use file::HeifFile;
+pub use ftyp::{BrandClass, FileType};
+pub use meta::{
+    EntityGroup, Extent, ItemInfo, ItemLocation, ItemReference, Meta, PropertyAssociation,
+    RawProperty,
+};
 
-impl std::error::Error for HeifError {}
-
-/// Parse a HEIF file. Placeholder until the container parser lands.
-pub fn parse(_bytes: &[u8]) -> Result<(), HeifError> {
-    Err(HeifError::NotImplemented("HEIF container parser"))
+/// Parse a HEIF file held in memory. Direct entry point of the
+/// standalone container surface; see [`HeifFile`] for what it exposes.
+pub fn parse(bytes: &[u8]) -> Result<HeifFile> {
+    HeifFile::parse(bytes)
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn scaffold_reports_not_implemented() {
+    fn empty_input_is_rejected() {
         assert!(super::parse(b"").is_err());
     }
 }
