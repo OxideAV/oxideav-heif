@@ -780,6 +780,7 @@ pub fn sample_bytes<'a>(file: &'a HeifFile, s: &Sample) -> Result<&'a [u8]> {
     Ok(&b[s.offset as usize..end])
 }
 
+#[doc(hidden)]
 /// Diagnostics helper: the entry type of a track's first sample entry.
 pub fn entry_type_str(t: &Track) -> String {
     t.primary_entry()

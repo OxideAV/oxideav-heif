@@ -43,6 +43,7 @@ pub const CODEC_ID: &str = "heif";
 /// Maximum file size the demuxer reads into memory.
 pub const MAX_FILE_BYTES: u64 = 1 << 32;
 
+#[doc(hidden)]
 /// Predict the output layout and size of an image item without
 /// decoding, by replaying the composition layer's promotion rules on
 /// the container metadata. Used for the still stream's parameters.
@@ -144,6 +145,7 @@ pub fn predict_output(node: &ImageNode) -> Result<(HeifPixelFormat, (u32, u32))>
     Ok((fmt, (w, h)))
 }
 
+#[doc(hidden)]
 /// The framework pixel format the `"heif"` decoder will emit for a
 /// predicted layout (applies the same 4:4:4 promotion as
 /// [`crate::HeifFrame::to_core`]).

@@ -368,6 +368,7 @@ impl<'a> Reader<'a> {
     }
 }
 
+#[doc(hidden)]
 /// Container boxes whose children are plain boxes (no header fields
 /// before the first child). `meta` and `iref` are FullBoxes and are
 /// handled by the walker explicitly; `stsd` / `dref` carry an entry
@@ -377,6 +378,7 @@ pub const PLAIN_CONTAINERS: &[&FourCc] = &[
     b"mvex", b"moof", b"traf", b"grpl", b"tref",
 ];
 
+#[doc(hidden)]
 /// One entry of a flattened box walk: the header plus its nesting depth.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WalkEntry {
@@ -386,6 +388,7 @@ pub struct WalkEntry {
     pub depth: usize,
 }
 
+#[doc(hidden)]
 /// Flatten the box tree of a whole file. Descends into
 /// [`PLAIN_CONTAINERS`], into `meta` (skipping its FullBox header) and
 /// into `iinf` (skipping the entry count). Errors inside a container are
@@ -456,6 +459,7 @@ fn walk_into(
     Ok(())
 }
 
+#[doc(hidden)]
 /// Serialize helpers used by the writer side.
 pub mod write {
     use super::FourCc;

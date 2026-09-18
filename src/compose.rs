@@ -28,6 +28,7 @@ use crate::error::{HeifError, Result};
 use crate::image::{Chroma, HeifFrame, HeifPixelFormat};
 use crate::props::{Clap, Colr, Imir, Irot, Property, PropertyEntry};
 
+#[doc(hidden)]
 /// Whether an operation touching an odd luma column (`x_odd`) or row
 /// (`y_odd`) in a `chroma`-subsampled picture needs a chroma sample
 /// that does not exist — the trigger for the implicit 4:4:4 promotion.

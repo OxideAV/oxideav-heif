@@ -81,6 +81,7 @@ impl Default for EncodeOptions {
     }
 }
 
+#[doc(hidden)]
 /// A coded picture ready to become an item.
 #[derive(Clone, Debug)]
 pub struct CodedPicture {
@@ -103,6 +104,7 @@ fn align_up(v: u32, n: u32) -> u32 {
     v.div_ceil(n) * n
 }
 
+#[doc(hidden)]
 /// Pad a frame to `w × h` by edge replication (encoders need aligned
 /// sizes; the visible extent is restored with `clap`).
 pub fn pad_frame(f: &HeifFrame, w: u32, h: u32) -> Result<HeifFrame> {
@@ -124,6 +126,7 @@ pub fn pad_frame(f: &HeifFrame, w: u32, h: u32) -> Result<HeifFrame> {
     Ok(out)
 }
 
+#[doc(hidden)]
 /// Convert a frame to 8-bit 4:2:0 (the layout the HEVC / AV1 encoders
 /// accept): monochrome gains neutral chroma, 4:2:2 / 4:4:4 chroma is
 /// box-averaged, depths above 8 are rounded down.
@@ -279,6 +282,7 @@ fn profile_compat_flags(profile_idc: u8) -> u32 {
     f
 }
 
+#[doc(hidden)]
 /// Encode one 8-bit 4:2:0 picture as an HEVC item. `w`/`h` must be
 /// multiples of 16 (the encoder's constraint); use [`pad_frame`].
 pub fn encode_hevc_picture(frame: &HeifFrame, mode: &str, qp: u8) -> Result<CodedPicture> {
@@ -321,6 +325,7 @@ pub fn encode_hevc_picture(frame: &HeifFrame, mode: &str, qp: u8) -> Result<Code
     })
 }
 
+#[doc(hidden)]
 /// Encode one 8-bit 4:2:0 picture as a lossless AV1 key frame item.
 /// Dimensions must be multiples of 8 in `8..=4096`.
 pub fn encode_av1_picture(frame: &HeifFrame) -> Result<CodedPicture> {

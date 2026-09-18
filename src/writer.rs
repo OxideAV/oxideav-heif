@@ -47,6 +47,7 @@ use crate::meta::{
 };
 use crate::props::{write::property_box, AuxC, Property, AUX_URN_ALPHA, AUX_URN_DEPTH};
 
+#[doc(hidden)]
 /// How an item's body is stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ItemBody {
@@ -62,6 +63,7 @@ pub enum ItemBody {
     Metadata(Vec<u8>),
 }
 
+#[doc(hidden)]
 /// One item queued for writing.
 #[derive(Clone, Debug)]
 pub struct WriterItem {
@@ -727,6 +729,7 @@ fn ensure_ispe(props: &mut Vec<(Property, bool)>, w: u32, h: u32) {
     }
 }
 
+#[doc(hidden)]
 /// One sample queued for an image-sequence track.
 #[derive(Clone, Debug)]
 pub struct SequenceSample {

@@ -154,6 +154,7 @@ impl<'r> ItemDecoder<'r> {
     }
 }
 
+#[doc(hidden)]
 /// The two coded item kinds this crate decodes.
 #[derive(Clone, Copy, Debug)]
 pub enum CodedKind<'a> {
@@ -163,6 +164,7 @@ pub enum CodedKind<'a> {
     Av1(&'a Av1Config),
 }
 
+#[doc(hidden)]
 /// Classification of a graph node for decoding.
 #[derive(Clone, Copy, Debug)]
 pub enum ItemKind<'a> {
@@ -172,6 +174,7 @@ pub enum ItemKind<'a> {
     Derived,
 }
 
+#[doc(hidden)]
 /// Classify a node: coded (with its decoder configuration) or derived.
 pub fn classify(node: &ImageNode) -> Result<ItemKind<'_>> {
     match &node.kind {
@@ -218,6 +221,7 @@ pub fn av1_layout(cfg: &Av1Config) -> Result<HeifPixelFormat> {
     HeifPixelFormat::new(chroma, cfg.bit_depth(), false)
 }
 
+#[doc(hidden)]
 /// Same-layout properties helper used by callers that only hold a
 /// property list (no graph node).
 pub fn layout_of(props: &ItemProperties) -> Option<HeifPixelFormat> {

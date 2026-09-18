@@ -481,6 +481,7 @@ pub fn is_derived_type(t: &FourCc) -> bool {
     )
 }
 
+#[doc(hidden)]
 /// Alias kept for readers of the item-reference vocabulary.
 pub const DIMG: FourCc = reference::DIMG;
 
