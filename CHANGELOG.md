@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `image`: crate-local planar `HeifFrame` / `HeifPixelFormat` (4:0:0 /
+  4:2:0 / 4:2:2 / 4:4:4 at 8–16 bits, optional alpha plane), bridged to
+  `oxideav_core::VideoFrame` + `PixelFormat` under `registry` (with a
+  neutral-chroma 4:4:4 promotion for layouts the framework lacks).
+- `decode` (`registry`): `ItemDecoder` — `hvc1` / `hev1` items through
+  `oxideav-h265` (`hvcC` extradata + length-prefixed access unit) and
+  `av01` items through `oxideav-av1` (`av1C` extradata + temporal unit),
+  via the direct factories or a caller-supplied `CodecRegistry`;
+  decoded pictures are validated against the announced layout and
+  cropped to `ispe`.
+- Tests: every corpus coded item decodes to its announced layout; the
+  nine plain-coded primaries match a black-box decoder byte-exact
+  (8-bit 4:2:0, monochrome, Main 10, 4:4:4).
+
 - Property surface (`props`): typed `ispe`, `pixi`, `colr` (nclx / ICC),
   `pasp`, `clap` (exact rational aperture resolution), `irot`, `imir`,
   `iscl`, `auxC` (both alpha / depth URN families), `hvcC`, `av1C`,

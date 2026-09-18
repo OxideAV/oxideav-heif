@@ -26,6 +26,10 @@
 //! * [`derived`] — `grid` / `iovl` / `iden` descriptors and the bounded
 //!   derivation graph ([`derived::build_graph`]).
 //! * [`miaf`] — MIAF constraints as typed checks ([`miaf::check`]).
+//! * [`image`] — the crate-local planar frame ([`HeifFrame`]) the
+//!   composition layer works on; bridged to `VideoFrame` with `registry`.
+//! * [`decode`] (`registry`) — coded items → pixels through
+//!   `oxideav-h265` / `oxideav-av1` ([`decode::ItemDecoder`]).
 //!
 //! The standalone build (`default-features = false`) exposes all of the
 //! above — parsed structure and item bytes — without any framework or
@@ -40,9 +44,13 @@ pub mod error;
 pub mod file;
 pub mod ftyp;
 pub mod hvcc;
+pub mod image;
 pub mod meta;
 pub mod miaf;
 pub mod props;
+
+#[cfg(feature = "registry")]
+pub mod decode;
 
 pub use av1c::Av1Config;
 pub use derived::{
@@ -52,11 +60,15 @@ pub use error::{HeifError, Result};
 pub use file::HeifFile;
 pub use ftyp::{BrandClass, FileType};
 pub use hvcc::HevcConfig;
+pub use image::{Chroma, HeifFrame, HeifPixelFormat, HeifPlane};
 pub use meta::{
     EntityGroup, Extent, ItemInfo, ItemLocation, ItemReference, Meta, PropertyAssociation,
     RawProperty,
 };
 pub use miaf::{MiafProfile, MiafReport, MiafViolation};
+
+#[cfg(feature = "registry")]
+pub use decode::ItemDecoder;
 pub use props::{
     AuxC, AuxKind, Clap, Colr, CropRect, Imir, Irot, Ispe, ItemProperties, Pasp, Pixi, Property,
     PropertyEntry,
