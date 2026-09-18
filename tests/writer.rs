@@ -108,8 +108,8 @@ fn grid_thumbnail_alpha_metadata_round_trip() {
     assert_eq!(primary.item_type, *b"grid");
     assert_eq!(
         meta.derivation_inputs(primary.id).len(),
-        6,
-        "80x64 with 32-px tiles: 3 columns x 2 rows"
+        2,
+        "80x64 with 64-px tiles (MIAF floor): 2 columns x 1 row"
     );
     let rep = check(&f, MiafProfile::Miaf).unwrap();
     assert!(rep.is_conformant(), "{:#?}", rep.violations);

@@ -47,7 +47,7 @@ pub struct EncodeOptions {
     /// HEVC intra QP (0..=51).
     pub qp: u8,
     /// Split the picture into a grid of `tile × tile` tiles (`grid`
-    /// derived item) when set.
+    /// derived item) when set; tiles are at least 64 pixels (MIAF).
     pub grid_tile: Option<u32>,
     /// Add a thumbnail whose largest dimension is this many pixels.
     pub thumbnail_max_dim: Option<u32>,
@@ -474,7 +474,9 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
     let mut w = HeifWriter::new();
     let master = match opts.grid_tile {
         Some(tile) if tile > 0 && (colour.width > tile || colour.height > tile) => {
-            let tile = align_up(tile, alignment(opts) * 2);
+            // MIAF §7.3.11.4.2: tiles are at least 64 pixels; keep them
+            // aligned to the codec block size on both axes.
+            let tile = align_up(tile.max(crate::miaf::MIN_TILE_EDGE), alignment(opts) * 2);
             let cols = colour.width.div_ceil(tile);
             let rows = colour.height.div_ceil(tile);
             if rows > 256 || cols > 256 {
