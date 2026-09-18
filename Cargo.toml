@@ -1,0 +1,28 @@
+[package]
+name = "oxideav-heif"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-heif"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust HEIF / HEIC / MIAF image container (ISO/IEC 23008-12, 23000-22) for oxideav — items, derivations (grid / overlay / identity), auxiliaries, properties, sequences; HEVC and AV1 items decoded through the oxideav registry"
+
+readme = "README.md"
+homepage = "https://github.com/OxideAV/oxideav-heif"
+keywords = ["multimedia", "image", "heif", "heic", "container"]
+categories = ["multimedia::encoding", "multimedia::images"]
+
+[dependencies]
+# Framework + codec deps are gated behind the default-on `registry`
+# feature. With the feature off the crate exposes the standalone
+# container parser + composition layer (crate-local HeifFrame /
+# HeifPixelFormat / HeifError) and never references the framework or a
+# codec crate.
+oxideav-core = { version = "0.1", optional = true }
+oxideav-h265 = { version = "0.0", optional = true }
+oxideav-av1 = { version = "0.1", optional = true }
+
+[features]
+default = ["registry"]
+registry = ["dep:oxideav-core", "dep:oxideav-h265", "dep:oxideav-av1"]
