@@ -81,7 +81,7 @@ fn compare(frame: &HeifFrame, nclx: &Colr, png: &Png) -> Diff {
     for y in 0..frame.height {
         for x in 0..frame.width {
             let rgb = to_rgb(frame, nclx, x, y);
-            let expect: Vec<f64> = (0..png.channels.min(3).max(1))
+            let expect: Vec<f64> = (0..png.channels.clamp(1, 3))
                 .map(|c| {
                     let c = if png.channels < 3 { 0 } else { c };
                     png.sample(x, y, c) as f64
