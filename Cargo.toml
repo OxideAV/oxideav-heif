@@ -12,6 +12,9 @@ readme = "README.md"
 homepage = "https://github.com/OxideAV/oxideav-heif"
 keywords = ["multimedia", "image", "heif", "heic", "container"]
 categories = ["multimedia::encoding", "multimedia::images"]
+# crates.io package: keep the integration tests and the fuzz sub-crate
+# (with its corpus) out of the upload.
+exclude = ["/tests", "/fuzz"]
 
 [dependencies]
 # Framework + codec deps are gated behind the default-on `registry`

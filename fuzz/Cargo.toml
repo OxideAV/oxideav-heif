@@ -1,0 +1,65 @@
+[package]
+name = "oxideav-heif-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# The container layer consumes unbounded attacker-controlled input:
+# box sizes, item counts, iloc widths / offsets / extents, ipma
+# indices, iref graphs (cycles, fan-out bombs), grid / iovl
+# descriptors (canvas sizes, offsets), sample tables (stsc / stsz /
+# stco expansion). Every target asserts "the call returns" — no panic,
+# abort or unbounded allocation — on arbitrary bytes.
+#
+#  * `heif_parse`    — ftyp + meta tree, item payload resolution for
+#                      every item (all three construction methods,
+#                      multi-extent, cm=2 chains), typed properties,
+#                      the derivation graph of every image item, the
+#                      MIAF checks and the bounded box walk.
+#  * `heif_compose`  — grid / iovl descriptor parse + pixel
+#                      composition on small synthetic tiles whose
+#                      geometry / alpha / offsets come from the input,
+#                      followed by the clap / irot / imir chain.
+#  * `heif_sequence` — moov / trak / stbl walk, sample-table expansion
+#                      and sample byte resolution, plus the track
+#                      matrix decode.
+#
+# The targets build the crate without its default `registry` feature:
+# the codec crates are never fuzzed here (they have their own
+# harnesses), and the container fuzz stays fast to build.
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-heif]
+path = ".."
+default-features = false
+
+# Prevent this fuzz package from being pulled into the umbrella
+# workspace at `crates/*` glob-resolve time.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "heif_parse"
+path = "fuzz_targets/heif_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "heif_compose"
+path = "fuzz_targets/heif_compose.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "heif_sequence"
+path = "fuzz_targets/heif_sequence.rs"
+test = false
+doc = false

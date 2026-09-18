@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fuzz sub-crate (`fuzz/`, standalone build): `heif_parse` (box walk,
+  meta tree, item resolution across every construction method, typed
+  properties, derivation graphs, MIAF checks), `heif_compose` (grid /
+  overlay descriptors + pixel composition on synthetic tiles, then the
+  clap / irot / imir chain) and `heif_sequence` (moov / trak / stbl
+  walk + sample resolution); seeded with this crate's own writer
+  output; daily `Fuzz` workflow. 150 s per target locally: no findings.
+- `Cargo.toml`: `exclude = ["/tests", "/fuzz"]` for the crates.io package.
+
 - `writer`: `HeifWriter` — MIAF-conformant still files from coded
   payloads (coded / `grid` / `iovl` / `iden` items, thumbnails, alpha
   and depth auxiliaries with `auxC` + `prem`, Exif / XMP items, entity
