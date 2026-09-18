@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `sequence`: `moov` / `trak` / `stbl` walk — `mvhd` / `tkhd` (flags,
+  §7.2.1 matrix → rotation / mirror) / `mdhd` / `hdlr` / `stsd` visual
+  sample entries (`hvcC`, `av1C`, `ccst`, `auxi`, `colr`, `clap`,
+  `pasp`) / `stts` / `ctts` (v0/v1) / `stsc` / `stsz` + `stz2` /
+  `stco` + `co64` / `stss` / `tref` / `elst`, bounded expansion.
+- `demux` (`registry`): `HeifDemuxer` — stream 0 = the still image as
+  one `"heif"` keyframe packet (predicted output geometry / pixel
+  format in the stream parameters), one stream per visual track with
+  the codec id resolved from the sample-entry type, `hvcC` / `av1C`
+  extradata, pts / dts / duration / sync flags, `seek_to` on sync
+  samples, `set_active_streams`, brand + track metadata; `HeifCodec`
+  — the `"heif"` decoder (whole file in, composed primary out).
+- `registry` (`registry`): `register` + `oxideav_core::register!`
+  entry point; probe on the HEIF-family brands at a priority below the
+  MP4 / MOV demuxers' so HEIF brands win ties while generic `isom` /
+  `qt  ` files stay with them; `.heic` / `.heif` / `.heics` / `.heifs`
+  / `.hif` / `.avif` / `.avifs` hints; the `"heif"` codec.
+- Tests: sequence sample table, the three track frames byte-exact
+  against a black-box decoder and within tolerance of the per-frame
+  oracles; probe → open → packet → decode of every bundle through a
+  `RuntimeContext`; probe-priority ordering against a generic `ftyp`
+  prober.
+
 - `compose`: pixel composition — `grid` (row-major tiling, right/bottom
   trim, tile alpha), `iovl` (sRGB `canvas_fill_value` converted with
   the H.273 matrix of the output `colr`, per-input offsets with

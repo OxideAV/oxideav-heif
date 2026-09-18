@@ -28,10 +28,10 @@ use crate::error::{HeifError, Result};
 use crate::image::{Chroma, HeifFrame, HeifPixelFormat};
 use crate::props::{Clap, Colr, Imir, Irot, Property, PropertyEntry};
 
-/// Whether an operation touching luma coordinate `x` / `y` in a
-/// `chroma`-subsampled picture needs a chroma sample that does not
-/// exist (odd position in a halved dimension).
-fn needs_444(chroma: Chroma, x_odd: bool, y_odd: bool) -> bool {
+/// Whether an operation touching an odd luma column (`x_odd`) or row
+/// (`y_odd`) in a `chroma`-subsampled picture needs a chroma sample
+/// that does not exist — the trigger for the implicit 4:4:4 promotion.
+pub fn needs_444(chroma: Chroma, x_odd: bool, y_odd: bool) -> bool {
     let (sx, sy) = chroma.shift();
     (sx == 1 && x_odd) || (sy == 1 && y_odd)
 }
