@@ -44,6 +44,8 @@
 //! * [`encode`] (`registry`) — pixels → HEVC / AV1 items through the
 //!   oxideav encoders ([`encode::encode_still`]) and the `"heif"`
 //!   framework [`Encoder`](oxideav_core::Encoder).
+//! * [`mux`] (`registry`) — the framework [`Muxer`](oxideav_core::Muxer)
+//!   writing image sequences from coded packets.
 //!
 //! The standalone build (`default-features = false`) exposes all of the
 //! above — parsed structure and item bytes — without any framework or
@@ -73,6 +75,8 @@ pub mod demux;
 #[cfg(feature = "registry")]
 pub mod encode;
 #[cfg(feature = "registry")]
+pub mod mux;
+#[cfg(feature = "registry")]
 pub mod registry;
 
 pub use av1c::Av1Config;
@@ -96,6 +100,8 @@ pub use decode::{decode_item, decode_primary, DecodedImage, ItemDecoder};
 pub use demux::{make_decoder, HeifCodec, HeifDemuxer};
 #[cfg(feature = "registry")]
 pub use encode::{encode_still, make_encoder, EncodeOptions, HeifEncoder, StillCodec};
+#[cfg(feature = "registry")]
+pub use mux::{open_muxer, HeifSequenceMuxer};
 pub use props::{
     AuxC, AuxKind, Clap, Colr, CropRect, Imir, Irot, Ispe, ItemProperties, Pasp, Pixi, Property,
     PropertyEntry,

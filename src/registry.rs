@@ -18,6 +18,7 @@ use oxideav_core::{CodecCapabilities, CodecId, CodecInfo, RuntimeContext};
 
 use crate::demux::{make_decoder, open, probe, CODEC_ID, CONTAINER_NAME};
 use crate::encode::make_encoder;
+use crate::mux::open_muxer;
 
 /// Resolution priority of the container probe (lower wins ties).
 pub const PROBE_PRIORITY: i32 = oxideav_core::DEFAULT_PRIORITY - 50;
@@ -26,8 +27,8 @@ pub const PROBE_PRIORITY: i32 = oxideav_core::DEFAULT_PRIORITY - 50;
 /// the AVIF family, which this container walks too).
 pub const EXTENSIONS: &[&str] = &["heic", "heif", "heics", "heifs", "hif", "avif", "avifs"];
 
-/// Register the container (demuxer + probe + extensions) and the
-/// `"heif"` still-image codec.
+/// Register the container (demuxer + sequence muxer + probe +
+/// extensions) and the `"heif"` still-image codec.
 pub fn register(ctx: &mut RuntimeContext) {
     register_containers(&mut ctx.containers);
     register_codecs(&mut ctx.codecs);
@@ -36,6 +37,7 @@ pub fn register(ctx: &mut RuntimeContext) {
 /// Container-only registration.
 pub fn register_containers(reg: &mut oxideav_core::ContainerRegistry) {
     reg.register_demuxer(CONTAINER_NAME, open);
+    reg.register_muxer(CONTAINER_NAME, open_muxer);
     reg.register_probe_with_priority(CONTAINER_NAME, probe, PROBE_PRIORITY);
     for ext in EXTENSIONS {
         reg.register_extension_with_priority(ext, CONTAINER_NAME, PROBE_PRIORITY);
@@ -94,6 +96,7 @@ mod tests {
             Some(CONTAINER_NAME)
         );
         assert!(ctx.containers.demuxer_names().any(|n| n == CONTAINER_NAME));
+        assert!(ctx.containers.muxer_names().any(|n| n == CONTAINER_NAME));
         assert!(ctx.codecs.has_decoder(&CodecId::new(CODEC_ID)));
         assert_eq!(
             ctx.containers.probe_priority(CONTAINER_NAME),

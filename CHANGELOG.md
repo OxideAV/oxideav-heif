@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `mux` (`registry`): `HeifSequenceMuxer` — the `"heif"` framework
+  `Muxer`: HEVC packets (Annex B from the oxideav encoder, or `hvcC` +
+  length-prefixed) or AV1 temporal units in, an `msf1` image-sequence
+  file out (`pict` track, `hvcC` / `av1C` + `ccst`, sample table with
+  durations and sync flags, first sync sample as the cover-image
+  `meta` still); registered next to the demuxer. Round trip (encode →
+  mux → demux → decode) is pixel-exact and MIAF-conformant.
+
 - Fuzz sub-crate (`fuzz/`, standalone build): `heif_parse` (box walk,
   meta tree, item resolution across every construction method, typed
   properties, derivation graphs, MIAF checks), `heif_compose` (grid /
