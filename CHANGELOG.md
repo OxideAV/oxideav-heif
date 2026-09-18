@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Property surface (`props`): typed `ispe`, `pixi`, `colr` (nclx / ICC),
+  `pasp`, `clap` (exact rational aperture resolution), `irot`, `imir`,
+  `iscl`, `auxC` (both alpha / depth URN families), `hvcC`, `av1C`,
+  `lhvC` / `avcC` (raw), `clli`, `mdcv`, `cclv`, `amve`, `rloc`, `lsel`,
+  `a1op`, `a1lx`, `rref`, `crtt`, `mdft`, `udes`, `altt`; §6.5.1
+  descriptive-before-transformative semantics, essential-unknown
+  detection, transformative chain output size, box serialization.
+- `hvcc`: standalone `HEVCDecoderConfigurationRecord` parse / byte-exact
+  reserialize, NAL arrays, length-prefixed NAL split / join, Annex B
+  split. `av1c`: `AV1CodecConfigurationRecord` parse / serialize.
+- `derived`: `grid` / `iovl` descriptors (16/32-bit fields), `iden`, and
+  the bounded derivation graph (`dimg` / `auxl` / `thmb` / `cdsc`, cycle
+  detection, depth / fan-out / node / canvas limits).
+- `miaf`: `MiafProfile` + `check` — §7 general requirements (brands,
+  handler, primary item role, construction methods, protection,
+  transformative essential / order / set, colr pairing, thumbnail
+  ladder, derivation chain order, grid tile rules, overlay input
+  agreement), §8 shared constraints, Annex A HEVC / AV1 codec limits.
+- Corpus tests: `HVCC` / `HEVC_FRAME_FOR_ITEM` trace equivalence,
+  per-bundle property expectations, graph shapes, MIAF conformance.
+
 - ISOBMFF box reader (`boxes`): bounds-checked headers (`size` 0 / 1 /
   `largesize` / `uuid`), FullBox prefix, `Reader` cursor, bounded
   recursive box walk, writer helpers.
