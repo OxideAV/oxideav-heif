@@ -12,7 +12,7 @@ use oxideav_heif::encode::{encode_still, EncodeOptions, StillCodec};
 use oxideav_heif::image::Chroma;
 use oxideav_heif::miaf::{check, MiafProfile};
 use oxideav_heif::props::{Imir, Irot, Property};
-use oxideav_heif::{HeifFile, HeifFrame, HeifPixelFormat};
+use oxideav_heif::{HeifFile, HeifFrame, HeifPixelFormat, HeifWriter};
 
 /// A deterministic 4:2:0 test picture with structure in every plane.
 fn picture(w: u32, h: u32) -> HeifFrame {
@@ -126,7 +126,7 @@ fn grid_thumbnail_alpha_metadata_round_trip() {
 }
 
 #[test]
-fn transforms_are_written_as_an_identity_item() {
+fn transforms_are_written_as_essential_properties_on_the_coded_item() {
     let src = picture(48, 32);
     let opts = EncodeOptions {
         transforms: vec![
@@ -137,7 +137,18 @@ fn transforms_are_written_as_an_identity_item() {
     };
     let bytes = encode_still(&src, &opts).unwrap();
     let f = HeifFile::parse(&bytes).unwrap();
-    assert_eq!(f.primary_item().unwrap().item_type, *b"iden");
+    // The transforms ride on the coded item itself (essential
+    // properties), the shape third-party readers honour; no `iden`
+    // wrapper is written.
+    let primary = f.primary_item().unwrap();
+    assert_eq!(primary.item_type, *b"hvc1");
+    let props =
+        oxideav_heif::props::ItemProperties::resolve(f.meta().unwrap(), primary.id).unwrap();
+    assert!(props.irot().is_some() && props.imir().is_some());
+    assert!(
+        props.transformative().all(|e| e.essential),
+        "transformative properties are essential"
+    );
     let rep = check(&f, MiafProfile::Miaf).unwrap();
     assert!(rep.is_conformant(), "{:#?}", rep.violations);
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
@@ -147,6 +158,48 @@ fn transforms_are_written_as_an_identity_item() {
     )
     .unwrap();
     assert_eq!(img.frame, expect);
+
+    // The identity-item path stays available for callers that want a
+    // transform on a derived item.
+    let mut w = HeifWriter::new();
+    let colour = oxideav_heif::encode::to_yuv420_8(&src).unwrap();
+    let pic = oxideav_heif::encode::encode_hevc_picture(&colour, "pcm", 0).unwrap();
+    let base = w.add_coded_item(
+        pic.item_type,
+        pic.data,
+        vec![
+            (pic.config.clone(), true),
+            (
+                Property::Ispe(oxideav_heif::props::Ispe {
+                    width: 48,
+                    height: 32,
+                }),
+                false,
+            ),
+            (
+                Property::Colr(oxideav_heif::props::Colr::MIAF_DEFAULT),
+                false,
+            ),
+        ],
+    );
+    w.set_hidden(base, true);
+    let iden = w.add_identity(
+        base,
+        vec![
+            (
+                Property::Ispe(oxideav_heif::props::Ispe {
+                    width: 48,
+                    height: 32,
+                }),
+                false,
+            ),
+            (Property::Irot(Irot { angle: 1 }), true),
+        ],
+    );
+    w.set_primary(iden);
+    let f = HeifFile::parse(&w.write_to_vec().unwrap()).unwrap();
+    assert_eq!(f.primary_item().unwrap().item_type, *b"iden");
+    assert!(check(&f, MiafProfile::Miaf).unwrap().is_conformant());
 }
 
 #[test]

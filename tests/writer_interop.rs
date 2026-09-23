@@ -33,6 +33,9 @@ use oxideav_heif::props::{Clap, Colr, CropRect, Imir, Irot, Property, PropertyEn
 use oxideav_heif::rgb::to_rgb;
 use oxideav_heif::{HeifFile, HeifWriter};
 
+/// A reader: render a HEIF file to a PNG, `None` on refusal / absence.
+type Render = fn(&Path, &Path) -> Option<()>;
+
 /// A structured 4:4:4 test picture (gradients, a box, a diagonal, a
 /// disc), so the encoder's own 4:2:0 conversion is exercised.
 fn picture(w: u32, h: u32, gray: bool, alpha: bool) -> HeifFrame {
@@ -42,11 +45,7 @@ fn picture(w: u32, h: u32, gray: bool, alpha: bool) -> HeifFrame {
     for y in 0..h {
         for x in 0..w {
             let (fx, fy) = (x as f64 / w.max(2) as f64, y as f64 / h.max(2) as f64);
-            let mut rgb = [
-                (fx * 255.0) as f64,
-                (fy * 255.0) as f64,
-                ((fx + fy) * 127.5),
-            ];
+            let mut rgb = [fx * 255.0, fy * 255.0, (fx + fy) * 127.5];
             if x >= w / 4 && x < w / 2 && y >= h / 4 && y < h / 2 {
                 rgb = [240.0, 240.0, 240.0];
             }
@@ -354,7 +353,7 @@ fn every_written_shape_reparses_and_round_trips() {
 #[test]
 fn third_party_readers_open_our_files() {
     let dir = scratch_dir("writer-interop");
-    let readers: &[(&str, fn(&Path, &Path) -> Option<()>)] = &[
+    let readers: &[(&str, Render)] = &[
         ("sips", sips_png),
         ("heif-convert", heif_convert_png),
         ("magick", magick_png),
