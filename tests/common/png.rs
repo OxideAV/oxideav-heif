@@ -62,11 +62,12 @@ pub fn read_png(bytes: &[u8]) -> Png {
     let bps = (bit_depth / 8) as usize;
     let bpp = channels * bps;
     let stride = width as usize * bpp;
-    let raw = compcol::vec::decompress_to_vec_capped::<compcol::zlib::Zlib>(
-        &idat,
-        ((stride + 1) * height as usize) as u64,
-    )
-    .expect("inflate");
+    // Uncapped inflate: the oracle PNGs are trusted test fixtures and
+    // reader output, so no decompression-bomb guard is needed, and the
+    // capped decoder rejects streams that inflate to exactly the
+    // scanline size (it cannot read the zlib trailer). The exact-length
+    // assert below pins the real size.
+    let raw = compcol::vec::decompress_to_vec::<compcol::zlib::Zlib>(&idat).expect("inflate");
     assert_eq!(raw.len(), (stride + 1) * height as usize, "inflated length");
     let mut prev = vec![0u8; stride];
     let mut cur = vec![0u8; stride];

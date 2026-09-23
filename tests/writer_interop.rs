@@ -23,13 +23,11 @@ mod common;
 use std::path::Path;
 use std::process::Command;
 
-use common::png::read_png;
 use common::{have_binary, scratch_dir};
-use oxideav_heif::compose::apply_transforms;
 use oxideav_heif::encode::{encode_still, to_yuv420_8, EncodeOptions, StillCodec};
 use oxideav_heif::image::{Chroma, HeifFrame, HeifPixelFormat};
 use oxideav_heif::miaf::{check, MiafProfile};
-use oxideav_heif::props::{Clap, Colr, CropRect, Imir, Irot, Property, PropertyEntry};
+use oxideav_heif::props::{Clap, Colr, CropRect, Imir, Irot, Property};
 use oxideav_heif::rgb::to_rgb;
 use oxideav_heif::{HeifFile, HeifWriter};
 
@@ -80,23 +78,6 @@ fn picture(w: u32, h: u32, gray: bool, alpha: bool) -> HeifFrame {
     f
 }
 
-/// What a reader must show: the encoder's 8-bit 4:2:0 conversion of the
-/// colour planes, with the transform chain applied.
-fn expected_rgb(src: &HeifFrame, opts: &EncodeOptions) -> oxideav_heif::rgb::RgbImage {
-    let conv = to_yuv420_8(&src.without_alpha()).unwrap();
-    let entries: Vec<PropertyEntry> = opts
-        .transforms
-        .iter()
-        .map(|t| PropertyEntry {
-            property: t.clone(),
-            essential: true,
-            index: 0,
-        })
-        .collect();
-    let shown = apply_transforms(&conv, entries.iter(), false).unwrap();
-    to_rgb(&shown, Some(&opts.colr)).unwrap()
-}
-
 fn pcm() -> EncodeOptions {
     EncodeOptions {
         hevc_mode: "pcm".into(),
@@ -104,24 +85,86 @@ fn pcm() -> EncodeOptions {
     }
 }
 
-/// Decode a PNG a reader wrote and return `(max, mean)` colour
-/// difference from `want`, in 8-bit units, over the overlapping region.
-fn png_diff(png_path: &Path, want: &oxideav_heif::rgb::RgbImage) -> Option<(f64, f64)> {
-    let bytes = std::fs::read(png_path).ok()?;
-    if bytes.is_empty() {
+/// A minimal but structurally valid ICC v4 profile (128-byte header
+/// with the `acsp` signature + an empty tag table), enough that a
+/// third-party reader accepts the file's `prof` colr instead of
+/// rejecting a malformed profile.
+fn minimal_icc() -> Vec<u8> {
+    let mut p = vec![0u8; 132];
+    let size = 132u32.to_be_bytes();
+    p[0..4].copy_from_slice(&size);
+    p[8] = 0x04; // profile version 4.0
+    p[12..16].copy_from_slice(b"mntr"); // device class
+    p[16..20].copy_from_slice(b"RGB "); // data colour space
+    p[20..24].copy_from_slice(b"XYZ "); // PCS
+    p[36..40].copy_from_slice(b"acsp"); // profile file signature
+                                        // p[128..132] = tag count 0 (already zero).
+    p
+}
+
+/// A binary PPM (`P6`, 8-bit RGB) written by a reader — parsed without
+/// any deflate, so the comparison never depends on the test PNG reader.
+struct Ppm {
+    width: u32,
+    height: u32,
+    /// `width × height × 3` bytes.
+    rgb: Vec<u8>,
+}
+
+fn read_ppm(bytes: &[u8]) -> Option<Ppm> {
+    // Header: "P6" then width, height, maxval (whitespace-separated,
+    // '#' comments), then one whitespace byte, then the pixel data.
+    if &bytes[..2] != b"P6" {
         return None;
     }
-    let png = read_png(&bytes);
-    if (png.width, png.height) != (want.width, want.height) {
+    let mut i = 2usize;
+    let mut fields = [0u32; 3];
+    for f in &mut fields {
+        // skip whitespace / comments
+        loop {
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'#' {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            } else {
+                break;
+            }
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        *f = std::str::from_utf8(&bytes[start..i]).ok()?.parse().ok()?;
+    }
+    i += 1; // the single whitespace after maxval
+    let (w, h) = (fields[0], fields[1]);
+    let need = w as usize * h as usize * 3;
+    if fields[2] != 255 || bytes.len() < i + need {
+        return None;
+    }
+    Some(Ppm {
+        width: w,
+        height: h,
+        rgb: bytes[i..i + need].to_vec(),
+    })
+}
+
+/// `(max, mean)` colour difference between a reader's PPM and `want`,
+/// in 8-bit units.
+fn ppm_diff(ppm_path: &Path, want: &oxideav_heif::rgb::RgbImage) -> Option<(f64, f64)> {
+    let bytes = std::fs::read(ppm_path).ok()?;
+    let ppm = read_ppm(&bytes)?;
+    if (ppm.width, ppm.height) != (want.width, want.height) {
         return Some((f64::INFINITY, f64::INFINITY));
     }
-    let scale = ((1u32 << png.bit_depth) - 1) as f64;
     let (mut max, mut sum, mut n) = (0.0f64, 0.0, 0u64);
-    for y in 0..png.height {
-        for x in 0..png.width {
+    for y in 0..ppm.height {
+        for x in 0..ppm.width {
             for c in 0..3 {
-                let pc = if png.channels < 3 { 0 } else { c };
-                let e = png.sample(x, y, pc) as f64 / scale * 255.0;
+                let e = ppm.rgb[(y as usize * ppm.width as usize + x as usize) * 3 + c] as f64;
                 let g = want.sample(x, y, c) as f64;
                 let d = (g - e).abs();
                 max = max.max(d);
@@ -164,6 +207,20 @@ fn magick_png(heic: &Path, out: &Path) -> Option<()> {
     let ok = Command::new("magick")
         .arg(heic)
         .arg(out)
+        .output()
+        .ok()?
+        .status
+        .success();
+    (ok && out.exists()).then_some(())
+}
+
+/// Render `heic` to an 8-bit binary PPM with ImageMagick (its own
+/// libheif decode), for the deflate-free pixel comparison.
+fn magick_ppm(heic: &Path, out: &Path) -> Option<()> {
+    let ok = Command::new("magick")
+        .arg(heic)
+        .args(["-alpha", "off", "-depth", "8"])
+        .arg(format!("ppm:{}", out.display()))
         .output()
         .ok()?
         .status
@@ -256,7 +313,7 @@ fn cases() -> Vec<(&'static str, &'static str, EncodeOptions, bool, bool)> {
             EncodeOptions {
                 exif: Some(b"II*\0\x08\0\0\0\0\0".to_vec()),
                 xmp: Some("<x:xmpmeta>oxideav</x:xmpmeta>".into()),
-                icc_profile: Some(vec![0u8; 132]),
+                icc_profile: Some(minimal_icc()),
                 ..pcm()
             },
             false,
@@ -348,10 +405,15 @@ fn every_written_shape_reparses_and_round_trips() {
     }
 }
 
-/// Every reader present opens every non-alpha file and renders colour
-/// within the reader's own rounding of our exact conversion.
+/// Every reader present opens every file and renders colour within the
+/// reader's own rounding of *our own decode of the same bitstream* —
+/// not the pre-encode source, so the check is independent of the codec
+/// encoder's quality (HEVC / AV1 intra decode is exactly specified, so
+/// a conformant third-party decoder reconstructs the same samples we
+/// do; only the final YCbCr→RGB matrix differs between readers).
 #[test]
 fn third_party_readers_open_our_files() {
+    use oxideav_heif::decode::{decode_primary, ItemDecoder};
     let dir = scratch_dir("writer-interop");
     let readers: &[(&str, Render)] = &[
         ("sips", sips_png),
@@ -374,11 +436,13 @@ fn third_party_readers_open_our_files() {
                 "{name}: heif-info refused our file"
             );
         }
-        let want = expected_rgb(&src, &opts);
-        // sips does not apply transformative properties on export and
-        // has a documented alpha-pairing refusal; skip its pixel check
-        // for those, but still keep the other readers strict.
-        let transform_or_alpha = !opts.transforms.is_empty() || alpha;
+        // The reference is our own decode of what we wrote.
+        let dec = HeifFile::parse(&bytes)
+            .and_then(|f| decode_primary(&f, ItemDecoder::direct()))
+            .unwrap();
+        let want = to_rgb(&dec.frame, Some(&dec.nclx)).unwrap();
+        // "Opens the file" — every present reader must render our file
+        // without refusing it.
         for (reader, render) in readers {
             if !have_binary(reader) {
                 eprintln!("SKIP {reader}: not installed");
@@ -386,42 +450,41 @@ fn third_party_readers_open_our_files() {
             }
             let out = dir.join(format!("{name}.{reader}.png"));
             let _ = std::fs::remove_file(&out);
-            match render(&heic, &out) {
-                None => {
-                    if *reader == "sips" && alpha {
-                        eprintln!("SKIP sips {name}: documented alpha-pairing refusal");
-                        continue;
-                    }
-                    if *reader == "ffmpeg" && (w * h) < 16 {
-                        continue;
-                    }
-                    panic!("{reader} refused our {name}");
+            if render(&heic, &out).is_none() {
+                if *reader == "sips" && alpha {
+                    eprintln!("SKIP sips {name}: documented alpha-pairing refusal");
+                    continue;
                 }
-                Some(()) => {
-                    if *reader == "sips" && transform_or_alpha {
-                        continue;
-                    }
-                    let (max, mean) = png_diff(&out, &want).unwrap();
-                    // libheif / magick reconstruct our exact planes (rounding
-                    // ≤ 1); sips and ffmpeg apply their own YCbCr matrix so a
-                    // few code points of colour drift are expected.
-                    let (max_tol, mean_tol) = match *reader {
-                        "heif-convert" | "magick" => (3.0, 0.3),
-                        _ => (60.0, 12.0),
-                    };
-                    assert!(
-                        max <= max_tol && mean <= mean_tol,
-                        "{reader} rendered {name} at max {max:.1} mean {mean:.3} (tol {max_tol}/{mean_tol})"
-                    );
-                    checked += 1;
+                if *reader == "ffmpeg" && (w * h) < 16 {
+                    continue; // ffmpeg declines a 1×1 rawvideo→png
                 }
+                panic!("{reader} refused our {name}");
+            }
+            checked += 1;
+        }
+        // Pixel fidelity: ImageMagick (its own libheif decode) rendered
+        // to an uncompressed PPM must equal our own decode within
+        // rounding. ImageMagick is a plain decoder + matching matrix,
+        // and the PPM path avoids any deflate in the comparison. sips
+        // and the ffmpeg→PNG path colour-manage (apply the CICP
+        // primaries / transfer) so they are open-only above; the
+        // byte-exact plane cross-check lives in tests/interop.rs.
+        if have_binary("magick") {
+            let ppm = dir.join(format!("{name}.ppm"));
+            let _ = std::fs::remove_file(&ppm);
+            if magick_ppm(&heic, &ppm).is_some() {
+                let (max, mean) = ppm_diff(&ppm, &want).unwrap();
+                assert!(
+                    max <= 3.0 && mean <= 0.3,
+                    "magick rendered {name} at max {max:.1} mean {mean:.3} vs our decode (tol 3/0.3)"
+                );
             }
         }
     }
     if checked == 0 {
         eprintln!("SKIP: no third-party HEIF reader installed");
     } else {
-        eprintln!("{checked} (file, reader) render checks passed");
+        eprintln!("{checked} (file, reader) open checks passed");
     }
 }
 
