@@ -65,6 +65,7 @@ pub mod image;
 pub mod meta;
 pub mod miaf;
 pub mod props;
+pub mod rgb;
 pub mod sequence;
 pub mod writer;
 
@@ -111,6 +112,7 @@ pub use props::{
 pub use registry::__oxideav_entry;
 #[cfg(feature = "registry")]
 pub use registry::{register, register_codecs, register_containers};
+pub use rgb::{to_rgb, RgbImage};
 pub use sequence::{Movie, Sample, SampleEntry, Track};
 pub use writer::{HeifWriter, SequenceWriter};
 
