@@ -333,6 +333,52 @@ pub struct DecodedImage {
     pub thumbnail_ids: Vec<u32>,
     /// The item's typed properties (for `pixi`, `clli`, `mdcv`, …).
     pub properties: ItemProperties,
+    /// The ISO 21496-1 gain map attached through a `tmap` item whose
+    /// first `dimg` input is this image (or this image itself when it
+    /// is the `tmap`), decoded but not applied: [`DecodedImage::frame`]
+    /// stays the baseline rendition. Apply with
+    /// [`DecodedImage::apply_gain_map`].
+    pub gain_map: Option<GainMapAttachment>,
+}
+
+/// A decoded gain map and its metadata (see [`DecodedImage::gain_map`]).
+#[derive(Clone, Debug)]
+pub struct GainMapAttachment {
+    /// The `tmap` item.
+    pub tmap_item_id: u32,
+    /// The gain-map image item (second `dimg` input of the `tmap`).
+    pub gain_map_item_id: u32,
+    /// The parsed `tmap` payload.
+    pub metadata: crate::gainmap::GainMapMetadata,
+    /// The gain map's output image.
+    pub frame: HeifFrame,
+    /// The gain-map item's own `nclx` (its YCbCr matrix), when any.
+    pub colr: Option<Colr>,
+    /// The alternate image's colour information (the `tmap` item's
+    /// `nclx`), when any.
+    pub alternate_colr: Option<Colr>,
+}
+
+impl DecodedImage {
+    /// Apply the attached gain map for a target HDR headroom (log₂ of
+    /// the display's HDR / SDR white ratio; the base headroom leaves
+    /// the base untouched, the alternate headroom applies the map
+    /// fully). Linear RGB in the gain-map application space.
+    pub fn apply_gain_map(&self, h_target: f64) -> Result<crate::gainmap::LinearRgbImage> {
+        let gm = self
+            .gain_map
+            .as_ref()
+            .ok_or_else(|| HeifError::invalid("image carries no gain map"))?;
+        crate::gainmap::apply_gain_map(
+            &self.frame,
+            Some(&self.nclx),
+            &gm.frame,
+            gm.colr.as_ref(),
+            gm.alternate_colr.as_ref(),
+            &gm.metadata,
+            h_target,
+        )
+    }
 }
 
 impl DecodedImage {
@@ -464,6 +510,7 @@ pub fn decode_item(
         None => (Colr::MIAF_DEFAULT, false),
     };
     let icc_profile = node.properties.icc_profile().map(<[u8]>::to_vec);
+    let gain_map = find_gain_map(file, &node, &mut session)?;
     let mut exif = None;
     let mut xmp = None;
     for m in &node.metadata {
@@ -485,7 +532,58 @@ pub fn decode_item(
         xmp,
         thumbnail_ids: node.thumbnails.iter().map(|t| t.item.id).collect(),
         properties: node.properties.clone(),
+        gain_map,
     })
+}
+
+/// Locate and decode the gain map of `node`: the node itself when it
+/// is a `tmap`, else a `tmap` item whose first `dimg` input is the
+/// node. The `tmap` body is the ISO 21496-1 C.2 metadata; its second
+/// input is the gain-map image. An unparsable / unsupported payload
+/// yields `None` (C.2.3: fall back to the base image).
+fn find_gain_map(
+    file: &HeifFile,
+    node: &ImageNode,
+    session: &mut Session<'_, '_>,
+) -> Result<Option<GainMapAttachment>> {
+    let meta = file.meta()?;
+    let (tmap_id, body, inputs): (u32, Vec<u8>, Vec<u32>) = match &node.kind {
+        ImageKind::ToneMap(body) => (
+            node.item.id,
+            body.clone(),
+            meta.derivation_inputs(node.item.id),
+        ),
+        _ => {
+            let Some(t) = meta.items.iter().find(|it| {
+                it.item_type == crate::meta::ITEM_TYPE_TMAP
+                    && meta.derivation_inputs(it.id).first() == Some(&node.item.id)
+            }) else {
+                return Ok(None);
+            };
+            (
+                t.id,
+                file.item_data_owned(t.id)?,
+                meta.derivation_inputs(t.id),
+            )
+        }
+    };
+    if inputs.len() != 2 {
+        return Ok(None);
+    }
+    let Ok(metadata) = crate::gainmap::GainMapMetadata::parse_tmap_body(&body) else {
+        return Ok(None);
+    };
+    let gain_node = build_graph(file, inputs[1])?;
+    let frame = session.output(&gain_node)?;
+    let tmap_props = ItemProperties::resolve(meta, tmap_id)?;
+    Ok(Some(GainMapAttachment {
+        tmap_item_id: tmap_id,
+        gain_map_item_id: inputs[1],
+        metadata,
+        frame,
+        colr: gain_node.properties.nclx().cloned(),
+        alternate_colr: tmap_props.nclx().cloned(),
+    }))
 }
 
 /// Decode the primary item (`pitm`).

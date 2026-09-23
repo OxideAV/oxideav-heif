@@ -39,19 +39,21 @@ one stream per image-sequence track (`"h265"` / `"av1"` packets with
 | `meta` tree | `hdlr`, `pitm` v0/v1, `iinf` v0/v1 + `infe` v2/v3 (`mime` / `uri ` tails, hidden flag), `iloc` v0–v2 (all widths, construction methods 0 / 1 / 2, multi-extent, zero-length "to end"), `iref` v0/v1, `iprp` / `ipco` / `ipma` v0/v1 (7 / 15-bit indices, essential flag, index-0 placeholders), `idat`, `grpl`, `dinf` / `dref`, `ipro` |
 | Properties | `ispe` `pixi` `colr` (nclx + `rICC` / `prof`) `pasp` `clap` `irot` `imir` `iscl` `auxC` `hvcC` `av1C` `lhvC`\* `avcC`\* `clli` `mdcv` `cclv` `amve` `rloc` `lsel` `a1op` `a1lx` `rref` `crtt` `mdft` `udes` `altt`; §6.5.1 descriptive-before-transformative order, unrecognised-essential refusal, exact rational `clap` |
 | Coded items | `hvc1` / `hev1` → oxideav-h265 (`hvcC` extradata, length-prefixed AU); `av01` → oxideav-av1 (`av1C` extradata, temporal unit); 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8–16 bit; via direct factories or a caller `CodecRegistry` |
-| Derived images | `grid` (row-major, trim, tile alpha), `iovl` (sRGB fill via the H.273 matrix of the output `colr`, offsets, clipping, §6.9.1 straight / pre-multiplied alpha, translucent canvas → output alpha), `iden`, `tmap`\* (base image only) |
+| Derived images | `grid` (row-major, trim, tile alpha), `iovl` (sRGB fill via the H.273 matrix of the output `colr`, offsets, clipping, §6.9.1 straight / pre-multiplied alpha, translucent canvas → output alpha), `iden`, `tmap` (base image by default; gain map decoded and attached, see Gain maps) |
 | Transforms | `clap` → `irot` → `imir` → `iscl` in `ipma` order; `iscl` (§6.5.13) resizes by the exact ceil-ratio with an area/bilinear resampler; sub-sample chroma positions promote to 4:4:4 (MIAF §7.3.6.7) |
 | Auxiliaries | alpha (`urn:mpeg:mpegB:cicp:systems:auxiliary:alpha` and `urn:mpeg:hevc:2015:auxid:1`, resized / depth-matched, `prem`), depth (both URN families, surfaced as a frame) |
 | Metadata | thumbnails (`thmb`), Exif (offset word resolved), XMP, ICC, effective `nclx` (MIAF default when absent), `pixi` / `clli` / `mdcv` / … via the typed property list |
 | MIAF | `MiafProfile` + `check`: §7 general requirements, §8 shared constraints, Annex A HEVC / AV1 codec limits — typed `MiafViolation`s with clause numbers |
 | Image sequences | `moov` / `trak` / `stbl` (`stts` `ctts` `stsc` `stsz` `stz2` `stco` `co64` `stss` `tref` `elst`), visual sample entries (`hvcC` `av1C` `ccst` `auxi` `colr` `clap` `pasp`), §7.2.1 matrix → rotation / mirror; framework `Demuxer` with pts / dts / sync / seek |
 | Writer | `HeifWriter` (coded / grid / overlay / identity items, thumbnails, alpha / depth, Exif / XMP, entity groups, de-duplicated `ipco`, MIAF `mdat` order, brand auto-selection); `SequenceWriter` (`msf1` / `hevc`, `pict` track + `ccst`, cover-image `meta`) |
+| Gain maps | ISO 21496-1: `GainMapMetadata` (C.2 payload of the `tmap` item, version-prefixed), `DecodedImage::gain_map` (decoded gain-map item + metadata + alternate `colr`), opt-in `apply_gain_map(h_target)` → linear RGB in the application space (Formulas 1–3, §6.2.2 resampling, Annex B primaries conversion, H.273 transfers 1/6/8/13/14/15/16/18); matches a black-box tone-mapper within 1 code at every headroom on mono / RGB / half-size / BT.2020 gain maps |
 | Colour | `rgb::to_rgb`: YCbCr → RGB(A) with the item `colr` matrix / range (H.273), identity (GBR), monochrome, alpha carried; the renderer step over the composed frame |
 | Encoder (`registry`) | `encode_still`: HEVC (lossless `pcm` or CABAC `intra` at a QP) or lossless AV1 items, padding + `clap`, grid tiling (MIAF 64-px floor), thumbnails, alpha (per-codec `auxC` URN, single-channel `pixi`, one `hvcC` per item), Exif / XMP / ICC, transforms as essential properties on the coded item; `"heif"` framework `Encoder` (frame in, file out; options `codec` / `mode` / `qp` / `grid` / `thumbnail`) |
 | Fuzz | `fuzz/`: `heif_parse`, `heif_compose`, `heif_sequence` (standalone build), daily workflow |
 
-\* `lhvC` / `avcC` items have no decoder here; `tmap` gain maps decode
-to the base image. `iscl` is now applied at composition (§6.5.13).
+\* `lhvC` / `avcC` items have no decoder here. `iscl` is applied at
+composition (§6.5.13); `tmap` gain maps are applied on request
+(`DecodedImage::apply_gain_map`), the default output stays the base.
 
 ## Corpus scorecard (`docs/image/heif/fixtures/`, 14 bundles)
 
@@ -100,13 +102,29 @@ rounding with exact alpha; every file is MIAF-conformant.
 **Writer** (`tests/writer_interop.rs`): every shape `encode_still`
 writes re-parses, is MIAF-conformant, round-trips, and — when the
 binary is present — is opened by `sips`, `heif-convert`, `magick`,
-`ffmpeg` and `heif-info`. libheif and ImageMagick reconstruct our
-exact planes (≤ 1 code, transforms included). Known divergence: Apple
-ImageIO refuses a file whose master **and** alpha are both HEVC
-streams from the oxideav encoder, while accepting either paired with a
-third-party stream — a codec-layer (parameter-set) interaction, tracked
-as a cross-crate item; libheif / magick / ffmpeg decode those files
-correctly.
+`ffmpeg` and `heif-info`, alpha files included. ImageMagick (its own
+libheif decode) reproduces our decode within 1 code, transforms
+included. Apple ImageIO refuses a file whose two items carry
+byte-identical HEVC parameter sets, so the alpha auxiliary is coded
+with a distinct SPS (CTB 32 for CABAC intra, an extra clapped row band
+for PCM). Known divergence: `sips` takes the sample range from the
+bitstream VUI, which the oxideav HEVC stream does not write, so its
+render of our full-range streams is a video-range expansion (a codec
+item; libheif / magick / ffmpeg render them correctly).
+
+**Gain maps** (`tests/gainmap.rs`, `tests/fixtures/gainmap/`): four
+AVIF files from a black-box gain-map tool (monochrome, RGB, half-size
+and BT.2020-application-space gain maps, base headroom 0 → alternate
+4) decode with the `tmap` metadata matching the tool's own report, and
+`apply_gain_map` at headrooms 0 / 2 / 4 matches the tool's tone-mapped
+renditions within 1 code (2 on the half-size resample).
+
+`tmap` carriage note: ISO 21496-1 C.3 delegates the container mapping
+to the file format and C.4 covers JPEG only; the staged HEIF 3rd ed. /
+MIAF 2nd ed. texts contain no `tmap` clause. The layout this crate
+reads — `tmap` item with `dimg → [baseline, gain map]`, body = one
+`version` byte + the C.2 structure, the `tmap` item's `colr` = the
+alternate image's colour — is what every producer measured writes.
 
 ## Standalone build
 

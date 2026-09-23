@@ -28,6 +28,8 @@
 //! * [`miaf`] — MIAF constraints as typed checks ([`miaf::check`]).
 //! * [`image`] — the crate-local planar frame ([`HeifFrame`]) the
 //!   composition layer works on; bridged to `VideoFrame` with `registry`.
+//! * [`gainmap`] — ISO 21496-1 gain-map metadata (`tmap` payload) and
+//!   the opt-in application producing the alternate rendition.
 //! * [`compose`] — pixel composition: grid / overlay / identity
 //!   derivations, `clap` / `irot` / `imir`, alpha attachment.
 //! * [`sequence`] — `moov` / `trak` / `stbl` image-sequence tracks
@@ -60,6 +62,7 @@ pub mod derived;
 pub mod error;
 pub mod file;
 pub mod ftyp;
+pub mod gainmap;
 pub mod hvcc;
 pub mod image;
 pub mod meta;
@@ -87,6 +90,7 @@ pub use derived::{
 pub use error::{HeifError, Result};
 pub use file::HeifFile;
 pub use ftyp::{BrandClass, FileType};
+pub use gainmap::{apply_gain_map, GainMapMetadata, LinearRgbImage};
 pub use hvcc::HevcConfig;
 pub use image::{Chroma, HeifFrame, HeifPixelFormat, HeifPlane};
 pub use meta::{

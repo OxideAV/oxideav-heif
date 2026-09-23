@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `gainmap` (both builds): ISO 21496-1 gain maps — `GainMapMetadata`
+  (C.2 payload, `tmap` version prefix, parse / serialise), H.273
+  transfer + primaries helpers, `apply_gain_map` (Formulas 1–3, §6.2.2
+  resampling, Annex B application space) → `LinearRgbImage` with
+  `encode`; `DecodedImage::gain_map` attaches the decoded gain-map
+  item (from a `tmap` whose first input is the image, or the `tmap`
+  itself) and `DecodedImage::apply_gain_map(h_target)` applies it on
+  request. The default output stays the baseline image.
+- `encode` (`registry`): the alpha auxiliary is coded with parameter
+  sets distinct from the master's (CTB 32 for CABAC intra; an extra
+  clapped 16-row band for PCM) — Apple ImageIO refuses two items with
+  byte-identical VPS / SPS / PPS; it now opens every written alpha file.
+
 - `rgb` (both builds): `to_rgb` / `RgbImage` — YCbCr → RGB(A) of a
   composed frame with the item `colr` matrix / range (H.273), the
   identity (GBR) matrix, monochrome and any alpha plane; the renderer
