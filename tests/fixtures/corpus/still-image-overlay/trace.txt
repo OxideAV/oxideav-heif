@@ -1,0 +1,53 @@
+BOX	type=ftyp	size=24	offset=0
+BOX	type=meta	size=829	offset=24
+BOX	type=hdlr	size=33	offset=36
+BOX	type=idat	size=30	offset=69
+BOX	type=iloc	size=96	offset=99
+BOX	type=iinf	size=98	offset=195
+BOX	type=infe	size=21	offset=209
+BOX	type=infe	size=21	offset=230
+BOX	type=infe	size=21	offset=251
+BOX	type=infe	size=21	offset=272
+BOX	type=pitm	size=14	offset=293
+BOX	type=iprp	size=504	offset=307
+BOX	type=ipco	size=456	offset=315
+BOX	type=hvcC	size=121	offset=323
+BOX	type=ispe	size=20	offset=444
+BOX	type=pixi	size=14	offset=464
+BOX	type=hvcC	size=120	offset=478
+BOX	type=ispe	size=20	offset=598
+BOX	type=hvcC	size=114	offset=618
+BOX	type=auxC	size=39	offset=732
+BOX	type=ipma	size=40	offset=771
+BOX	type=iref	size=42	offset=811
+BOX	type=auxl	size=14	offset=823
+BOX	type=dimg	size=16	offset=837
+BOX	type=mdat	size=1651	offset=853
+PITM	item_id=4
+ITEM_INFO	item_id=1	type=hvc1	name=''
+ITEM_INFO	item_id=2	type=hvc1	name=''
+ITEM_INFO	item_id=3	type=hvc1	name=''
+ITEM_INFO	item_id=4	type=iovl	name=''
+IREF	from_id=3	to_id=2	ref_type=auxl
+IREF	from_id=4	to_id=1	ref_type=dimg
+IREF	from_id=4	to_id=2	ref_type=dimg
+IPRP_PROP	index=1	type=hvcC	size=121
+IPRP_PROP	index=2	type=ispe	size=20
+IPRP_PROP	index=3	type=pixi	size=14
+IPRP_PROP	index=4	type=hvcC	size=120
+IPRP_PROP	index=5	type=ispe	size=20
+IPRP_PROP	index=6	type=hvcC	size=114
+IPRP_PROP	index=7	type=auxC	size=39
+IPRP_ASSOC	item_id=1	property_indices=1,2,3
+IPRP_ASSOC	item_id=2	property_indices=4,5,3
+IPRP_ASSOC	item_id=3	property_indices=6,5,3,7
+IPRP_ASSOC	item_id=4	property_indices=2,3
+HVCC	item_id=1	profile=3	tier=0	level=60	chroma=yuv420	bd_luma=8	bd_chroma=8	num_arrays=3	num_nals=3
+HEVC_FRAME_FOR_ITEM	item_id=1	dims=256x256	qp=N/A
+HVCC	item_id=2	profile=3	tier=0	level=30	chroma=yuv420	bd_luma=8	bd_chroma=8	num_arrays=3	num_nals=3
+HEVC_FRAME_FOR_ITEM	item_id=2	dims=64x64	qp=N/A
+HVCC	item_id=3	profile=4	tier=0	level=30	chroma=mono	bd_luma=8	bd_chroma=8	num_arrays=3	num_nals=3
+HEVC_FRAME_FOR_ITEM	item_id=3	dims=64x64	qp=N/A
+OVERLAY	item_id=4	fill_color=16384,16384,16384,65535	refs=1,2	output_dims=256x256
+DERIVED_IMAGE	item_id=4	ref_type=dimg
+ALPHA_PLANE	separate_item_id=3	attached_to=2

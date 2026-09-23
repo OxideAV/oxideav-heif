@@ -8,7 +8,7 @@ mod common;
 use std::path::Path;
 use std::process::Command;
 
-use common::{fixture_bytes, fixture_root, BUNDLES};
+use common::{all_bundles, fixture_bytes, fixture_root};
 use oxideav_heif::decode::ItemDecoder;
 use oxideav_heif::derived::build_primary_graph;
 use oxideav_heif::image::Chroma;
@@ -53,10 +53,7 @@ const PLAIN_CODED: &[&str] = &[
 
 #[test]
 fn every_coded_item_decodes_to_its_announced_layout() {
-    let Some(root) = fixture_root() else {
-        return;
-    };
-    for bundle in BUNDLES {
+    for (root, bundle) in all_bundles() {
         let f = HeifFile::parse(&fixture_bytes(&root, bundle)).unwrap();
         let node = build_primary_graph(&f).unwrap();
         for coded in node.coded_items() {
@@ -94,9 +91,6 @@ fn every_coded_item_decodes_to_its_announced_layout() {
 
 #[test]
 fn coded_primaries_match_black_box_decoder_byte_exact() {
-    let Some(root) = fixture_root() else {
-        return;
-    };
     if Command::new("ffmpeg").arg("-version").output().is_err() {
         eprintln!("ffmpeg not installed; skipping black-box cross-check");
         return;
@@ -104,7 +98,10 @@ fn coded_primaries_match_black_box_decoder_byte_exact() {
     let tmp = std::env::temp_dir().join(format!("oxideav-heif-decode-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     let mut checked = 0;
-    for bundle in PLAIN_CODED {
+    for (root, bundle) in all_bundles()
+        .into_iter()
+        .filter(|(_, b)| PLAIN_CODED.contains(b))
+    {
         let frame = decode_primary_coded(&root, bundle).tight();
         let Some(raw) = ffmpeg_raw(&root, bundle, &tmp.join(format!("{bundle}.raw"))) else {
             eprintln!("{bundle}: black-box decoder refused the file; skipping");

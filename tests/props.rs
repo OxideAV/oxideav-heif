@@ -5,7 +5,7 @@
 mod common;
 
 use common::{
-    assert_trace_subset_eq, fixture_bytes, fixture_root, read_trace, TraceEvent, BUNDLES,
+    all_bundles, assert_trace_subset_eq, fixture_bytes, fixture_root, read_trace, TraceEvent,
 };
 use oxideav_heif::derived::{build_primary_graph, ImageKind};
 use oxideav_heif::meta::ITEM_TYPE_HVC1;
@@ -59,10 +59,7 @@ fn hvcc_events(f: &HeifFile) -> Vec<TraceEvent> {
 
 #[test]
 fn hvcc_fields_match_corpus_traces() {
-    let Some(root) = fixture_root() else {
-        return;
-    };
-    for bundle in BUNDLES {
+    for (root, bundle) in all_bundles() {
         let f = HeifFile::parse(&fixture_bytes(&root, bundle)).unwrap();
         let expected = read_trace(&root, bundle);
         let got = hvcc_events(&f);
@@ -72,10 +69,7 @@ fn hvcc_fields_match_corpus_traces() {
 
 #[test]
 fn hvcc_records_reserialize_byte_exact_and_carry_parameter_sets() {
-    let Some(root) = fixture_root() else {
-        return;
-    };
-    for bundle in BUNDLES {
+    for (root, bundle) in all_bundles() {
         let f = HeifFile::parse(&fixture_bytes(&root, bundle)).unwrap();
         let meta = f.meta().unwrap();
         for it in meta.items.iter().filter(|i| i.item_type == ITEM_TYPE_HVC1) {
@@ -135,17 +129,19 @@ fn per_bundle_property_expectations() {
     assert_eq!(icc.len(), 2576);
     assert_eq!(&icc[36..40], b"acsp", "ICC signature");
 
-    // nclx on the typical photo.
-    let f = load("single-image-512x512-q60");
-    let p = props_of(&f, f.meta().unwrap().primary_item_id.unwrap());
-    match p.nclx() {
-        Some(Colr::Nclx { matrix, .. }) => assert!(*matrix <= 14),
-        other => panic!("expected nclx, got {other:?}"),
+    // nclx on the typical photo (docs superset only: the bundle is not vendored).
+    if let Some(docs) = common::docs_root() {
+        let f = HeifFile::parse(&fixture_bytes(&docs, "single-image-512x512-q60")).unwrap();
+        let p = props_of(&f, f.meta().unwrap().primary_item_id.unwrap());
+        match p.nclx() {
+            Some(Colr::Nclx { matrix, .. }) => assert!(*matrix <= 14),
+            other => panic!("expected nclx, got {other:?}"),
+        }
+        // The corpus producer writes a single-channel pixi even for 4:2:0
+        // colour items; only the depth is asserted.
+        let pixi = p.pixi().unwrap();
+        assert_eq!(pixi.max_bit_depth(), 8);
     }
-    // The corpus producer writes a single-channel pixi even for 4:2:0
-    // colour items; only the depth is asserted.
-    let pixi = p.pixi().unwrap();
-    assert_eq!(pixi.max_bit_depth(), 8);
 
     // 10-bit: pixi and hvcC agree.
     let f = load("still-10bit-main10");
@@ -234,10 +230,7 @@ fn derivation_graphs_have_the_expected_shape() {
 
 #[test]
 fn corpus_is_miaf_conformant() {
-    let Some(root) = fixture_root() else {
-        return;
-    };
-    for bundle in BUNDLES {
+    for (root, bundle) in all_bundles() {
         let f = HeifFile::parse(&fixture_bytes(&root, bundle)).unwrap();
         let rep = check(&f, MiafProfile::Miaf).unwrap();
         // The corpus was written by a MIAF-aware producer; the general
@@ -251,7 +244,7 @@ fn corpus_is_miaf_conformant() {
         let codec_only = basic.violations.iter().all(|v| v.clause == "A.3.2");
         assert!(codec_only, "{bundle}: {:#?}", basic.violations);
         let expect_basic_ok = !matches!(
-            *bundle,
+            bundle,
             "still-10bit-main10"
                 | "still-monochrome"
                 | "still-yuv444"
@@ -272,7 +265,7 @@ fn corpus_is_miaf_conformant() {
         );
         assert!(
             MiafProfile::declared_by(&f).contains(&MiafProfile::Miaf)
-                || *bundle == "single-image-1x1"
+                || bundle == "single-image-1x1"
         );
     }
 }

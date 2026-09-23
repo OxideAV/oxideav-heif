@@ -1,0 +1,36 @@
+BOX	type=ftyp	size=28	offset=0
+BOX	type=meta	size=553	offset=28
+BOX	type=hdlr	size=33	offset=40
+BOX	type=iloc	size=52	offset=73
+BOX	type=iinf	size=56	offset=125
+BOX	type=infe	size=21	offset=139
+BOX	type=infe	size=21	offset=160
+BOX	type=pitm	size=14	offset=181
+BOX	type=iprp	size=360	offset=195
+BOX	type=ipco	size=322	offset=203
+BOX	type=hvcC	size=121	offset=211
+BOX	type=colr	size=19	offset=332
+BOX	type=ispe	size=20	offset=351
+BOX	type=pixi	size=14	offset=371
+BOX	type=hvcC	size=120	offset=385
+BOX	type=ispe	size=20	offset=505
+BOX	type=ipma	size=30	offset=525
+BOX	type=iref	size=26	offset=555
+BOX	type=thmb	size=14	offset=567
+BOX	type=mdat	size=1358	offset=581
+PITM	item_id=1
+ITEM_INFO	item_id=1	type=hvc1	name=''
+ITEM_INFO	item_id=2	type=hvc1	name=''
+IREF	from_id=2	to_id=1	ref_type=thmb
+IPRP_PROP	index=1	type=hvcC	size=121
+IPRP_PROP	index=2	type=colr	size=19
+IPRP_PROP	index=3	type=ispe	size=20
+IPRP_PROP	index=4	type=pixi	size=14
+IPRP_PROP	index=5	type=hvcC	size=120
+IPRP_PROP	index=6	type=ispe	size=20
+IPRP_ASSOC	item_id=1	property_indices=1,2,3,4
+IPRP_ASSOC	item_id=2	property_indices=5,2,6,4
+HVCC	item_id=1	profile=3	tier=0	level=60	chroma=yuv420	bd_luma=8	bd_chroma=8	num_arrays=3	num_nals=3
+HEVC_FRAME_FOR_ITEM	item_id=1	dims=256x256	qp=N/A
+HVCC	item_id=2	profile=3	tier=0	level=30	chroma=yuv420	bd_luma=8	bd_chroma=8	num_arrays=3	num_nals=3
+HEVC_FRAME_FOR_ITEM	item_id=2	dims=96x96	qp=N/A

@@ -7,7 +7,7 @@ mod common;
 
 use std::io::Cursor;
 
-use common::{fixture_bytes, fixture_root, BUNDLES};
+use common::{all_bundles, fixture_bytes, fixture_root};
 use oxideav_core::{Error, Frame, RuntimeContext};
 
 fn context() -> RuntimeContext {
@@ -20,11 +20,8 @@ fn context() -> RuntimeContext {
 
 #[test]
 fn probe_open_and_decode_every_bundle_through_the_registry() {
-    let Some(root) = fixture_root() else {
-        return;
-    };
     let ctx = context();
-    for bundle in BUNDLES {
+    for (root, bundle) in all_bundles() {
         let bytes = fixture_bytes(&root, bundle);
         let mut cur = Cursor::new(bytes.clone());
         let name = ctx.containers.probe_input(&mut cur, Some("heic")).unwrap();
@@ -71,7 +68,7 @@ fn probe_open_and_decode_every_bundle_through_the_registry() {
         assert!(matches!(dec.receive_frame(), Err(Error::Eof)));
         // Sequence tracks follow the still.
         let n_tracks = streams.len() - 1;
-        if *bundle == "image-sequence-3frame" {
+        if bundle == "image-sequence-3frame" {
             assert_eq!(n_tracks, 1);
             let s = &streams[1];
             assert_eq!(s.params.codec_id.as_str(), "h265");

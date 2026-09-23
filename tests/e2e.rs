@@ -7,7 +7,7 @@
 mod common;
 
 use common::png::{read_png, Png};
-use common::{fixture_bytes, fixture_root, BUNDLES};
+use common::{all_bundles, fixture_bytes, fixture_root};
 use oxideav_heif::decode::{decode_item, decode_primary, ItemDecoder};
 use oxideav_heif::image::Chroma;
 use oxideav_heif::props::Colr;
@@ -142,11 +142,8 @@ const EXACT: &[&str] = &[
 
 #[test]
 fn every_bundle_matches_its_png_oracle() {
-    let Some(root) = fixture_root() else {
-        return;
-    };
     let mut report = Vec::new();
-    for bundle in BUNDLES {
+    for (root, bundle) in all_bundles() {
         let f = HeifFile::parse(&fixture_bytes(&root, bundle)).unwrap();
         let img =
             decode_primary(&f, ItemDecoder::direct()).unwrap_or_else(|e| panic!("{bundle}: {e}"));
@@ -169,12 +166,12 @@ fn every_bundle_matches_its_png_oracle() {
             d.max / scale,
             report.last().unwrap()
         );
-        if EXACT.contains(bundle) {
+        if EXACT.contains(&bundle) {
             assert_eq!(d.max, 0.0, "{bundle}: expected sample-exact agreement");
         }
         // Alpha bundles: the oracle PNG carries an alpha channel and so
         // must the decoded frame.
-        if *bundle == "still-image-with-alpha" {
+        if bundle == "still-image-with-alpha" {
             assert!(img.frame.format.has_alpha, "{bundle}: alpha attached");
             assert_eq!(png.channels, 4);
         }

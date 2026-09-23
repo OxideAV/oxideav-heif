@@ -1,0 +1,53 @@
+BOX	type=ftyp	size=28	offset=0
+BOX	type=meta	size=600	offset=28
+BOX	type=hdlr	size=33	offset=40
+BOX	type=idat	size=16	offset=73
+BOX	type=iloc	size=116	offset=89
+BOX	type=iinf	size=119	offset=205
+BOX	type=infe	size=21	offset=219
+BOX	type=infe	size=21	offset=240
+BOX	type=infe	size=21	offset=261
+BOX	type=infe	size=21	offset=282
+BOX	type=infe	size=21	offset=303
+BOX	type=pitm	size=14	offset=324
+BOX	type=iprp	size=258	offset=338
+BOX	type=ipco	size=200	offset=346
+BOX	type=ispe	size=20	offset=354
+BOX	type=hvcC	size=119	offset=374
+BOX	type=colr	size=19	offset=493
+BOX	type=ispe	size=20	offset=512
+BOX	type=pixi	size=14	offset=532
+BOX	type=ipma	size=50	offset=546
+BOX	type=iref	size=32	offset=596
+BOX	type=dimg	size=20	offset=608
+BOX	type=mdat	size=176	offset=628
+PITM	item_id=1
+ITEM_INFO	item_id=1	type=grid	name=''
+ITEM_INFO	item_id=2	type=hvc1	name=''
+ITEM_INFO	item_id=3	type=hvc1	name=''
+ITEM_INFO	item_id=4	type=hvc1	name=''
+ITEM_INFO	item_id=5	type=hvc1	name=''
+IREF	from_id=1	to_id=2	ref_type=dimg
+IREF	from_id=1	to_id=3	ref_type=dimg
+IREF	from_id=1	to_id=4	ref_type=dimg
+IREF	from_id=1	to_id=5	ref_type=dimg
+IPRP_PROP	index=1	type=ispe	size=20
+IPRP_PROP	index=2	type=hvcC	size=119
+IPRP_PROP	index=3	type=colr	size=19
+IPRP_PROP	index=4	type=ispe	size=20
+IPRP_PROP	index=5	type=pixi	size=14
+IPRP_ASSOC	item_id=1	property_indices=1,5,3
+IPRP_ASSOC	item_id=2	property_indices=2,3,4,5
+IPRP_ASSOC	item_id=3	property_indices=2,3,4,5
+IPRP_ASSOC	item_id=4	property_indices=2,3,4,5
+IPRP_ASSOC	item_id=5	property_indices=2,3,4,5
+HVCC	item_id=2	profile=3	tier=0	level=30	chroma=yuv420	bd_luma=8	bd_chroma=8	num_arrays=3	num_nals=3
+HEVC_FRAME_FOR_ITEM	item_id=2	dims=128x128	qp=N/A
+HVCC	item_id=3	profile=3	tier=0	level=30	chroma=yuv420	bd_luma=8	bd_chroma=8	num_arrays=3	num_nals=3
+HEVC_FRAME_FOR_ITEM	item_id=3	dims=128x128	qp=N/A
+HVCC	item_id=4	profile=3	tier=0	level=30	chroma=yuv420	bd_luma=8	bd_chroma=8	num_arrays=3	num_nals=3
+HEVC_FRAME_FOR_ITEM	item_id=4	dims=128x128	qp=N/A
+HVCC	item_id=5	profile=3	tier=0	level=30	chroma=yuv420	bd_luma=8	bd_chroma=8	num_arrays=3	num_nals=3
+HEVC_FRAME_FOR_ITEM	item_id=5	dims=128x128	qp=N/A
+GRID	item_id=1	rows=2	cols=2	output_dims=256x256
+DERIVED_IMAGE	item_id=1	ref_type=dimg

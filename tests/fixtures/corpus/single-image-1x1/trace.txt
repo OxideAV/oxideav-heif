@@ -1,0 +1,26 @@
+BOX	type=ftyp	size=24	offset=0
+BOX	type=meta	size=378	offset=24
+BOX	type=hdlr	size=33	offset=36
+BOX	type=iloc	size=34	offset=69
+BOX	type=iinf	size=35	offset=103
+BOX	type=infe	size=21	offset=117
+BOX	type=pitm	size=14	offset=138
+BOX	type=iprp	size=250	offset=152
+BOX	type=ipco	size=218	offset=160
+BOX	type=hvcC	size=117	offset=168
+BOX	type=colr	size=19	offset=285
+BOX	type=ispe	size=20	offset=304
+BOX	type=clap	size=40	offset=324
+BOX	type=pixi	size=14	offset=364
+BOX	type=ipma	size=24	offset=378
+BOX	type=mdat	size=60	offset=402
+PITM	item_id=1
+ITEM_INFO	item_id=1	type=hvc1	name=''
+IPRP_PROP	index=1	type=hvcC	size=117
+IPRP_PROP	index=2	type=colr	size=19
+IPRP_PROP	index=3	type=ispe	size=20
+IPRP_PROP	index=4	type=clap	size=40
+IPRP_PROP	index=5	type=pixi	size=14
+IPRP_ASSOC	item_id=1	property_indices=1,2,3,5,4
+HVCC	item_id=1	profile=3	tier=0	level=30	chroma=yuv420	bd_luma=8	bd_chroma=8	num_arrays=3	num_nals=3
+HEVC_FRAME_FOR_ITEM	item_id=1	dims=64x64	qp=N/A

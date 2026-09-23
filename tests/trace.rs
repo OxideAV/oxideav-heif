@@ -10,7 +10,7 @@
 mod common;
 
 use common::{
-    assert_trace_subset_eq, fixture_bytes, fixture_root, read_trace, TraceEvent, BUNDLES,
+    all_bundles, assert_trace_subset_eq, fixture_bytes, fixture_root, read_trace, TraceEvent,
 };
 use oxideav_heif::boxes::{fourcc_str, iter_boxes, parse_full_box, payload, FourCc};
 use oxideav_heif::HeifFile;
@@ -131,11 +131,7 @@ const TAGS: &[&str] = &[
 
 #[test]
 fn container_model_matches_corpus_traces() {
-    let Some(root) = fixture_root() else {
-        eprintln!("fixture corpus not present; skipping");
-        return;
-    };
-    for bundle in BUNDLES {
+    for (root, bundle) in all_bundles() {
         let bytes = fixture_bytes(&root, bundle);
         let f = HeifFile::parse(&bytes).unwrap_or_else(|e| panic!("{bundle}: {e}"));
         let expected = read_trace(&root, bundle);
@@ -146,17 +142,14 @@ fn container_model_matches_corpus_traces() {
 
 #[test]
 fn every_bundle_declares_heif_brands_and_a_pict_handler() {
-    let Some(root) = fixture_root() else {
-        return;
-    };
-    for bundle in BUNDLES {
+    for (root, bundle) in all_bundles() {
         let f = HeifFile::parse(&fixture_bytes(&root, bundle)).unwrap();
         assert!(f.file_type.is_heif_family(), "{bundle}");
         let c = f.file_type.classify();
         assert!(c.image_collection, "{bundle}");
         assert_eq!(
             c.image_sequence,
-            *bundle == "image-sequence-3frame",
+            bundle == "image-sequence-3frame",
             "{bundle}"
         );
         let meta = f.meta().unwrap();
@@ -234,10 +227,7 @@ fn derived_payloads_and_metadata_items_resolve() {
 
 #[test]
 fn ftyp_round_trips_byte_exact() {
-    let Some(root) = fixture_root() else {
-        return;
-    };
-    for bundle in BUNDLES {
+    for (root, bundle) in all_bundles() {
         let bytes = fixture_bytes(&root, bundle);
         let f = HeifFile::parse(&bytes).unwrap();
         let ftyp_len = f.top_level[0].total_len();
@@ -248,10 +238,7 @@ fn ftyp_round_trips_byte_exact() {
 
 #[test]
 fn top_level_walk_is_consistent_with_iter_boxes() {
-    let Some(root) = fixture_root() else {
-        return;
-    };
-    for bundle in BUNDLES {
+    for (root, bundle) in all_bundles() {
         let bytes = fixture_bytes(&root, bundle);
         let f = HeifFile::parse(&bytes).unwrap();
         let direct: Vec<_> = iter_boxes(&bytes).map(|h| h.unwrap()).collect();
