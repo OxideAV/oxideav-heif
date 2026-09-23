@@ -286,6 +286,18 @@ fn profile_compat_flags(profile_idc: u8) -> u32 {
 /// Encode one 8-bit 4:2:0 picture as an HEVC item. `w`/`h` must be
 /// multiples of 16 (the encoder's constraint); use [`pad_frame`].
 pub fn encode_hevc_picture(frame: &HeifFrame, mode: &str, qp: u8) -> Result<CodedPicture> {
+    encode_hevc_picture_with(frame, mode, qp, &[])
+}
+
+#[doc(hidden)]
+/// [`encode_hevc_picture`] with extra codec options (`ctb`, …) passed
+/// through to the HEVC encoder.
+pub fn encode_hevc_picture_with(
+    frame: &HeifFrame,
+    mode: &str,
+    qp: u8,
+    extra: &[(&str, &str)],
+) -> Result<CodedPicture> {
     if frame.format.chroma != Chroma::Yuv420 || frame.format.bit_depth != 8 {
         return Err(HeifError::unsupported(
             "HEVC item encoding takes 8-bit 4:2:0 input (see to_yuv420_8)",
@@ -295,9 +307,13 @@ pub fn encode_hevc_picture(frame: &HeifFrame, mode: &str, qp: u8) -> Result<Code
     params.width = Some(frame.width);
     params.height = Some(frame.height);
     params.pixel_format = Some(oxideav_core::PixelFormat::Yuv420P);
-    params.options = CodecOptions::new()
+    let mut options = CodecOptions::new()
         .set("mode", mode)
         .set("qp", qp.to_string());
+    for (k, v) in extra {
+        options = options.set(*k, *v);
+    }
+    params.options = options;
     let mut enc = oxideav_h265::make_encoder(&params)
         .map_err(|e| HeifError::unsupported(format!("HEVC encoder: {e}")))?;
     let (mut vf, _) = frame.to_core()?;
@@ -392,8 +408,31 @@ pub fn encode_av1_picture(frame: &HeifFrame) -> Result<CodedPicture> {
 }
 
 fn encode_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<CodedPicture> {
+    encode_picture_with(frame, opts, &[])
+}
+
+/// Codec options that make the alpha auxiliary's HEVC parameter sets
+/// differ from the master's. Apple ImageIO refuses a file whose two
+/// items carry byte-identical VPS / SPS / PPS (verified: any change to
+/// the alpha's SPS — size, CTB size, coding mode — makes it accept the
+/// same file). For CABAC intra the alpha is coded at a different CTB
+/// size (`ctb` 32 vs the master's default), which is lossless and
+/// changes the SPS; the `pcm` coder has no such knob, so a PCM alpha is
+/// instead coded with an extra 16-row band (clapped away, see
+/// [`ALPHA_PCM_EXTRA_ROWS`]), which also gives it a distinct SPS.
+const ALPHA_HEVC_INTRA_OPTIONS: &[(&str, &str)] = &[("ctb", "32")];
+
+/// Extra coded rows on a PCM-coded alpha auxiliary (see
+/// [`ALPHA_HEVC_INTRA_OPTIONS`]).
+const ALPHA_PCM_EXTRA_ROWS: u32 = 16;
+
+fn encode_picture_with(
+    frame: &HeifFrame,
+    opts: &EncodeOptions,
+    extra: &[(&str, &str)],
+) -> Result<CodedPicture> {
     match opts.codec {
-        StillCodec::Hevc => encode_hevc_picture(frame, &opts.hevc_mode, opts.qp),
+        StillCodec::Hevc => encode_hevc_picture_with(frame, &opts.hevc_mode, opts.qp, extra),
         StillCodec::Av1 => encode_av1_picture(frame),
     }
 }
@@ -558,15 +597,28 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
     if let Some(alpha) = frame.alpha_as_frame() {
         let a420 = to_yuv420_8(&alpha)?;
         let a = alignment(opts);
-        let (pw, ph) = (
+        let hevc_pcm = opts.codec == StillCodec::Hevc && opts.hevc_mode == "pcm";
+        let (pw, mut ph) = (
             align_up(a420.width, a).max(a),
             align_up(a420.height, a).max(a),
         );
+        let extra: &[(&str, &str)] = if opts.codec != StillCodec::Hevc {
+            &[]
+        } else if hevc_pcm {
+            ph += ALPHA_PCM_EXTRA_ROWS;
+            &[]
+        } else {
+            ALPHA_HEVC_INTRA_OPTIONS
+        };
         let padded = pad_frame(&a420, pw, ph)?;
-        let pic = encode_picture(&padded, opts)?;
+        let pic = encode_picture_with(&padded, opts, extra)?;
         // Alpha items carry no colour information (the plane is an
-        // opacity, not a colour) and an essential `auxC`, the shape
-        // every third-party producer writes and Apple ImageIO requires.
+        // opacity, not a colour — the shape every third-party producer
+        // writes), a single-channel `pixi` and an essential `auxC`.
+        // Note: a reader that takes the sample range from the bitstream
+        // VUI (Apple ImageIO does; the oxideav HEVC stream has none)
+        // treats the alpha as video range; a full-range `colr` on the
+        // item does not change that, so none is written.
         let mut props: Vec<(Property, bool)> = coded_props(&pic, &opts.colr, None)
             .into_iter()
             .filter(|(p, _)| !matches!(p, Property::Colr(_)))

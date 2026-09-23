@@ -10,12 +10,15 @@
 //!   otherwise).
 //!
 //! A reader refusing or mis-rendering a file is a writer bug unless the
-//! same structure carrying a third-party stream is also refused; the
-//! one documented divergence (Apple ImageIO refusing a file whose
-//! master *and* alpha are both HEVC streams from the oxideav encoder,
-//! while accepting either stream paired with a third-party one) is
-//! recorded in the crate's round report as a cross-crate item and is
-//! not asserted here.
+//! same structure carrying a third-party stream is also refused. Apple
+//! ImageIO refuses a file whose two items carry byte-identical HEVC
+//! parameter sets; the writer therefore codes the alpha auxiliary with
+//! a distinct SPS (see `alpha_parameter_sets_differ_from_the_master`),
+//! and every alpha file is asserted to open in `sips` too. The one
+//! remaining divergence — `sips` takes the sample range from the
+//! bitstream VUI, which the oxideav HEVC stream lacks, so its render is
+//! a video-range expansion of ours — is a codec-crate item and is why
+//! `sips` is an "opens the file" oracle rather than a pixel oracle.
 #![cfg(feature = "registry")]
 
 mod common;
@@ -451,10 +454,6 @@ fn third_party_readers_open_our_files() {
             let out = dir.join(format!("{name}.{reader}.png"));
             let _ = std::fs::remove_file(&out);
             if render(&heic, &out).is_none() {
-                if *reader == "sips" && alpha {
-                    eprintln!("SKIP sips {name}: documented alpha-pairing refusal");
-                    continue;
-                }
                 if *reader == "ffmpeg" && (w * h) < 16 {
                     continue; // ffmpeg declines a 1×1 rawvideo→png
                 }
@@ -586,4 +585,61 @@ fn identity_item_carries_transforms() {
     let node = oxideav_heif::derived::build_primary_graph(&f).unwrap();
     assert_eq!(node.output_size().unwrap(), (48, 32));
     assert!(check(&f, MiafProfile::Miaf).unwrap().is_conformant());
+}
+
+/// Apple ImageIO refuses a file whose master and alpha carry
+/// byte-identical VPS / SPS / PPS (verified by cross-muxing: any
+/// change to the alpha's SPS makes the same file open). The writer
+/// codes the alpha with a distinct SPS in both HEVC modes: a different
+/// CTB size for CABAC intra, an extra (clapped) row band for PCM.
+#[test]
+fn alpha_parameter_sets_differ_from_the_master() {
+    for opts in [pcm(), EncodeOptions::default()] {
+        let src = picture(96, 80, false, true);
+        let bytes = encode_still(&src, &opts).unwrap();
+        let f = HeifFile::parse(&bytes).unwrap();
+        let node = oxideav_heif::derived::build_primary_graph(&f).unwrap();
+        let alpha = node.alpha.as_ref().expect("alpha auxiliary");
+        let master_cfg = node.properties.hvcc().unwrap();
+        let alpha_cfg = alpha.properties.hvcc().unwrap();
+        let ps = |c: &oxideav_heif::HevcConfig| -> Vec<Vec<u8>> {
+            c.arrays.iter().flat_map(|a| a.nal_units.clone()).collect()
+        };
+        assert_ne!(
+            ps(master_cfg),
+            ps(alpha_cfg),
+            "{}: alpha parameter sets must differ from the master's",
+            opts.hevc_mode
+        );
+        // The alpha still decodes to the master's geometry, exactly.
+        use oxideav_heif::decode::{decode_primary, ItemDecoder};
+        let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+        assert_eq!((img.width(), img.height()), (96, 80));
+        if opts.hevc_mode == "pcm" {
+            assert_eq!(
+                img.frame.alpha_as_frame().unwrap(),
+                oxideav_heif::encode::to_yuv420_8(&src.alpha_as_frame().unwrap())
+                    .unwrap()
+                    .planes[0]
+                    .clone()
+                    .pipe_into_mono(96, 80)
+            );
+        }
+    }
+}
+
+/// Test-local helper: wrap a plane as a monochrome frame.
+trait PipeMono {
+    fn pipe_into_mono(self, w: u32, h: u32) -> HeifFrame;
+}
+
+impl PipeMono for oxideav_heif::HeifPlane {
+    fn pipe_into_mono(self, w: u32, h: u32) -> HeifFrame {
+        HeifFrame {
+            width: w,
+            height: h,
+            format: HeifPixelFormat::new(Chroma::Mono, 8, false).unwrap(),
+            planes: vec![self],
+        }
+    }
 }
