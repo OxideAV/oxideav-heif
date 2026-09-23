@@ -37,21 +37,21 @@ one stream per image-sequence track (`"h265"` / `"av1"` packets with
 | ISOBMFF boxes | size 0 / 1 / `largesize` / `uuid`, FullBox, bounded recursive walk |
 | Brands | `mif1` `mif2` `msf1` `heic` `heix` `hevc` `hevx` `heim` `heis` `hevm` `hevs` `miaf` `MiHB` `MiHA` `MiHE` `MiAB` `avif` `avis` `avio` `MA1B` `MA1A` `jpeg` `avci` `1pic` `pred`, `styp` |
 | `meta` tree | `hdlr`, `pitm` v0/v1, `iinf` v0/v1 + `infe` v2/v3 (`mime` / `uri ` tails, hidden flag), `iloc` v0–v2 (all widths, construction methods 0 / 1 / 2, multi-extent, zero-length "to end"), `iref` v0/v1, `iprp` / `ipco` / `ipma` v0/v1 (7 / 15-bit indices, essential flag, index-0 placeholders), `idat`, `grpl`, `dinf` / `dref`, `ipro` |
-| Properties | `ispe` `pixi` `colr` (nclx + `rICC` / `prof`) `pasp` `clap` `irot` `imir` `iscl`\* `auxC` `hvcC` `av1C` `lhvC`\* `avcC`\* `clli` `mdcv` `cclv` `amve` `rloc` `lsel` `a1op` `a1lx` `rref` `crtt` `mdft` `udes` `altt`; §6.5.1 descriptive-before-transformative order, unrecognised-essential refusal, exact rational `clap` |
+| Properties | `ispe` `pixi` `colr` (nclx + `rICC` / `prof`) `pasp` `clap` `irot` `imir` `iscl` `auxC` `hvcC` `av1C` `lhvC`\* `avcC`\* `clli` `mdcv` `cclv` `amve` `rloc` `lsel` `a1op` `a1lx` `rref` `crtt` `mdft` `udes` `altt`; §6.5.1 descriptive-before-transformative order, unrecognised-essential refusal, exact rational `clap` |
 | Coded items | `hvc1` / `hev1` → oxideav-h265 (`hvcC` extradata, length-prefixed AU); `av01` → oxideav-av1 (`av1C` extradata, temporal unit); 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8–16 bit; via direct factories or a caller `CodecRegistry` |
 | Derived images | `grid` (row-major, trim, tile alpha), `iovl` (sRGB fill via the H.273 matrix of the output `colr`, offsets, clipping, §6.9.1 straight / pre-multiplied alpha, translucent canvas → output alpha), `iden`, `tmap`\* (base image only) |
-| Transforms | `clap` → `irot` → `imir` in `ipma` order; sub-sample chroma positions promote to 4:4:4 (MIAF §7.3.6.7 rule) |
+| Transforms | `clap` → `irot` → `imir` → `iscl` in `ipma` order; `iscl` (§6.5.13) resizes by the exact ceil-ratio with an area/bilinear resampler; sub-sample chroma positions promote to 4:4:4 (MIAF §7.3.6.7) |
 | Auxiliaries | alpha (`urn:mpeg:mpegB:cicp:systems:auxiliary:alpha` and `urn:mpeg:hevc:2015:auxid:1`, resized / depth-matched, `prem`), depth (both URN families, surfaced as a frame) |
 | Metadata | thumbnails (`thmb`), Exif (offset word resolved), XMP, ICC, effective `nclx` (MIAF default when absent), `pixi` / `clli` / `mdcv` / … via the typed property list |
 | MIAF | `MiafProfile` + `check`: §7 general requirements, §8 shared constraints, Annex A HEVC / AV1 codec limits — typed `MiafViolation`s with clause numbers |
 | Image sequences | `moov` / `trak` / `stbl` (`stts` `ctts` `stsc` `stsz` `stz2` `stco` `co64` `stss` `tref` `elst`), visual sample entries (`hvcC` `av1C` `ccst` `auxi` `colr` `clap` `pasp`), §7.2.1 matrix → rotation / mirror; framework `Demuxer` with pts / dts / sync / seek |
 | Writer | `HeifWriter` (coded / grid / overlay / identity items, thumbnails, alpha / depth, Exif / XMP, entity groups, de-duplicated `ipco`, MIAF `mdat` order, brand auto-selection); `SequenceWriter` (`msf1` / `hevc`, `pict` track + `ccst`, cover-image `meta`) |
-| Encoder (`registry`) | `encode_still`: HEVC (lossless `pcm` or CABAC `intra` at a QP) or lossless AV1 items, padding + `clap`, grid tiling (MIAF 64-px floor), thumbnails, alpha, Exif / XMP / ICC, transforms as an `iden` item; `"heif"` framework `Encoder` (frame in, file out; options `codec` / `mode` / `qp` / `grid` / `thumbnail`) |
+| Colour | `rgb::to_rgb`: YCbCr → RGB(A) with the item `colr` matrix / range (H.273), identity (GBR), monochrome, alpha carried; the renderer step over the composed frame |
+| Encoder (`registry`) | `encode_still`: HEVC (lossless `pcm` or CABAC `intra` at a QP) or lossless AV1 items, padding + `clap`, grid tiling (MIAF 64-px floor), thumbnails, alpha (per-codec `auxC` URN, single-channel `pixi`, one `hvcC` per item), Exif / XMP / ICC, transforms as essential properties on the coded item; `"heif"` framework `Encoder` (frame in, file out; options `codec` / `mode` / `qp` / `grid` / `thumbnail`) |
 | Fuzz | `fuzz/`: `heif_parse`, `heif_compose`, `heif_sequence` (standalone build), daily workflow |
 
-\* parsed / surfaced, not applied: `iscl` (image scaling) refuses at
-composition, `lhvC` / `avcC` items have no decoder here, `tmap` gain
-maps decode to the base image.
+\* `lhvC` / `avcC` items have no decoder here; `tmap` gain maps decode
+to the base image. `iscl` is now applied at composition (§6.5.13).
 
 ## Corpus scorecard (`docs/image/heif/fixtures/`, 14 bundles)
 
@@ -78,6 +78,35 @@ bundle; every bundle is MIAF-conformant under `check`.
 non-exact rows differ from the oracle only by its own chroma
 upsampling / rounding. The oracle for the sequence bundle's still is a
 different encode than the meta primary (mean 1.1 / max 10).
+
+## Real-world interop (`tests/fixtures/`, runs on CI)
+
+A compact fixture set is vendored so the pixel / structure tests run
+everywhere, not only where `docs/` is checked out. `corpus/` holds 13
+of the staged bundles; `interop/` holds 39 files from three
+independent black-box producers — Apple ImageIO (`sips`), libheif
+(`heif-enc`, x265 / aom) and ImageMagick — across sizes 1×1 … 4032×3024
+(odd sizes included), 8 / 10 / 12-bit, 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4,
+alpha, lossless, thumbnails and Apple's 512-px `grid` tiling.
+
+**Reader** (`tests/interop.rs`): every producer file decodes — directly
+and through the framework demuxer + `"heif"` codec — to the manifest
+geometry / layout; where the layouts coincide the composed planes are
+**byte-exact** against the black-box video decoder's raw output
+(fingerprinted in `manifest.tsv`, 25+ files across all three
+producers); every `expected.png` matches within the reader's own
+rounding with exact alpha; every file is MIAF-conformant.
+
+**Writer** (`tests/writer_interop.rs`): every shape `encode_still`
+writes re-parses, is MIAF-conformant, round-trips, and — when the
+binary is present — is opened by `sips`, `heif-convert`, `magick`,
+`ffmpeg` and `heif-info`. libheif and ImageMagick reconstruct our
+exact planes (≤ 1 code, transforms included). Known divergence: Apple
+ImageIO refuses a file whose master **and** alpha are both HEVC
+streams from the oxideav encoder, while accepting either paired with a
+third-party stream — a codec-layer (parameter-set) interaction, tracked
+as a cross-crate item; libheif / magick / ffmpeg decode those files
+correctly.
 
 ## Standalone build
 

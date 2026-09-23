@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `rgb` (both builds): `to_rgb` / `RgbImage` — YCbCr → RGB(A) of a
+  composed frame with the item `colr` matrix / range (H.273), the
+  identity (GBR) matrix, monochrome and any alpha plane; the renderer
+  step decode / compose previously left to the caller.
+- `compose` (both builds): apply `iscl` (image scaling, HEIF 3rd ed
+  §6.5.13) at composition — output `ceil(input × num / den)` per axis
+  with an area / bilinear resampler (`resize_area`) run per plane; the
+  demuxer predicts the scaled output size. Was parsed but refused.
+- `encode` (`registry`): writer output that opens in third-party
+  readers — transformative properties as essential properties on the
+  displayed coded item(s) instead of a hidden `iden` wrapper; alpha
+  items carry no `colr`, a single-channel `pixi` and an essential
+  `auxC` (HEVC `urn:mpeg:hevc:2015:auxid:1`, AV1 CICP URN); one `hvcC`
+  per coded item (Apple ImageIO refuses a shared decoder config).
+- `tests`: a vendored fixture corpus under `tests/fixtures/` (kept out
+  of the package by `exclude`) so the decode / e2e / trace tests run on
+  CI, plus `tests/interop.rs` (39 real-world files from Apple ImageIO /
+  libheif / ImageMagick decode byte-exact against a black-box video
+  decoder where layouts coincide, and within rounding against a
+  black-box HEIF reader) and `tests/writer_interop.rs` (our output
+  opened by `sips` / `heif-convert` / `magick` / `ffmpeg` / `heif-info`).
+- `examples`: `heifdump` (decode a HEIF / AVIF file to PNG / raw / box
+  tree) and `heifenc` (write a still in any shape) — for feeding
+  third-party readers.
+
 - `mux` (`registry`): `HeifSequenceMuxer` — the `"heif"` framework
   `Muxer`: HEVC packets (Annex B from the oxideav encoder, or `hvcC` +
   length-prefixed) or AV1 temporal units in, an `msf1` image-sequence
