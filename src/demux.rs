@@ -133,8 +133,10 @@ pub fn predict_output(node: &ImageNode) -> Result<(HeifPixelFormat, (u32, u32))>
                     }
                 }
             }
-            Property::Iscl(_) => {
-                return Err(HeifError::unsupported("iscl transformative property"));
+            Property::Iscl(s) => {
+                let (nw, nh) = s.output_size(w, h)?;
+                w = nw;
+                h = nh;
             }
             _ => {}
         }

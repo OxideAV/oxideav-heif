@@ -199,16 +199,97 @@ pub fn apply_transforms<'a>(
             Property::Clap(c) => apply_clap(input, c)?,
             Property::Irot(r) => apply_irot(input, r)?,
             Property::Imir(m) => apply_imir(input, m)?,
-            Property::Iscl(_) => {
-                return Err(HeifError::unsupported(
-                    "iscl (image scaling) transformative property",
-                ))
-            }
+            Property::Iscl(s) => apply_iscl(input, s)?,
             _ => continue,
         };
         cur = Some(next);
     }
     Ok(cur.unwrap_or_else(|| f.clone()))
+}
+
+/// Apply an `iscl` property (§6.5.13): the output is
+/// `ceil(input × numerator / denominator)` on each axis; the resampling
+/// filter is left to the reader by the specification, and this crate
+/// uses [`resize_area`] (box average on downscale, bilinear on upscale)
+/// on every plane at its own resolution.
+pub fn apply_iscl(f: &HeifFrame, iscl: &crate::props::Iscl) -> Result<HeifFrame> {
+    let (w, h) = iscl.output_size(f.width, f.height)?;
+    resize_area(f, w, h)
+}
+
+/// Area-weighted resize of every plane to the plane sizes of a `w × h`
+/// picture: each output sample averages the source samples its
+/// footprint covers (box filter when shrinking, bilinear interpolation
+/// between the two nearest source samples when growing). Deterministic
+/// integer arithmetic in 1/256 sub-sample units.
+pub fn resize_area(f: &HeifFrame, w: u32, h: u32) -> Result<HeifFrame> {
+    if (w, h) == (f.width, f.height) {
+        return Ok(f.clone());
+    }
+    let mut out = HeifFrame::zeroed(w, h, f.format)?;
+    for p in 0..f.format.plane_count() {
+        let (sw, sh) = f.plane_dims(p);
+        let (dw, dh) = out.plane_dims(p);
+        let xw = axis_weights(sw, dw);
+        let yw = axis_weights(sh, dh);
+        for (y, (y0, ys)) in yw.iter().enumerate() {
+            for (x, (x0, xs)) in xw.iter().enumerate() {
+                let mut acc: u64 = 0;
+                let mut den: u64 = 0;
+                for (dy, wy) in ys.iter().enumerate() {
+                    for (dx, wx) in xs.iter().enumerate() {
+                        let wgt = *wy as u64 * *wx as u64;
+                        acc += f.sample(p, x0 + dx as u32, y0 + dy as u32) as u64 * wgt;
+                        den += wgt;
+                    }
+                }
+                out.set_sample(p, x as u32, y as u32, ((acc + den / 2) / den) as u16);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Per output index along one axis: the first source index and the
+/// weights (1/256 units, at least one non-zero) of the consecutive
+/// source samples the output footprint covers.
+fn axis_weights(src: u32, dst: u32) -> Vec<(u32, Vec<u32>)> {
+    let mut v = Vec::with_capacity(dst as usize);
+    if src == dst {
+        return (0..src).map(|i| (i, vec![256])).collect();
+    }
+    for i in 0..dst as u64 {
+        if dst > src {
+            // Upscale: linear interpolation between the two nearest
+            // source centres (centre-aligned sampling grid).
+            let centre = ((2 * i + 1) * src as u64 * 256) / (2 * dst as u64); // ×256
+            let pos = centre.saturating_sub(128); // centre − ½ sample
+            let i0 = (pos / 256).min(src as u64 - 1);
+            let frac = pos - i0 * 256;
+            if i0 + 1 >= src as u64 || frac == 0 {
+                v.push((i0 as u32, vec![256]));
+            } else {
+                v.push((i0 as u32, vec![256 - frac as u32, frac as u32]));
+            }
+        } else {
+            // Downscale: box filter over [i·src/dst, (i+1)·src/dst).
+            let a = i * src as u64 * 256 / dst as u64;
+            let b = (i + 1) * src as u64 * 256 / dst as u64;
+            let i0 = a / 256;
+            let i1 = b.div_ceil(256).min(src as u64);
+            let mut ws = Vec::new();
+            for j in i0..i1 {
+                let lo = a.max(j * 256);
+                let hi = b.min((j + 1) * 256);
+                ws.push(hi.saturating_sub(lo) as u32);
+            }
+            if ws.iter().all(|w| *w == 0) {
+                ws = vec![256];
+            }
+            v.push((i0 as u32, ws));
+        }
+    }
+    v
 }
 
 /// Nearest-neighbour resize of a monochrome / planar frame.
@@ -742,7 +823,55 @@ mod tests {
                 height_den: 2,
             }),
         }];
-        assert!(apply_transforms(&f, &iscl, false).is_err());
+        let half = apply_transforms(&f, &iscl, false).unwrap();
+        assert_eq!(
+            (half.width, half.height),
+            (f.width.div_ceil(2), f.height.div_ceil(2))
+        );
+    }
+
+    #[test]
+    fn area_resize_averages_on_shrink_and_interpolates_on_grow() {
+        // 4x2 mono: rows [0 10 20 30] / [40 50 60 70].
+        let mut f = HeifFrame::zeroed(4, 2, fmt(Chroma::Mono, 8, false)).unwrap();
+        for y in 0..2 {
+            for x in 0..4 {
+                f.set_sample(0, x, y, (x * 10 + y * 40) as u16);
+            }
+        }
+        let half = resize_area(&f, 2, 1).unwrap();
+        assert_eq!((half.width, half.height), (2, 1));
+        assert_eq!(half.sample(0, 0, 0), 25, "mean of 0 10 40 50");
+        assert_eq!(half.sample(0, 1, 0), 45, "mean of 20 30 60 70");
+        // ceil(4 × 2 / 3) = 3 columns: box filter over 4/3-sample windows.
+        let third = resize_area(&f, 3, 2).unwrap();
+        assert_eq!(third.width, 3);
+        assert_eq!(third.sample(0, 0, 0), 2, "(0×256 + 10×85) / 341 = 2.49");
+        assert_eq!(third.sample(0, 2, 1), 67, "(60×86 + 70×256) / 342 = 67.5");
+        // Upscale 2x: linear interpolation between neighbouring centres.
+        let up = resize_area(&f, 8, 2).unwrap();
+        assert_eq!(up.width, 8);
+        assert_eq!(up.sample(0, 0, 0), 0, "edge replicates");
+        assert_eq!(up.sample(0, 7, 0), 30, "edge replicates");
+        assert_eq!(up.sample(0, 1, 0), 3, "¼ of the way to 10");
+        assert_eq!(up.sample(0, 2, 0), 8, "¾ of the way to 10");
+        // 4:2:0 chroma planes are resized at their own resolution and
+        // stay consistent with the luma geometry.
+        let g = HeifFrame::filled(6, 4, fmt(Chroma::Yuv420, 10, false), 700).unwrap();
+        let s = apply_iscl(
+            &g,
+            &crate::props::Iscl {
+                width_num: 1,
+                width_den: 4,
+                height_num: 3,
+                height_den: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!((s.width, s.height), (2, 6));
+        s.validate().unwrap();
+        assert_eq!(s.plane_dims(1), (1, 3));
+        assert_eq!(s.sample(1, 0, 2), 700);
     }
 
     #[test]
