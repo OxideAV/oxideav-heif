@@ -34,3 +34,11 @@ compcol = { version = "0.6", default-features = false, features = ["zlib"] }
 [features]
 default = ["registry"]
 registry = ["dep:oxideav-core", "dep:oxideav-h265", "dep:oxideav-av1"]
+
+[[example]]
+name = "heifdump"
+required-features = ["registry"]
+
+[[example]]
+name = "heifenc"
+required-features = ["registry"]
