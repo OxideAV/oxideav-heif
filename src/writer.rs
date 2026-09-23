@@ -16,7 +16,7 @@
 //!   iinf / infe v2|v3  (v3 when an id exceeds 16 bits)
 //!   iref v0|v1         dimg / thmb / auxl / cdsc / prem / base
 //!   iprp
-//!     ipco             de-duplicated property boxes
+//!     ipco             property boxes (descriptive ones de-duplicated; one decoder configuration per coded item)
 //!     ipma             one row per item, essential flags kept
 //!   iloc v1            cm 0 (mdat) for coded + metadata items,
 //!                      cm 1 (idat) for derived items
@@ -395,7 +395,18 @@ impl HeifWriter {
             let mut row = Vec::new();
             for (p, essential) in &it.properties {
                 let bytes = property_box(p);
-                let idx = match ipco_boxes.iter().position(|b| *b == bytes) {
+                // Decoder configurations are never shared between
+                // items: Apple ImageIO refuses a file whose master and
+                // alpha auxiliary point at one `hvcC` entry (verified
+                // by re-muxing its own streams both ways), and every
+                // third-party producer writes one record per coded
+                // item. Everything else de-duplicates.
+                let shared = if p.is_decoder_config() {
+                    None
+                } else {
+                    ipco_boxes.iter().position(|b| *b == bytes)
+                };
+                let idx = match shared {
                     Some(i) => i,
                     None => {
                         ipco_boxes.push(bytes);
@@ -1173,8 +1184,15 @@ mod tests {
         assert_eq!(meta.auxiliaries_of(grid), vec![alpha]);
         assert_eq!(meta.metadata_of(grid), vec![exif, xmp]);
         assert!(meta.item(alpha).unwrap().is_hidden());
-        // Shared properties were de-duplicated: 4 tiles share hvcC/ispe/pixi/colr.
-        assert!(meta.properties.len() <= 8, "{}", meta.properties.len());
+        // Shared descriptive properties were de-duplicated (4 tiles
+        // share ispe/pixi/colr); every coded item keeps its own hvcC.
+        assert!(meta.properties.len() <= 13, "{}", meta.properties.len());
+        let hvcc_count = meta
+            .properties
+            .iter()
+            .filter(|p| &p.box_type == b"hvcC")
+            .count();
+        assert_eq!(hvcc_count, 6, "4 tiles + alpha + thumbnail");
         assert_eq!(f.item_data(tiles[2]).unwrap().as_ref(), &[2u8; 16]);
         assert_eq!(f.item_data(grid).unwrap().len(), 8);
         assert_eq!(

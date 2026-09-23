@@ -405,6 +405,14 @@ fn alignment(opts: &EncodeOptions) -> u32 {
     }
 }
 
+/// The transformative chain of `opts` as essential property entries,
+/// attached to every displayed item (master, alpha auxiliary,
+/// thumbnails) so third-party readers that only honour properties on
+/// the item they decode still render the intended orientation.
+fn transform_props(opts: &EncodeOptions) -> Vec<(Property, bool)> {
+    opts.transforms.iter().map(|t| (t.clone(), true)).collect()
+}
+
 /// Standard descriptive properties of a coded item.
 fn coded_props(pic: &CodedPicture, colr: &Colr, icc: Option<&[u8]>) -> Vec<(Property, bool)> {
     let mut v = vec![
@@ -468,6 +476,7 @@ fn add_picture_item(
             true,
         ));
     }
+    props.extend(transform_props(opts));
     Ok(w.add_coded_item(pic.item_type, pic.data, props))
 }
 
@@ -515,6 +524,7 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
                     false,
                 ));
             }
+            gprops.extend(transform_props(opts));
             w.add_grid(desc, &tiles, gprops)?
         }
         _ => add_picture_item(&mut w, &colour, opts, Vec::new())?,
@@ -529,16 +539,39 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
         );
         let padded = pad_frame(&a420, pw, ph)?;
         let pic = encode_picture(&padded, opts)?;
-        let mut props = coded_props(
-            &pic,
-            &Colr::Nclx {
-                primaries: 1,
-                transfer: 13,
-                matrix: 0,
-                full_range: true,
-            },
-            None,
-        );
+        // Alpha items carry no colour information (the plane is an
+        // opacity, not a colour) and an essential `auxC`, the shape
+        // every third-party producer writes and Apple ImageIO requires.
+        let mut props: Vec<(Property, bool)> = coded_props(&pic, &opts.colr, None)
+            .into_iter()
+            .filter(|(p, _)| !matches!(p, Property::Colr(_)))
+            .map(|(p, e)| match p {
+                // One channel: the opacity plane (the neutral chroma of
+                // the 4:2:0 coding carries nothing).
+                Property::Pixi(_) => (
+                    Property::Pixi(Pixi {
+                        bits_per_channel: vec![pic.layout.bit_depth],
+                    }),
+                    e,
+                ),
+                other => (other, e),
+            })
+            .collect();
+        // HEVC alpha items use the codec-specific URN (HEIF §7.5.3.2 /
+        // Annex B.2.3.2), the form both HEVC producers write and the
+        // one Apple ImageIO opens; AV1 items use the codec-independent
+        // CICP URN (§7.5.3.1).
+        let urn = match opts.codec {
+            StillCodec::Hevc => crate::props::AUX_URN_ALPHA_HEVC,
+            StillCodec::Av1 => crate::props::AUX_URN_ALPHA,
+        };
+        props.push((
+            Property::AuxC(crate::props::AuxC {
+                aux_type: urn.into(),
+                aux_subtype: Vec::new(),
+            }),
+            true,
+        ));
         if (pic.coded_width, pic.coded_height) != (a420.width, a420.height) {
             props.push((
                 Property::Clap(Clap::for_rect(
@@ -554,6 +587,7 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
                 true,
             ));
         }
+        props.extend(transform_props(opts));
         w.add_alpha(master, pic.item_type, pic.data, props, false);
     }
     // Thumbnail.
@@ -583,6 +617,7 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
                     true,
                 ));
             }
+            props.extend(transform_props(opts));
             w.add_thumbnail(master, pic.item_type, pic.data, props);
         }
     }
@@ -593,24 +628,7 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
     if let Some(xmp) = &opts.xmp {
         w.add_xmp(master, xmp);
     }
-    // Transformative properties → iden item on top.
-    let primary = if opts.transforms.is_empty() {
-        master
-    } else {
-        let mut props = vec![(
-            Property::Ispe(Ispe {
-                width: colour.width,
-                height: colour.height,
-            }),
-            false,
-        )];
-        for t in &opts.transforms {
-            props.push((t.clone(), true));
-        }
-        w.set_hidden(master, true);
-        w.add_identity(master, props)
-    };
-    w.set_primary(primary);
+    w.set_primary(master);
     w.write_to_vec()
 }
 
