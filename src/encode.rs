@@ -413,6 +413,28 @@ fn transform_props(opts: &EncodeOptions) -> Vec<(Property, bool)> {
     opts.transforms.iter().map(|t| (t.clone(), true)).collect()
 }
 
+/// The `nclx` to write next to `colr` when an ICC profile is present:
+/// HEIF §6.5.5 requires `colour_primaries = transfer_characteristics = 2`
+/// for an nclx paired with an ICC (only the matrix / range stay
+/// meaningful, since the ICC governs colour); the caller's `nclx` is
+/// used unchanged when there is no ICC.
+fn nclx_for_icc(colr: &Colr, icc_present: bool) -> Colr {
+    match (colr, icc_present) {
+        (
+            Colr::Nclx {
+                matrix, full_range, ..
+            },
+            true,
+        ) => Colr::Nclx {
+            primaries: 2,
+            transfer: 2,
+            matrix: *matrix,
+            full_range: *full_range,
+        },
+        _ => colr.clone(),
+    }
+}
+
 /// Standard descriptive properties of a coded item.
 fn coded_props(pic: &CodedPicture, colr: &Colr, icc: Option<&[u8]>) -> Vec<(Property, bool)> {
     let mut v = vec![
@@ -430,7 +452,7 @@ fn coded_props(pic: &CodedPicture, colr: &Colr, icc: Option<&[u8]>) -> Vec<(Prop
             }),
             false,
         ),
-        (Property::Colr(colr.clone()), false),
+        (Property::Colr(nclx_for_icc(colr, icc.is_some())), false),
     ];
     if let Some(icc) = icc {
         v.push((
@@ -514,7 +536,10 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
                 output_width: colour.width,
                 output_height: colour.height,
             };
-            let mut gprops = vec![(Property::Colr(opts.colr.clone()), false)];
+            let mut gprops = vec![(
+                Property::Colr(nclx_for_icc(&opts.colr, opts.icc_profile.is_some())),
+                false,
+            )];
             if let Some(icc) = &opts.icc_profile {
                 gprops.push((
                     Property::Colr(Colr::Icc {
