@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OxideAV/oxideav-heif/compare/v0.0.1...v0.0.2) - 2026-09-23
+
+### Other
+
+- ISO 21496-1 gain-map metadata + opt-in application (tmap)
+- distinct alpha parameter sets so Apple ImageIO opens alpha files
+- make the reader interop suite portable and encoder-agnostic
+- nclx paired with ICC must use primaries=transfer=2 (HEIF §6.5.5)
+- README interop section + capability updates; CHANGELOG
+- update writer transform test for item-level placement
+- real-world reader/writer interop suites
+- vendor a compact fixture corpus so CI proves pixels
+- writer output that opens in third-party readers
+- apply iscl (image scaling) at composition (HEIF 3rd ed §6.5.13)
+- YCbCr -> RGB conversion (H.273 matrices, full/limited range)
+- doc(hidden) sweep: internal box-writer / walk helpers, composition and encode plumbing, muxer/writer records
+- 'heif' framework Muxer for image sequences (HEVC Annex B / length-prefixed, AV1 TUs) with cover still
+- capability matrix, corpus scorecard, standalone build note, migration provenance, AVIF follow-up
+- parser / composition / sequence targets, seeded corpus, Fuzz workflow; package exclude
+- enforce the MIAF 64-pixel tile floor when gridding (fixes the grid round-trip test)
+- writer + encode: HeifWriter / SequenceWriter, HEVC + AV1 still encoding, 'heif' framework encoder
+- sequence + demux + registry: moov/trak/stbl tracks, framework Demuxer, heif codec, probe priority
+- use clamp in the oracle channel count (clippy manual_clamp)
+- grid / overlay / identity derivations, clap/irot/imir, alpha attachment; whole-image decode driver
+- coded items through oxideav-h265 / oxideav-av1, crate-local planar frame
+- typed property surface, hvcC/av1C records, derivation graph, MIAF typed checks
+- ISOBMFF box reader, ftyp brands, meta tree model, item payload resolution
+
 - `gainmap` (both builds): ISO 21496-1 gain maps — `GainMapMetadata`
   (C.2 payload, `tmap` version prefix, parse / serialise), H.273
   transfer + primaries helpers, `apply_gain_map` (Formulas 1–3, §6.2.2
