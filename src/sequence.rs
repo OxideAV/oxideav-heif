@@ -47,6 +47,10 @@ pub struct SampleEntry {
     pub hvcc: Option<HevcConfig>,
     /// `av1C` child, when present.
     pub av1c: Option<Av1Config>,
+    /// `avcC` child, when present (`avc1` / `avc3` entries).
+    pub avcc: Option<crate::avcc::AvcConfig>,
+    /// `lhvC` child, when present (`lhv1` / `hvc2` entries).
+    pub lhvc: Option<crate::lhvc::LhevcConfig>,
     /// `ccst` child (mandatory for `pict` tracks).
     pub ccst: Option<CodingConstraints>,
     /// `auxi` `aux_track_type` URN (auxiliary tracks).
@@ -828,6 +832,8 @@ fn parse_visual_entry(entry_type: FourCc, p: &[u8]) -> Result<SampleEntry> {
         height,
         hvcc: None,
         av1c: None,
+        avcc: None,
+        lhvc: None,
         ccst: None,
         aux_track_type: None,
         colr: Vec::new(),
@@ -851,6 +857,8 @@ fn parse_visual_entry(entry_type: FourCc, p: &[u8]) -> Result<SampleEntry> {
         match &h.box_type {
             b"hvcC" => entry.hvcc = Some(HevcConfig::parse(body)?),
             b"av1C" => entry.av1c = Some(Av1Config::parse(body)?),
+            b"avcC" => entry.avcc = Some(crate::avcc::AvcConfig::parse(body)?),
+            b"lhvC" => entry.lhvc = Some(crate::lhvc::LhevcConfig::parse(body)?),
             b"ccst" => {
                 let (_v, _f, b) = parse_full_box(body)?;
                 let mut cr = Reader::new(b);

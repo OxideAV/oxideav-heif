@@ -234,6 +234,95 @@ fn nal_header_bytes(h: &oxideav_h265::NalHeader) -> [u8; 2] {
     ]
 }
 
+/// Build an `avcC` record + `AVCItemData` (HEIF E.2.2: length-prefixed
+/// NAL units of exactly one access unit) from an Annex B access unit;
+/// returns `(record, item data, width, height, layout)` with the size
+/// from the SPS (cropped, H.264 §7.4.2.1.1).
+pub fn avc_item_from_annex_b(
+    annex_b: &[u8],
+) -> Result<(crate::avcc::AvcConfig, Vec<u8>, u32, u32, HeifPixelFormat)> {
+    use oxideav_h264::nal::{parse_nal_unit, AnnexBSplitter};
+    let mut sps_units: Vec<Vec<u8>> = Vec::new();
+    let mut pps_units: Vec<Vec<u8>> = Vec::new();
+    let mut vcl: Vec<&[u8]> = Vec::new();
+    let mut sps: Option<oxideav_h264::sps::Sps> = None;
+    for nal in AnnexBSplitter::new(annex_b) {
+        let Some(&h) = nal.first() else { continue };
+        match h & 0x1f {
+            7 => {
+                if sps.is_none() {
+                    let parsed = parse_nal_unit(nal)
+                        .map_err(|e| HeifError::invalid(format!("AVC NAL parse: {e}")))?;
+                    sps = Some(
+                        oxideav_h264::sps::Sps::parse(&parsed.rbsp)
+                            .map_err(|e| HeifError::invalid(format!("AVC SPS parse: {e}")))?,
+                    );
+                }
+                sps_units.push(nal.to_vec());
+            }
+            8 => pps_units.push(nal.to_vec()),
+            1..=5 => vcl.push(nal),
+            _ => {} // SEI / AUD / filler ride out.
+        }
+    }
+    let sps = sps.ok_or_else(|| HeifError::invalid("AVC access unit without an SPS"))?;
+    if vcl.is_empty() {
+        return Err(HeifError::invalid("AVC access unit without VCL NAL units"));
+    }
+    // Cropped picture size (§7.4.2.1.1): CropUnitX / CropUnitY from the
+    // chroma format (1 for 4:0:0 and separate planes), the map-unit
+    // height doubled for field coding.
+    let chroma_idc = sps.chroma_format_idc as u8;
+    let chroma_array_type = if sps.separate_colour_plane_flag {
+        0
+    } else {
+        chroma_idc
+    };
+    let (sub_w, sub_h) = match chroma_array_type {
+        1 => (2, 2),
+        2 => (2, 1),
+        _ => (1, 1),
+    };
+    let frame_mbs_only = sps.frame_mbs_only_flag as u32;
+    let crop_unit_x = if chroma_array_type == 0 { 1 } else { sub_w };
+    let crop_unit_y = if chroma_array_type == 0 { 1 } else { sub_h } * (2 - frame_mbs_only);
+    let coded_w = (sps.pic_width_in_mbs_minus1 + 1) * 16;
+    let coded_h: u32 = (2 - frame_mbs_only) * (sps.pic_height_in_map_units_minus1 + 1) * 16;
+    let (w, h) = match &sps.frame_cropping {
+        Some(c) => (
+            coded_w
+                .checked_sub(crop_unit_x * (c.left + c.right))
+                .ok_or_else(|| HeifError::invalid("AVC SPS crop wider than the picture"))?,
+            coded_h
+                .checked_sub(crop_unit_y * (c.top + c.bottom))
+                .ok_or_else(|| HeifError::invalid("AVC SPS crop taller than the picture"))?,
+        ),
+        None => (coded_w, coded_h),
+    };
+    let chroma = Chroma::from_idc(chroma_idc)
+        .ok_or_else(|| HeifError::invalid("AVC SPS chroma_format_idc"))?;
+    let layout = HeifPixelFormat::new(chroma, 8 + sps.bit_depth_luma_minus8 as u8, false)?;
+    let first_sps = &sps_units[0];
+    let trailer = crate::avcc::AvcConfig::has_extension_trailer(sps.profile_idc);
+    let mut cfg = crate::avcc::AvcConfig {
+        configuration_version: 1,
+        profile_idc: sps.profile_idc,
+        profile_compatibility: first_sps.get(2).copied().unwrap_or(0),
+        level_idc: sps.level_idc,
+        length_size: 4,
+        sps: sps_units,
+        pps: pps_units,
+        chroma_format: trailer.then_some(chroma_idc),
+        bit_depth_luma_minus8: trailer.then_some(sps.bit_depth_luma_minus8 as u8),
+        bit_depth_chroma_minus8: trailer.then_some(sps.bit_depth_chroma_minus8 as u8),
+        sps_ext: Vec::new(),
+        raw: Vec::new(),
+    };
+    cfg.raw = cfg.serialize();
+    let data = join_length_prefixed(&vcl, 4)?;
+    Ok((cfg, data, w, h, layout))
+}
+
 /// Build an `hvcC` record + `HEVCItemData` from an Annex B access unit.
 pub fn hevc_item_from_annex_b(
     annex_b: &[u8],

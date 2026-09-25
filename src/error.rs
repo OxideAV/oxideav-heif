@@ -20,6 +20,15 @@ pub enum HeifError {
     /// A structural limit was exceeded (derivation depth, canvas size,
     /// item count, …). Raised before any large allocation happens.
     ResourceExhausted(String),
+    /// An L-HEVC (`lhv1`) item asks for an output layer set beyond the
+    /// base layer; this crate decodes the base layer only (opt in with
+    /// `ItemDecoder::base_layer_fallback`).
+    LayeredHevc {
+        /// The item.
+        item_id: u32,
+        /// Its `tols` `target_ols_idx`.
+        target_ols_idx: u16,
+    },
 }
 
 impl HeifError {
@@ -45,6 +54,13 @@ impl fmt::Display for HeifError {
             HeifError::InvalidData(m) => write!(f, "heif: invalid data: {m}"),
             HeifError::Unsupported(m) => write!(f, "heif: unsupported: {m}"),
             HeifError::ResourceExhausted(m) => write!(f, "heif: resource exhausted: {m}"),
+            HeifError::LayeredHevc {
+                item_id,
+                target_ols_idx,
+            } => write!(
+                f,
+                "heif: unsupported: item {item_id}: L-HEVC output layer set {target_ols_idx} needs enhancement layers (base layer only)"
+            ),
         }
     }
 }
@@ -61,6 +77,7 @@ impl From<HeifError> for oxideav_core::Error {
             HeifError::InvalidData(m) => oxideav_core::Error::InvalidData(m),
             HeifError::Unsupported(m) => oxideav_core::Error::Unsupported(m),
             HeifError::ResourceExhausted(m) => oxideav_core::Error::ResourceExhausted(m),
+            e @ HeifError::LayeredHevc { .. } => oxideav_core::Error::Unsupported(e.to_string()),
         }
     }
 }

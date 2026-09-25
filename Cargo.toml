@@ -24,6 +24,7 @@ exclude = ["/tests", "/fuzz"]
 # codec crate.
 oxideav-core = { version = "0.1", optional = true }
 oxideav-h265 = { version = "0.0.11", optional = true }
+oxideav-h264 = { version = "0.1", optional = true }
 oxideav-av1 = { version = "0.1.19", optional = true }
 
 [dev-dependencies]
@@ -33,7 +34,7 @@ compcol = { version = "0.6", default-features = false, features = ["zlib"] }
 
 [features]
 default = ["registry"]
-registry = ["dep:oxideav-core", "dep:oxideav-h265", "dep:oxideav-av1"]
+registry = ["dep:oxideav-core", "dep:oxideav-h265", "dep:oxideav-h264", "dep:oxideav-av1"]
 
 [[example]]
 name = "heifdump"

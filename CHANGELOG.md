@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `avc1` items (HEIF Annex E): typed `AvcConfig` (`avcC`, ISO/IEC
+  14496-15 §5.3.2.1 incl. the High-family trailer) and decoding
+  through oxideav-h264 (`"h264"`, record as `extradata`,
+  length-prefixed access unit) — directly, through a registry, the
+  framework demuxer and the `"heif"` codec; `avc_item_from_annex_b`
+  builds the record + item data (size from the SPS crop) from an
+  Annex B access unit. Items built from a black-box AVC encoder
+  (Baseline / Main / High / High 4:2:2 / High 4:4:4 / High 10)
+  decode byte-exact against that encoder's decoder; libheif, Apple
+  ImageIO and ImageMagick open the files, ffmpeg's HEIF demuxer
+  refuses them. `avc1` / `avc3` sample entries carry `avcC`.
+- `lhv1` items (HEIF B.2.2.1.3): typed `LhevcConfig` (`lhvC`,
+  14496-15 §9.5), `OperatingPoints` (`oinf`, §9.6.2.2: PTLs,
+  operating points with output layers, layer dependencies) and `tols`
+  properties; the base layer (`nuh_layer_id` 0, parameter sets and
+  access unit filtered, Annex B) decodes through oxideav-h265; an
+  output layer set with enhancement layers is the typed
+  `HeifError::LayeredHevc { item_id, target_ols_idx }` unless
+  `ItemDecoder::base_layer_fallback()`. `lhv1` / `hvc2` sample
+  entries carry `lhvC`.
+- New optional dependency `oxideav-h264 = "0.1"` under `registry`.
+
 - `props` / `sequence`: `clli` / `mdcv` / `cclv` / `amve` follow ISO/IEC
   14496-12 8th ed. §12.1.6–9 exactly — plain Boxes on the wire (`cclv`
   and `amve` were written as FullBoxes; a FullBox prefix is still

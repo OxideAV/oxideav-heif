@@ -28,13 +28,15 @@ use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
 use crate::hvcc::HevcConfig;
 use crate::image::{Chroma, HeifFrame, HeifPixelFormat, HeifPlane};
-use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_HEV1, ITEM_TYPE_HVC1};
+use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_AVC1, ITEM_TYPE_HEV1, ITEM_TYPE_HVC1, ITEM_TYPE_LHV1};
 use crate::props::{Colr, ItemProperties};
 
 /// Codec id the HEVC decoder is registered under.
 pub const CODEC_ID_HEVC: &str = "h265";
 /// Codec id the AV1 decoder is registered under.
 pub const CODEC_ID_AV1: &str = "av1";
+/// Codec id the AVC decoder is registered under.
+pub const CODEC_ID_AVC: &str = "h264";
 
 /// Upper bound on the number of coded items decoded for one image.
 pub const MAX_ITEM_DECODES: usize = 4096;
@@ -62,6 +64,7 @@ pub struct ItemDecoder<'r> {
     registry: Option<&'r CodecRegistry>,
     tone_map: ToneMapOutput,
     reference_white_nits: Option<f64>,
+    base_layer_fallback: bool,
 }
 
 impl<'r> ItemDecoder<'r> {
@@ -71,6 +74,7 @@ impl<'r> ItemDecoder<'r> {
             registry: None,
             tone_map: ToneMapOutput::Base,
             reference_white_nits: None,
+            base_layer_fallback: false,
         }
     }
 
@@ -80,6 +84,7 @@ impl<'r> ItemDecoder<'r> {
             registry: Some(registry),
             tone_map: ToneMapOutput::Base,
             reference_white_nits: None,
+            base_layer_fallback: false,
         }
     }
 
@@ -97,6 +102,14 @@ impl<'r> ItemDecoder<'r> {
     /// The selected [`ToneMapOutput`].
     pub fn tone_map_output(&self) -> ToneMapOutput {
         self.tone_map
+    }
+
+    /// Decode the base layer of an `lhv1` item whose `tols` asks for
+    /// an output layer set with enhancement layers, instead of the
+    /// typed [`HeifError::LayeredHevc`] refusal.
+    pub fn base_layer_fallback(mut self) -> Self {
+        self.base_layer_fallback = true;
+        self
     }
 
     /// The HDR reference white (cd/m²) a PQ-coded tone-mapped
@@ -119,6 +132,14 @@ impl<'r> ItemDecoder<'r> {
         let (id, extradata, layout) = match kind {
             CodedKind::Hevc(cfg) => (CODEC_ID_HEVC, cfg.raw.clone(), hevc_layout(cfg)?),
             CodedKind::Av1(cfg) => (CODEC_ID_AV1, cfg.raw.clone(), av1_layout(cfg)?),
+            CodedKind::Avc(cfg) => (CODEC_ID_AVC, cfg.raw.clone(), cfg.layout()?),
+            // The base layer travels Annex B (parameter sets in band),
+            // so the decoder gets no record.
+            CodedKind::LayeredHevc(_) => (
+                CODEC_ID_HEVC,
+                Vec::new(),
+                layered_base_layout(&node.properties)?,
+            ),
         };
         let mut params = CodecParameters::video(CodecId::new(id));
         params.extradata = extradata;
@@ -136,6 +157,7 @@ impl<'r> ItemDecoder<'r> {
             None => match params.codec_id.as_str() {
                 CODEC_ID_HEVC => oxideav_h265::make_decoder(params),
                 CODEC_ID_AV1 => oxideav_av1::registry::make_decoder(params),
+                CODEC_ID_AVC => oxideav_h264::h264_decoder::make_decoder(params),
                 other => Err(CoreError::codec_not_found(other)),
             },
         };
@@ -154,9 +176,31 @@ impl<'r> ItemDecoder<'r> {
         let layout = match &kind {
             CodedKind::Hevc(c) => hevc_layout(c)?,
             CodedKind::Av1(c) => av1_layout(c)?,
+            CodedKind::Avc(c) => c.layout()?,
+            CodedKind::LayeredHevc(_) => layered_base_layout(&node.properties)?,
         };
         let params = Self::codec_parameters(node)?;
-        let data = file.item_data_owned(node.item.id)?;
+        let data = match &kind {
+            CodedKind::LayeredHevc(cfg) => {
+                // HEIF B.2.2.1.3: the item's tols names the output
+                // layer set; anything beyond the base layer is a typed
+                // refusal unless the caller settles for the base.
+                let tols = node.properties.tols().unwrap_or(0);
+                let enhancement = node
+                    .properties
+                    .oinf()
+                    .map(|o| o.output_layers(tols).iter().any(|l| *l != 0))
+                    .unwrap_or(tols != 0);
+                if enhancement && !self.base_layer_fallback {
+                    return Err(HeifError::LayeredHevc {
+                        item_id: node.item.id,
+                        target_ols_idx: tols,
+                    });
+                }
+                base_layer_annex_b(cfg, &file.item_data(node.item.id)?)?
+            }
+            _ => file.item_data_owned(node.item.id)?,
+        };
         if data.is_empty() {
             return Err(HeifError::invalid(format!(
                 "item {}: empty payload",
@@ -204,13 +248,58 @@ impl<'r> ItemDecoder<'r> {
 }
 
 #[doc(hidden)]
-/// The two coded item kinds this crate decodes.
+/// The coded item kinds this crate decodes.
 #[derive(Clone, Copy, Debug)]
 pub enum CodedKind<'a> {
     /// `hvc1` / `hev1` with its `hvcC`.
     Hevc(&'a HevcConfig),
     /// `av01` with its `av1C`.
     Av1(&'a Av1Config),
+    /// `avc1` with its `avcC`.
+    Avc(&'a crate::avcc::AvcConfig),
+    /// `lhv1` with its `lhvC` (base layer decoded).
+    LayeredHevc(&'a crate::lhvc::LhevcConfig),
+}
+
+/// Sample layout of an `lhv1` item's base layer: the `oinf` operating
+/// point of output layer set 0 (its `maxChromaFormat` /
+/// `maxBitDepthMinus8`), else that of the first operating point.
+pub fn layered_base_layout(props: &ItemProperties) -> Result<HeifPixelFormat> {
+    let oinf = props
+        .oinf()
+        .ok_or_else(|| HeifError::invalid("lhv1 item without an oinf property (HEIF B.2.2.1.3)"))?;
+    let op = oinf
+        .operating_point(0)
+        .or_else(|| oinf.operating_points.first())
+        .ok_or_else(|| HeifError::invalid("oinf without operating points"))?;
+    let chroma = Chroma::from_idc(op.max_chroma_format)
+        .ok_or_else(|| HeifError::invalid("oinf maxChromaFormat"))?;
+    HeifPixelFormat::new(chroma, 8 + op.max_bit_depth_minus8, false)
+}
+
+/// The base layer (`nuh_layer_id` 0) of an `lhv1` access unit as an
+/// Annex B stream: the record's parameter sets first, then the item's
+/// length-prefixed NAL units, every unit filtered to layer 0.
+pub fn base_layer_annex_b(cfg: &crate::lhvc::LhevcConfig, item: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(item.len() + 64);
+    let mut push = |nal: &[u8]| {
+        if crate::lhvc::nuh_layer_id(nal) == Some(0) {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(nal);
+        }
+    };
+    for n in cfg.nal_units() {
+        push(n);
+    }
+    for n in crate::hvcc::split_length_prefixed(item, cfg.length_size)? {
+        push(n);
+    }
+    if out.is_empty() {
+        return Err(HeifError::invalid(
+            "lhv1 item carries no base-layer NAL units",
+        ));
+    }
+    Ok(out)
 }
 
 #[doc(hidden)]
@@ -246,6 +335,24 @@ pub fn classify(node: &ImageNode) -> Result<ItemKind<'_>> {
                 })?;
                 Ok(ItemKind::Coded(CodedKind::Av1(cfg)))
             }
+            ITEM_TYPE_AVC1 => {
+                let cfg = node.properties.avcc().ok_or_else(|| {
+                    HeifError::invalid(format!(
+                        "item {}: avc1 item without an avcC property (HEIF E.2.3)",
+                        node.item.id
+                    ))
+                })?;
+                Ok(ItemKind::Coded(CodedKind::Avc(cfg)))
+            }
+            ITEM_TYPE_LHV1 => {
+                let cfg = node.properties.lhvc().ok_or_else(|| {
+                    HeifError::invalid(format!(
+                        "item {}: lhv1 item without an lhvC property (HEIF B.2.3.2)",
+                        node.item.id
+                    ))
+                })?;
+                Ok(ItemKind::Coded(CodedKind::LayeredHevc(cfg)))
+            }
             other => Err(HeifError::unsupported(format!(
                 "item {}: coded image type '{}' has no decoder in this crate",
                 node.item.id,
@@ -279,6 +386,12 @@ pub fn layout_of(props: &ItemProperties) -> Option<HeifPixelFormat> {
     }
     if let Some(a) = props.av1c() {
         return av1_layout(a).ok();
+    }
+    if let Some(a) = props.avcc() {
+        return a.layout().ok();
+    }
+    if props.lhvc().is_some() {
+        return layered_base_layout(props).ok();
     }
     None
 }

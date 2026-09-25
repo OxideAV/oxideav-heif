@@ -15,9 +15,11 @@
 //!   processed (§9.3.1 of the 2017 edition).
 
 use crate::av1c::Av1Config;
+use crate::avcc::AvcConfig;
 use crate::boxes::{fourcc_str, parse_full_box, FourCc, Reader};
 use crate::error::{HeifError, Result};
 use crate::hvcc::HevcConfig;
+use crate::lhvc::{LhevcConfig, OperatingPoints};
 use crate::meta::{Meta, RawProperty};
 
 /// Alpha plane URN, codec-independent (HEIF §6.9.1, MIAF §7.3.5.1).
@@ -495,10 +497,14 @@ pub enum Property {
     HvcC(HevcConfig),
     /// `av1C` — AV1 codec configuration (AVIF §4.2).
     Av1C(Av1Config),
-    /// `lhvC` — layered HEVC configuration, kept raw.
-    LhvC(Vec<u8>),
-    /// `avcC` — AVC configuration, kept raw.
-    AvcC(Vec<u8>),
+    /// `lhvC` — layered HEVC configuration (HEIF B.2.3.2).
+    LhvC(LhevcConfig),
+    /// `avcC` — AVC configuration (HEIF E.2.3).
+    AvcC(AvcConfig),
+    /// `oinf` — operating points information (HEIF B.2.3.3).
+    Oinf(OperatingPoints),
+    /// `tols` — target output layer set (HEIF §6.5.29).
+    Tols(u16),
     /// `clli`.
     Clli(Clli),
     /// `mdcv`.
@@ -546,6 +552,8 @@ impl Property {
             Property::Av1C(_) => *b"av1C",
             Property::LhvC(_) => *b"lhvC",
             Property::AvcC(_) => *b"avcC",
+            Property::Oinf(_) => *b"oinf",
+            Property::Tols(_) => *b"tols",
             Property::Clli(_) => *b"clli",
             Property::Mdcv(_) => *b"mdcv",
             Property::Cclv(_) => *b"cclv",
@@ -596,8 +604,22 @@ impl Property {
             b"auxC" => Property::AuxC(parse_auxc(b)?),
             b"hvcC" => Property::HvcC(HevcConfig::parse(b)?),
             b"av1C" => Property::Av1C(Av1Config::parse(b)?),
-            b"lhvC" => Property::LhvC(b.to_vec()),
-            b"avcC" => Property::AvcC(b.to_vec()),
+            b"lhvC" => Property::LhvC(LhevcConfig::parse(b)?),
+            b"avcC" => Property::AvcC(AvcConfig::parse(b)?),
+            b"oinf" => {
+                let (v, _f, body) = parse_full_box(b)?;
+                if v != 0 {
+                    return Err(HeifError::invalid(format!("oinf version {v}")));
+                }
+                Property::Oinf(OperatingPoints::parse(body)?)
+            }
+            b"tols" => {
+                let (v, _f, body) = parse_full_box(b)?;
+                if v != 0 {
+                    return Err(HeifError::invalid(format!("tols version {v}")));
+                }
+                Property::Tols(Reader::new(body).u16("tols target_ols_idx")?)
+            }
             b"clli" => Property::Clli(parse_clli(b)?),
             b"mdcv" => Property::Mdcv(parse_mdcv(b)?),
             b"cclv" => Property::Cclv(parse_cclv(b)?),
@@ -761,6 +783,38 @@ impl ItemProperties {
     pub fn hvcc(&self) -> Option<&HevcConfig> {
         self.descriptive().find_map(|e| match &e.property {
             Property::HvcC(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// `avcC`.
+    pub fn avcc(&self) -> Option<&AvcConfig> {
+        self.descriptive().find_map(|e| match &e.property {
+            Property::AvcC(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// `lhvC`.
+    pub fn lhvc(&self) -> Option<&LhevcConfig> {
+        self.descriptive().find_map(|e| match &e.property {
+            Property::LhvC(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// `oinf`.
+    pub fn oinf(&self) -> Option<&OperatingPoints> {
+        self.descriptive().find_map(|e| match &e.property {
+            Property::Oinf(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// `tols` `target_ols_idx`.
+    pub fn tols(&self) -> Option<u16> {
+        self.descriptive().find_map(|e| match &e.property {
+            Property::Tols(v) => Some(*v),
             _ => None,
         })
     }
@@ -1264,8 +1318,10 @@ pub mod write {
             }
             Property::HvcC(h) => boxed(b"hvcC", &h.to_bytes()),
             Property::Av1C(a) => boxed(b"av1C", &a.to_bytes()),
-            Property::LhvC(raw) => boxed(b"lhvC", raw),
-            Property::AvcC(raw) => boxed(b"avcC", raw),
+            Property::LhvC(c) => boxed(b"lhvC", &c.serialize()),
+            Property::AvcC(c) => boxed(b"avcC", &c.serialize()),
+            Property::Oinf(o) => full_boxed(b"oinf", 0, 0, &o.serialize()),
+            Property::Tols(t) => full_boxed(b"tols", 0, 0, &t.to_be_bytes()),
             Property::Clli(c) => {
                 let mut b = c.max_content_light_level.to_be_bytes().to_vec();
                 b.extend_from_slice(&c.max_pic_average_light_level.to_be_bytes());
@@ -1480,8 +1536,40 @@ mod tests {
             aux_type: AUX_URN_ALPHA.into(),
             aux_subtype: vec![0, 0, 0, 0],
         }));
-        round_trip(Property::LhvC(vec![1]));
-        round_trip(Property::AvcC(vec![1, 2]));
+        round_trip(Property::LhvC(LhevcConfig {
+            configuration_version: 1,
+            min_spatial_segmentation_idc: 0,
+            parallelism_type: 0,
+            num_temporal_layers: 1,
+            temporal_id_nested: true,
+            length_size: 4,
+            arrays: vec![],
+            raw: vec![1, 0xf0, 0, 0xfc, 0x0f, 0],
+        }));
+        round_trip(Property::AvcC(AvcConfig {
+            configuration_version: 1,
+            profile_idc: 66,
+            profile_compatibility: 0xc0,
+            level_idc: 30,
+            length_size: 4,
+            sps: vec![vec![0x67, 0x42, 0xc0, 0x1e]],
+            pps: vec![vec![0x68, 0xce]],
+            chroma_format: None,
+            bit_depth_luma_minus8: None,
+            bit_depth_chroma_minus8: None,
+            sps_ext: vec![],
+            raw: vec![
+                1, 66, 0xc0, 30, 0xff, 0xe1, 0, 4, 0x67, 0x42, 0xc0, 0x1e, 1, 0, 2, 0x68, 0xce,
+            ],
+        }));
+        round_trip(Property::Tols(3));
+        round_trip(Property::Oinf(OperatingPoints {
+            scalability_mask: 0,
+            ptls: vec![],
+            operating_points: vec![],
+            layers: vec![],
+            raw: vec![0, 0, 0, 0, 0, 0],
+        }));
         round_trip(Property::Clli(Clli {
             max_content_light_level: 1000,
             max_pic_average_light_level: 400,

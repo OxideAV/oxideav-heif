@@ -188,9 +188,11 @@ fn codec_id_for_entry(entry_type: &[u8; 4], codecs: &dyn CodecResolver) -> Optio
         return Some(id);
     }
     match entry_type {
-        b"hvc1" | b"hev1" | b"hvc2" | b"hev2" => Some(CodecId::new(decode::CODEC_ID_HEVC)),
+        b"hvc1" | b"hev1" | b"hvc2" | b"hev2" | b"lhv1" | b"lhe1" => {
+            Some(CodecId::new(decode::CODEC_ID_HEVC))
+        }
         b"av01" => Some(CodecId::new(decode::CODEC_ID_AV1)),
-        b"avc1" | b"avc3" => Some(CodecId::new("h264")),
+        b"avc1" | b"avc3" => Some(CodecId::new(decode::CODEC_ID_AVC)),
         _ => None,
     }
 }
@@ -295,6 +297,11 @@ impl HeifDemuxer {
                 } else if let Some(a) = &entry.av1c {
                     params.extradata = a.raw.clone();
                     params.pixel_format = decode::av1_layout(a).ok().and_then(|f| f.to_core());
+                } else if let Some(a) = &entry.avcc {
+                    params.extradata = a.raw.clone();
+                    params.pixel_format = a.layout().ok().and_then(|f| f.to_core());
+                } else if let Some(l) = &entry.lhvc {
+                    params.extradata = l.raw.clone();
                 }
                 params = params.with_tag(CodecTag::fourcc(&entry.entry_type));
                 let time_base = TimeBase::new(1, t.timescale.max(1) as i64);

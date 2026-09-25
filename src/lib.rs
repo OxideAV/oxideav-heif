@@ -56,6 +56,7 @@
 #![warn(missing_docs)]
 
 pub mod av1c;
+pub mod avcc;
 pub mod boxes;
 pub mod compose;
 pub mod derived;
@@ -65,6 +66,7 @@ pub mod ftyp;
 pub mod gainmap;
 pub mod hvcc;
 pub mod image;
+pub mod lhvc;
 pub mod meta;
 pub mod miaf;
 pub mod props;
@@ -84,6 +86,7 @@ pub mod mux;
 pub mod registry;
 
 pub use av1c::Av1Config;
+pub use avcc::AvcConfig;
 pub use derived::{
     build_graph, build_primary_graph, GridDescriptor, ImageKind, ImageNode, OverlayDescriptor,
 };
@@ -93,6 +96,7 @@ pub use ftyp::{BrandClass, FileType};
 pub use gainmap::{apply_gain_map, GainMapMetadata, LinearRgbImage};
 pub use hvcc::HevcConfig;
 pub use image::{Chroma, HeifFrame, HeifPixelFormat, HeifPlane};
+pub use lhvc::{LhevcConfig, OperatingPoints};
 pub use meta::{
     EntityGroup, Extent, ItemInfo, ItemLocation, ItemReference, Meta, PropertyAssociation,
     RawProperty,
