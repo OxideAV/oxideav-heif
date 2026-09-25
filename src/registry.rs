@@ -55,7 +55,8 @@ pub fn register_codecs(reg: &mut oxideav_core::CodecRegistry) {
         CodecInfo::new(CodecId::new(CODEC_ID))
             .capabilities(caps)
             .decoder(make_decoder)
-            .encoder(make_encoder),
+            .encoder(make_encoder)
+            .encoder_options::<crate::encode::HeifEncoderOptions>(),
     );
 }
 
@@ -99,6 +100,13 @@ mod tests {
         assert!(ctx.containers.demuxer_names().any(|n| n == CONTAINER_NAME));
         assert!(ctx.containers.muxer_names().any(|n| n == CONTAINER_NAME));
         assert!(ctx.codecs.has_decoder(&CodecId::new(CODEC_ID)));
+        // The encoder declares its option schema.
+        let schema = ctx
+            .codecs
+            .encoder_options_schema(&CodecId::new(CODEC_ID))
+            .expect("encoder options schema");
+        let names: Vec<&str> = schema.iter().map(|f| f.name).collect();
+        assert_eq!(names, ["codec", "mode", "qp", "grid", "thumbnail", "range"]);
         assert_eq!(
             ctx.containers.probe_priority(CONTAINER_NAME),
             Some(PROBE_PRIORITY)

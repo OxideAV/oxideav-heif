@@ -828,6 +828,121 @@ pub fn packed_to_planar(
     Ok(out)
 }
 
+/// Typed options of the `"heif"` framework encoder (declared schema:
+/// `oxideav info heif` lists them; unknown keys are refused).
+#[derive(Clone, Debug)]
+pub struct HeifEncoderOptions {
+    /// `codec`: `hevc` (alias `h265`) or `av1`.
+    pub codec: String,
+    /// `mode` (HEVC): `intra` (CABAC at `qp`) or `pcm` (lossless).
+    pub mode: String,
+    /// `qp` (HEVC intra), 0..=51.
+    pub qp: u32,
+    /// `grid`: tile size for a `grid` primary (0 = none).
+    pub grid: u32,
+    /// `thumbnail`: largest thumbnail dimension (0 = none).
+    pub thumbnail: u32,
+    /// `range`: `full` or `limited` sample range of the written `nclx`.
+    pub range: String,
+}
+
+impl Default for HeifEncoderOptions {
+    fn default() -> Self {
+        Self {
+            codec: "hevc".into(),
+            mode: "intra".into(),
+            qp: 26,
+            grid: 0,
+            thumbnail: 0,
+            range: "full".into(),
+        }
+    }
+}
+
+impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
+    const SCHEMA: &'static [oxideav_core::OptionField] = &[
+        oxideav_core::OptionField {
+            name: "codec",
+            kind: oxideav_core::OptionKind::Enum(&["hevc", "h265", "av1"]),
+            default: oxideav_core::OptionValue::String(String::new()),
+            help: "Coded item codec: hevc (heic file) or av1 (avif file, lossless)",
+        },
+        oxideav_core::OptionField {
+            name: "mode",
+            kind: oxideav_core::OptionKind::Enum(&["intra", "pcm"]),
+            default: oxideav_core::OptionValue::String(String::new()),
+            help: "HEVC coding: intra (CABAC at qp) or pcm (lossless)",
+        },
+        oxideav_core::OptionField {
+            name: "qp",
+            kind: oxideav_core::OptionKind::U32,
+            default: oxideav_core::OptionValue::U32(26),
+            help: "HEVC intra quantiser 0..=51 (lower = better)",
+        },
+        oxideav_core::OptionField {
+            name: "grid",
+            kind: oxideav_core::OptionKind::U32,
+            default: oxideav_core::OptionValue::U32(0),
+            help: "Tile the picture into a grid of this size (0 = single item; MIAF 64-px floor)",
+        },
+        oxideav_core::OptionField {
+            name: "thumbnail",
+            kind: oxideav_core::OptionKind::U32,
+            default: oxideav_core::OptionValue::U32(0),
+            help: "Add a thumbnail whose largest dimension is this many pixels (0 = none)",
+        },
+        oxideav_core::OptionField {
+            name: "range",
+            kind: oxideav_core::OptionKind::Enum(&["full", "limited"]),
+            default: oxideav_core::OptionValue::String(String::new()),
+            help: "Sample range written in nclx: full (default) or limited",
+        },
+    ];
+
+    fn apply(&mut self, key: &str, value: &oxideav_core::OptionValue) -> CoreResult<()> {
+        match key {
+            "codec" => self.codec = value.as_str()?.to_string(),
+            "mode" => self.mode = value.as_str()?.to_string(),
+            "qp" => self.qp = value.as_u32()?,
+            "grid" => self.grid = value.as_u32()?,
+            "thumbnail" => self.thumbnail = value.as_u32()?,
+            "range" => self.range = value.as_str()?.to_string(),
+            other => {
+                return Err(CoreError::invalid(format!(
+                    "heif: unknown option '{other}'"
+                )))
+            }
+        }
+        Ok(())
+    }
+}
+
+impl HeifEncoderOptions {
+    /// The `EncodeOptions` these settings describe.
+    pub fn to_encode_options(&self) -> CoreResult<EncodeOptions> {
+        let mut opts = EncodeOptions {
+            codec: match self.codec.as_str() {
+                "hevc" | "h265" => StillCodec::Hevc,
+                "av1" => StillCodec::Av1,
+                other => {
+                    return Err(CoreError::invalid(format!(
+                        "heif: unknown codec option '{other}'"
+                    )))
+                }
+            },
+            hevc_mode: self.mode.clone(),
+            qp: u8::try_from(self.qp.min(51)).unwrap_or(51),
+            grid_tile: (self.grid > 0).then_some(self.grid),
+            thumbnail_max_dim: (self.thumbnail > 0).then_some(self.thumbnail),
+            ..EncodeOptions::default()
+        };
+        if let Colr::Nclx { full_range, .. } = &mut opts.colr {
+            *full_range = self.range != "limited";
+        }
+        Ok(opts)
+    }
+}
+
 /// The `"heif"` framework encoder: every video frame becomes one
 /// packet holding a complete HEIF file.
 pub struct HeifEncoder {
@@ -838,57 +953,12 @@ pub struct HeifEncoder {
 }
 
 impl HeifEncoder {
-    /// Construct from stream parameters; recognised options: `codec`
-    /// (`hevc` / `av1`), `mode` (`pcm` / `intra`), `qp`, `grid`
-    /// (tile size), `thumbnail` (max dimension), `range` (`full` —
-    /// the default, what Apple ImageIO writes for sRGB sources — or
-    /// `limited`).
+    /// Construct from stream parameters; the options are the declared
+    /// [`HeifEncoderOptions`] schema (`codec`, `mode`, `qp`, `grid`,
+    /// `thumbnail`, `range`); unknown keys are refused.
     pub fn new(params: &CodecParameters) -> CoreResult<Self> {
-        let mut opts = EncodeOptions::default();
-        if let Some(c) = params.options.get("codec") {
-            opts.codec = match c {
-                "hevc" | "h265" => StillCodec::Hevc,
-                "av1" => StillCodec::Av1,
-                other => {
-                    return Err(CoreError::invalid(format!(
-                        "heif: unknown codec option '{other}'"
-                    )))
-                }
-            };
-        }
-        if let Some(m) = params.options.get("mode") {
-            opts.hevc_mode = m.to_string();
-        }
-        if let Some(q) = params.options.get("qp") {
-            opts.qp = q
-                .parse()
-                .map_err(|_| CoreError::invalid(format!("heif: qp '{q}' is not a number")))?;
-        }
-        if let Some(g) = params.options.get("grid") {
-            opts.grid_tile =
-                Some(g.parse().map_err(|_| {
-                    CoreError::invalid(format!("heif: grid '{g}' is not a number"))
-                })?);
-        }
-        if let Some(t) = params.options.get("thumbnail") {
-            opts.thumbnail_max_dim = Some(t.parse().map_err(|_| {
-                CoreError::invalid(format!("heif: thumbnail '{t}' is not a number"))
-            })?);
-        }
-        if let Some(r) = params.options.get("range") {
-            let full = match r {
-                "full" | "pc" | "jpeg" => true,
-                "limited" | "tv" | "video" => false,
-                other => {
-                    return Err(CoreError::invalid(format!(
-                        "heif: unknown range option '{other}' (full / limited)"
-                    )))
-                }
-            };
-            if let Colr::Nclx { full_range, .. } = &mut opts.colr {
-                *full_range = full;
-            }
-        }
+        let opts = oxideav_core::parse_options::<HeifEncoderOptions>(&params.options)?
+            .to_encode_options()?;
         Ok(Self {
             params: params.clone(),
             opts,
