@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `encode` (`registry`): AV1 items are quality-dialled
+  `reduced_still_picture_header` stills at the picture's own (depth,
+  chroma) pairing (8/10/12-bit, 4:0:0–4:4:4) through oxideav-av1
+  0.1.19 — `EncodeOptions::av1_quality` / `av1_speed`, framework
+  `quality` (default 60 for `codec=av1 mode=intra`; `mode=pcm` and
+  quality 100 stay lossless), `speed`; `av1C` from the encoder's codec
+  configuration; alpha as a monochrome still.
+- `encode` (`registry`): HEVC items carry the item's range and H.273
+  colour description in the bitstream VUI and are Main Still Picture
+  access units (oxideav-h265 0.0.11); Apple ImageIO now renders our
+  full-range alpha exactly. The alpha auxiliary is differentiated by
+  parameter-set ids (VPS/SPS/PPS 1) — the CTB / row-band workaround is
+  gone. Framework `rd` (intra effort 0..=2) and `tiles` (`CxR`) knobs.
+- Minimum producers: `oxideav-h265 = "0.0.11"`, `oxideav-av1 = "0.1.19"`.
+
 - `mux` (`registry`): a `"heif"` still stream (whole-file packets from
   the `"heif"` encoder) passes through the muxer as the file — exactly
   one packet; a second is a typed refusal. `oxideav convert in.png

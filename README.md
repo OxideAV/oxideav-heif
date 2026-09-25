@@ -48,7 +48,7 @@ one stream per image-sequence track (`"h265"` / `"av1"` packets with
 | Writer | `HeifWriter` (coded / grid / overlay / identity items, thumbnails, alpha / depth, Exif / XMP, entity groups, de-duplicated `ipco`, MIAF `mdat` order, brand auto-selection); `SequenceWriter` (`msf1` / `hevc`, `pict` track + `ccst`, `stco` / `co64` per §8.7.5, cover-image `meta`; opens in libheif / ImageMagick / ffmpeg / Apple ImageIO) |
 | Gain maps | ISO 21496-1: `GainMapMetadata` (C.2 payload of the `tmap` item, version-prefixed), `DecodedImage::gain_map` (decoded gain-map item + metadata + alternate `colr`), opt-in `apply_gain_map(h_target)` → linear RGB in the application space (Formulas 1–3, §6.2.2 resampling, Annex B primaries conversion, H.273 transfers 1/6/8/13/14/15/16/18); matches a black-box tone-mapper within 1 code at every headroom on mono / RGB / half-size / BT.2020 gain maps |
 | Colour | `rgb::to_rgb`: YCbCr → RGB(A) with the item `colr` matrix / range (H.273), identity (GBR), monochrome, alpha carried; the renderer step over the composed frame |
-| Encoder (`registry`) | `encode_still`: HEVC (lossless `pcm` or CABAC `intra` at a QP) or lossless AV1 items, padding + `clap`, grid tiling (MIAF 64-px floor), thumbnails, alpha (per-codec `auxC` URN, single-channel `pixi`, one `hvcC` per item), Exif / XMP / ICC, transforms as essential properties on the coded item; `"heif"` framework `Encoder` (frame in — planar YCbCr / grey or packed RGB / RGBA / BGR(A) / 16-bit / grey+alpha — file out; declared options `codec` / `mode` / `qp` / `grid` / `thumbnail` / `range`); the `"heif"` muxer passes its whole-file packets through, so `oxideav convert in.png out.heic` writes a HEIC |
+| Encoder (`registry`) | `encode_still`: HEVC (lossless `pcm` or CABAC `intra` at a QP; VUI range + colour description, Main Still Picture, `rd` / `tiles`) or AV1 stills (lossless or quality 0..=100, `speed`, native 8/10/12-bit 4:0:0–4:4:4, `av1C` from the codec configuration) items, padding + `clap`, grid tiling (MIAF 64-px floor), thumbnails, alpha (per-codec `auxC` URN, single-channel `pixi`, own parameter-set ids; AV1 alpha as a monochrome still), Exif / XMP / ICC, transforms as essential properties on the coded item; `"heif"` framework `Encoder` (frame in — planar YCbCr / grey or packed RGB / RGBA / BGR(A) / 16-bit / grey+alpha — file out; declared options `codec` / `mode` / `qp` / `grid` / `thumbnail` / `range` / `quality` / `speed` / `rd` / `tiles`); the `"heif"` muxer passes its whole-file packets through, so `oxideav convert in.png out.heic` writes a HEIC |
 | Fuzz | `fuzz/`: `heif_parse`, `heif_compose`, `heif_sequence` (standalone build), daily workflow |
 
 \* `lhvC` / `avcC` items have no decoder here. `iscl` is applied at
@@ -105,12 +105,13 @@ binary is present — is opened by `sips`, `heif-convert`, `magick`,
 `ffmpeg` and `heif-info`, alpha files included. ImageMagick (its own
 libheif decode) reproduces our decode within 1 code, transforms
 included. Apple ImageIO refuses a file whose two items carry
-byte-identical HEVC parameter sets, so the alpha auxiliary is coded
-with a distinct SPS (CTB 32 for CABAC intra, an extra clapped row band
-for PCM). Known divergence: `sips` takes the sample range from the
-bitstream VUI, which the oxideav HEVC stream does not write, so its
-render of our full-range streams is a video-range expansion (a codec
-item; libheif / magick / ffmpeg render them correctly).
+byte-identical HEVC parameter sets, so the alpha auxiliary carries its
+own parameter-set ids. The item's range and colour description are
+signalled in the HEVC VUI, so `sips` — which takes the sample range
+from the bitstream — renders our alpha exactly and our colour within
+its own colour management. Lossy AV1 (quality 60 / 30, with alpha)
+opens in all four readers and magick reproduces our decode within 1
+code.
 
 **Gain maps** (`tests/gainmap.rs`, `tests/fixtures/gainmap/`): four
 AVIF files from a black-box gain-map tool (monochrome, RGB, half-size
