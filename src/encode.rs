@@ -864,13 +864,13 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
         oxideav_core::OptionField {
             name: "codec",
             kind: oxideav_core::OptionKind::Enum(&["hevc", "h265", "av1"]),
-            default: oxideav_core::OptionValue::String(String::new()),
+            default: oxideav_core::OptionValue::String("hevc".into()),
             help: "Coded item codec: hevc (heic file) or av1 (avif file, lossless)",
         },
         oxideav_core::OptionField {
             name: "mode",
             kind: oxideav_core::OptionKind::Enum(&["intra", "pcm"]),
-            default: oxideav_core::OptionValue::String(String::new()),
+            default: oxideav_core::OptionValue::String("intra".into()),
             help: "HEVC coding: intra (CABAC at qp) or pcm (lossless)",
         },
         oxideav_core::OptionField {
@@ -894,7 +894,7 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
         oxideav_core::OptionField {
             name: "range",
             kind: oxideav_core::OptionKind::Enum(&["full", "limited"]),
-            default: oxideav_core::OptionValue::String(String::new()),
+            default: oxideav_core::OptionValue::String("full".into()),
             help: "Sample range written in nclx: full (default) or limited",
         },
     ];
