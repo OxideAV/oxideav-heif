@@ -49,7 +49,8 @@ pub fn register_codecs(reg: &mut oxideav_core::CodecRegistry) {
     let caps = CodecCapabilities::video("heif_container")
         .with_decode()
         .with_encode()
-        .with_intra_only(true);
+        .with_intra_only(true)
+        .with_pixel_formats(crate::encode::ENCODER_PIXEL_FORMATS.to_vec());
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID))
             .capabilities(caps)

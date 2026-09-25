@@ -709,6 +709,125 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
     w.write_to_vec()
 }
 
+/// Accepted framework pixel formats of the `"heif"` encoder: the planar
+/// YCbCr / grey layouts (`HeifFrame::from_core`) plus the packed RGB /
+/// RGBA / grey+alpha ones converted by [`packed_to_planar`].
+pub const ENCODER_PIXEL_FORMATS: &[oxideav_core::PixelFormat] = &[
+    oxideav_core::PixelFormat::Rgb24,
+    oxideav_core::PixelFormat::Rgba,
+    oxideav_core::PixelFormat::Bgr24,
+    oxideav_core::PixelFormat::Bgra,
+    oxideav_core::PixelFormat::Rgb48Le,
+    oxideav_core::PixelFormat::Rgba64Le,
+    oxideav_core::PixelFormat::Gray8,
+    oxideav_core::PixelFormat::Gray16Le,
+    oxideav_core::PixelFormat::Ya8,
+    oxideav_core::PixelFormat::Ya16Le,
+    oxideav_core::PixelFormat::Yuv420P,
+    oxideav_core::PixelFormat::YuvJ420P,
+    oxideav_core::PixelFormat::Yuv422P,
+    oxideav_core::PixelFormat::YuvJ422P,
+    oxideav_core::PixelFormat::Yuv444P,
+    oxideav_core::PixelFormat::YuvJ444P,
+    oxideav_core::PixelFormat::Yuva420P,
+    oxideav_core::PixelFormat::Yuva444P,
+    oxideav_core::PixelFormat::Yuv420P10Le,
+    oxideav_core::PixelFormat::Yuv444P10Le,
+];
+
+/// Convert a packed RGB / RGBA / BGR / BGRA (8 or 16-bit) or packed
+/// grey + alpha frame to the planar layout the encoder consumes: 4:4:4
+/// YCbCr (or monochrome for grey + alpha) at the source depth, through
+/// the H.273 matrix and range of `colr` (the MIAF default — BT.601,
+/// full range — for an ICC / absent one), with the alpha carried as a
+/// plane. Row-major, `stride` honoured.
+pub fn packed_to_planar(
+    vf: &oxideav_core::VideoFrame,
+    width: u32,
+    height: u32,
+    pf: oxideav_core::PixelFormat,
+    colr: &Colr,
+) -> Result<HeifFrame> {
+    use oxideav_core::PixelFormat as P;
+    // (bytes per pixel, channel order indices into [r, g, b, a] or [y, a], 16-bit?, has alpha, grey)
+    let (bpp, order, wide, alpha, grey): (usize, [usize; 4], bool, bool, bool) = match pf {
+        P::Rgb24 => (3, [0, 1, 2, 0], false, false, false),
+        P::Rgba => (4, [0, 1, 2, 3], false, true, false),
+        P::Bgr24 => (3, [2, 1, 0, 0], false, false, false),
+        P::Bgra => (4, [2, 1, 0, 3], false, true, false),
+        P::Rgb48Le => (6, [0, 1, 2, 0], true, false, false),
+        P::Rgba64Le => (8, [0, 1, 2, 3], true, true, false),
+        P::Ya8 => (2, [0, 0, 0, 1], false, true, true),
+        P::Ya16Le => (4, [0, 0, 0, 1], true, true, true),
+        other => {
+            return Err(HeifError::unsupported(format!(
+                "framework pixel format {other:?} is neither planar YCbCr / grey nor packed RGB(A)"
+            )))
+        }
+    };
+    let planes = vf.image_planes();
+    let src = planes
+        .first()
+        .ok_or_else(|| HeifError::invalid("packed frame without a plane"))?;
+    let row_bytes = width as usize * bpp;
+    if src.stride < row_bytes || src.data.len() < src.stride * (height as usize - 1) + row_bytes {
+        return Err(HeifError::invalid(format!(
+            "packed {pf:?} frame too small for {width}x{height}"
+        )));
+    }
+    let depth: u8 = if wide { 16 } else { 8 };
+    let max = (1u32 << depth) - 1;
+    let fmt = HeifPixelFormat::new(
+        if grey { Chroma::Mono } else { Chroma::Yuv444 },
+        depth,
+        alpha,
+    )?;
+    let mut out = HeifFrame::zeroed(width, height, fmt)?;
+    let alpha_plane = out.format.alpha_plane();
+    let read = |px: &[u8], ch: usize| -> u16 {
+        if wide {
+            u16::from_le_bytes([px[2 * ch], px[2 * ch + 1]])
+        } else {
+            px[ch] as u16
+        }
+    };
+    // 16-bit scale for the H.273 conversion, then back to `depth`.
+    let to16 = |v: u16| -> u16 {
+        if wide {
+            v
+        } else {
+            (v as u32 * 257) as u16
+        }
+    };
+    for y in 0..height {
+        let row = &src.data[y as usize * src.stride..y as usize * src.stride + row_bytes];
+        for (x, px) in row.chunks_exact(bpp).enumerate() {
+            let x = x as u32;
+            if grey {
+                // Luma through the same range mapping as colour.
+                let g = to16(read(px, order[0]));
+                let ycc = crate::compose::fill_to_ycbcr([g, g, g], depth, Some(colr));
+                out.set_sample(0, x, y, ycc[0]);
+            } else {
+                let rgb16 = [
+                    to16(read(px, order[0])),
+                    to16(read(px, order[1])),
+                    to16(read(px, order[2])),
+                ];
+                let ycc = crate::compose::fill_to_ycbcr(rgb16, depth, Some(colr));
+                out.set_sample(0, x, y, ycc[0]);
+                out.set_sample(1, x, y, ycc[1]);
+                out.set_sample(2, x, y, ycc[2]);
+            }
+            if let Some(ap) = alpha_plane {
+                let a = read(px, order[3]) as u32;
+                out.set_sample(ap, x, y, a.min(max) as u16);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The `"heif"` framework encoder: every video frame becomes one
 /// packet holding a complete HEIF file.
 pub struct HeifEncoder {
@@ -721,7 +840,9 @@ pub struct HeifEncoder {
 impl HeifEncoder {
     /// Construct from stream parameters; recognised options: `codec`
     /// (`hevc` / `av1`), `mode` (`pcm` / `intra`), `qp`, `grid`
-    /// (tile size), `thumbnail` (max dimension).
+    /// (tile size), `thumbnail` (max dimension), `range` (`full` —
+    /// the default, what Apple ImageIO writes for sRGB sources — or
+    /// `limited`).
     pub fn new(params: &CodecParameters) -> CoreResult<Self> {
         let mut opts = EncodeOptions::default();
         if let Some(c) = params.options.get("codec") {
@@ -754,6 +875,20 @@ impl HeifEncoder {
                 CoreError::invalid(format!("heif: thumbnail '{t}' is not a number"))
             })?);
         }
+        if let Some(r) = params.options.get("range") {
+            let full = match r {
+                "full" | "pc" | "jpeg" => true,
+                "limited" | "tv" | "video" => false,
+                other => {
+                    return Err(CoreError::invalid(format!(
+                        "heif: unknown range option '{other}' (full / limited)"
+                    )))
+                }
+            };
+            if let Colr::Nclx { full_range, .. } = &mut opts.colr {
+                *full_range = full;
+            }
+        }
         Ok(Self {
             params: params.clone(),
             opts,
@@ -784,7 +919,10 @@ impl Encoder for HeifEncoder {
             .params
             .pixel_format
             .ok_or_else(|| CoreError::invalid("heif: pixel_format must be set"))?;
-        let hf = HeifFrame::from_core(vf, w, h, pf)?;
+        let hf = match HeifFrame::from_core(vf, w, h, pf) {
+            Ok(f) => f,
+            Err(_) => packed_to_planar(vf, w, h, pf, &self.opts.colr)?,
+        };
         let bytes = encode_still(&hf, &self.opts)?;
         let pkt = Packet::new(0, TimeBase::new(1, 1), bytes)
             .with_pts(vf.pts.unwrap_or(0))
