@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/OxideAV/oxideav-heif/compare/v0.0.2...v0.0.3) - 2026-09-25
+
+### Other
+
+- doc-comment wording that clippy read as an unindented list item
+- README / CHANGELOG for the producer adoption (lossy AV1, HEVC VUI + ids, minimum pins)
+- HEVC VUI range/colour, Main Still Picture, alpha by parameter-set ids
+- lossy AV1 stills at native layouts through av1 0.1.19
+- keep const-compatible enum defaults; document the effective ones
+- enum option defaults name their default value
+- label full-range stills with the framework's YuvJ* layouts
+- declare the "heif" encoder options schema
+- accept packed RGB / RGBA / BGR(A) / 16-bit / grey+alpha input
+- emit stco for 32-bit chunk offsets (ISO/IEC 14496-12 §8.7.5)
+- pass a "heif" still stream through as the file
+
 - `encode` (`registry`): AV1 items are quality-dialled
   `reduced_still_picture_header` stills at the picture's own (depth,
   chroma) pairing (8/10/12-bit, 4:0:0–4:4:4) through oxideav-av1
