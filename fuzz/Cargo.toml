@@ -25,7 +25,11 @@ cargo-fuzz = true
 #                      followed by the clap / irot / imir chain.
 #  * `heif_sequence` — moov / trak / stbl walk, sample-table expansion
 #                      and sample byte resolution, plus the track
-#                      matrix decode.
+#                      matrix decode, sample groups.
+#  * `heif_records`  — the typed record parsers (tmap body, HDR boxes,
+#                      avcC / lhvC / oinf / tols, sbgp / csgp / sgpd,
+#                      prft / ssix, every typed property) with a
+#                      serialize → parse round-trip oracle.
 #
 # The targets build the crate without its default `registry` feature:
 # the codec crates are never fuzzed here (they have their own
@@ -61,5 +65,11 @@ doc = false
 [[bin]]
 name = "heif_sequence"
 path = "fuzz_targets/heif_sequence.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "heif_records"
+path = "fuzz_targets/heif_records.rs"
 test = false
 doc = false

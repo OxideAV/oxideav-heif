@@ -10,7 +10,7 @@ use oxideav_heif::sequence::{parse_movie, sample_bytes};
 use oxideav_heif::HeifFile;
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(file) = HeifFile::parse(data) else {
+    let Ok(file) = HeifFile::parse_borrowed(data) else {
         return;
     };
     let Ok(Some(movie)) = parse_movie(&file) else {
@@ -34,5 +34,10 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     let _ = movie.visual_tracks().count();
+    for t in movie.tracks.iter().take(64) {
+        let _ = movie.auxiliary_tracks_of(t.track_id).len();
+        let _ = movie.alpha_track_of(t.track_id).map(|a| a.aux_kind());
+        let _ = t.sample_index_at(u64::MAX / 4, 1);
+    }
     let _ = movie.producer_reference_times.len() + movie.subsegment_indexes.len();
 });

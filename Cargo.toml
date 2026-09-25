@@ -43,3 +43,7 @@ required-features = ["registry"]
 [[example]]
 name = "heifenc"
 required-features = ["registry"]
+
+[[example]]
+name = "heifbench"
+required-features = ["registry"]

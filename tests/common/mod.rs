@@ -16,6 +16,7 @@
 #![allow(dead_code)]
 
 pub mod png;
+pub mod pngw;
 
 use std::path::{Path, PathBuf};
 

@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `tests/conformance_matrix.rs`: the both-direction conformance matrix
+  generator — producers (Apple ImageIO `sips`, `heif-enc` x265 / aom,
+  ImageMagick, ffmpeg + libsvtav1) × features (sizes 1×1 … 12 MP,
+  8 / 10 / 12-bit, 4:0:0–4:4:4, alpha, lossless, thumbnail, Exif /
+  XMP / ICC, `irot` / `imir` / `clap`, sequence, gain map) decoded by
+  this crate and compared byte-exact with the black-box video decoder
+  (`no producer` / `producer refused` / `dropped` / measured Δ
+  otherwise), and our writer's shapes × readers (`sips`,
+  `heif-convert`, `magick`, `ffmpeg`, `heif-info`) with the render
+  delta against our decode. Prints both tables as Markdown (README
+  "Conformance matrix"); runs with SKIPs where binaries are absent.
+  `tests/common/pngw.rs`: a stored-deflate PNG writer for the sources.
+- `examples/heifbench`: the performance baseline tool — decode
+  wall-clock (median of N) + peak RSS of a child decode, encode
+  wall-clock at default HEVC / AV1 settings, Markdown out (README
+  "Performance baseline (r462)").
+- `fuzz`: `heif_records` target (tmap body, HDR boxes, `avcC` /
+  `lhvC` / `oinf` / `tols`, `sbgp` / `csgp` / `sgpd`, `prft` /
+  `ssix`, every typed property, with a serialize → parse round-trip
+  oracle); `heif_parse` covers tmap bodies, entity-group flags and the
+  borrowed `HeifFile` view; `heif_sequence` covers sample groups and
+  auxiliary-track lookups.
+
 - Alpha auxiliary tracks in image sequences (HEIF §7.5.3):
   `Movie::auxiliary_tracks_of` / `alpha_track_of`, `Track::aux_kind`
   / `sample_index_at` (the time-parallel sample); the framework

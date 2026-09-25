@@ -12,7 +12,7 @@ use oxideav_heif::miaf::{check, MiafProfile};
 use oxideav_heif::{HeifFile, ItemProperties};
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(file) = HeifFile::parse(data) else {
+    let Ok(file) = HeifFile::parse_borrowed(data) else {
         return;
     };
     let _ = file.box_walk();
@@ -37,11 +37,19 @@ fuzz_target!(|data: &[u8]| {
                 let _ = node.chain_types();
             }
         }
+        if it.item_type == *b"tmap" {
+            if let Ok(body) = file.item_data(it.id) {
+                let _ = oxideav_heif::gainmap::GainMapMetadata::parse_tmap_body(&body);
+            }
+        }
         let _ = meta.thumbnails_of(it.id);
         let _ = meta.auxiliaries_of(it.id);
         let _ = meta.metadata_of(it.id);
     }
     let _ = file.primary_item();
+    for g in meta.entity_groups.iter().take(64) {
+        let _ = (g.version, g.flags, meta.groups_containing(g.group_id, &g.grouping_type).len());
+    }
     let _ = check(&file, MiafProfile::Miaf);
     let _ = check(&file, MiafProfile::HevcExtended);
 });
