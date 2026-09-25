@@ -284,3 +284,109 @@ fn written_file_decodes_in_a_black_box_decoder() {
         "black-box decode of the written file differs from the source"
     );
 }
+
+/// AV1 items keep the picture's own (depth, chroma) pairing: a 10-bit
+/// 4:2:0 and a monochrome source round-trip exactly (lossless), a
+/// 4:4:4 + alpha one carries a monochrome alpha still, and a lossy
+/// quality lands close to the source with a smaller file.
+#[test]
+fn av1_native_layouts_and_quality() {
+    use oxideav_heif::rgb::to_rgb;
+    let mut ten = HeifFrame::zeroed(
+        64,
+        48,
+        HeifPixelFormat::new(Chroma::Yuv420, 10, false).unwrap(),
+    )
+    .unwrap();
+    for y in 0..48 {
+        for x in 0..64 {
+            ten.set_sample(0, x, y, ((x * 13 + y * 7) % 1024) as u16);
+        }
+    }
+    for p in 1..3 {
+        for y in 0..24 {
+            for x in 0..32 {
+                ten.set_sample(p, x, y, ((x * 11 + y * 5 + p as u32 * 300) % 1024) as u16);
+            }
+        }
+    }
+    let av1 = EncodeOptions {
+        codec: StillCodec::Av1,
+        ..EncodeOptions::default()
+    };
+    let f = HeifFile::parse(&encode_still(&ten, &av1).unwrap()).unwrap();
+    let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+    assert_eq!(img.frame, ten, "10-bit 4:2:0 lossless");
+    let mono = HeifFrame::filled(
+        32,
+        32,
+        HeifPixelFormat::new(Chroma::Mono, 8, false).unwrap(),
+        77,
+    )
+    .unwrap();
+    let f = HeifFile::parse(&encode_still(&mono, &av1).unwrap()).unwrap();
+    let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+    assert_eq!(img.frame, mono, "monochrome lossless");
+    // 4:4:4 + alpha: the alpha auxiliary is a monochrome av01 item.
+    let mut src = HeifFrame::zeroed(
+        32,
+        32,
+        HeifPixelFormat::new(Chroma::Yuv444, 8, true).unwrap(),
+    )
+    .unwrap();
+    for y in 0..32 {
+        for x in 0..32 {
+            src.set_sample(0, x, y, (x * 8) as u16);
+            src.set_sample(1, x, y, 128);
+            src.set_sample(2, x, y, (y * 8) as u16);
+            src.set_sample(3, x, y, (255 - x * 4) as u16);
+        }
+    }
+    let f = HeifFile::parse(&encode_still(&src, &av1).unwrap()).unwrap();
+    let node = oxideav_heif::derived::build_primary_graph(&f).unwrap();
+    let a = node.alpha.as_ref().unwrap();
+    assert!(a.properties.av1c().unwrap().monochrome, "alpha coded 4:0:0");
+    let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+    assert_eq!(img.frame, src, "4:4:4 + alpha lossless");
+    // Lossy: quality 40 is smaller than lossless and within a few codes.
+    let lossless = encode_still(&src.without_alpha(), &av1).unwrap();
+    let lossy = encode_still(
+        &src.without_alpha(),
+        &EncodeOptions {
+            av1_quality: Some(40),
+            ..av1.clone()
+        },
+    )
+    .unwrap();
+    assert!(
+        lossy.len() < lossless.len(),
+        "{} vs {}",
+        lossy.len(),
+        lossless.len()
+    );
+    let img = decode_primary(&HeifFile::parse(&lossy).unwrap(), ItemDecoder::direct()).unwrap();
+    let (a, b) = (
+        to_rgb(&img.frame, Some(&img.nclx)).unwrap(),
+        to_rgb(&src.without_alpha(), Some(&img.nclx)).unwrap(),
+    );
+    let mse: f64 = a
+        .data
+        .iter()
+        .zip(&b.data)
+        .map(|(x, y)| (*x as f64 - *y as f64).powi(2))
+        .sum::<f64>()
+        / a.data.len() as f64;
+    let psnr = 10.0 * (255.0f64 * 255.0 / mse).log10();
+    assert!(psnr >= 30.0, "quality 40 PSNR {psnr:.1} dB");
+    // quality 100 through the dial is lossless too.
+    let q100 = encode_still(
+        &src.without_alpha(),
+        &EncodeOptions {
+            av1_quality: Some(100),
+            ..av1
+        },
+    )
+    .unwrap();
+    let img = decode_primary(&HeifFile::parse(&q100).unwrap(), ItemDecoder::direct()).unwrap();
+    assert_eq!(img.frame, src.without_alpha());
+}

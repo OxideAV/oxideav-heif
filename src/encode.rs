@@ -33,7 +33,8 @@ use crate::writer::HeifWriter;
 pub enum StillCodec {
     /// HEVC (`hvc1` items, `heic` brand).
     Hevc,
-    /// AV1 (`av01` items, `avif` brand); lossless key frames.
+    /// AV1 (`av01` items, `avif` brand); lossless or quality-dialled
+    /// reduced-header stills at every (depth, chroma) pairing.
     Av1,
 }
 
@@ -62,6 +63,11 @@ pub struct EncodeOptions {
     /// Transformative properties applied to the primary (in order),
     /// written as an `iden` item over the coded image.
     pub transforms: Vec<Property>,
+    /// AV1: quality dial 0..=100 (100 = lossless) for lossy items;
+    /// `None` codes lossless (the pre-0.0.3 behaviour).
+    pub av1_quality: Option<u8>,
+    /// AV1 search effort: `"fast"` (default), `"balanced"`, `"thorough"`.
+    pub av1_speed: String,
 }
 
 impl Default for EncodeOptions {
@@ -77,6 +83,8 @@ impl Default for EncodeOptions {
             exif: None,
             xmp: None,
             transforms: Vec::new(),
+            av1_quality: None,
+            av1_speed: "fast".into(),
         }
     }
 }
@@ -342,67 +350,87 @@ pub fn encode_hevc_picture_with(
 }
 
 #[doc(hidden)]
-/// Encode one 8-bit 4:2:0 picture as a lossless AV1 key frame item.
-/// Dimensions must be multiples of 8 in `8..=4096`.
-pub fn encode_av1_picture(frame: &HeifFrame) -> Result<CodedPicture> {
-    if frame.format.chroma != Chroma::Yuv420 || frame.format.bit_depth != 8 {
-        return Err(HeifError::unsupported(
-            "AV1 item encoding takes 8-bit 4:2:0 input (see to_yuv420_8)",
-        ));
-    }
-    let t = frame.tight();
-    let mut pixels = Vec::with_capacity(t.planes.iter().map(|p| p.data.len()).sum());
-    for p in &t.planes {
-        pixels.extend_from_slice(&p.data);
-    }
-    let ivf = oxideav_av1::encode_av1(&pixels, frame.width, frame.height)
-        .map_err(|e| HeifError::unsupported(format!("AV1 encoder: {e:?}")))?;
-    let mut reader = oxideav_av1::encoder::IvfReader::new(&ivf)
-        .map_err(|e| HeifError::invalid(format!("AV1 encoder output: {e:?}")))?;
-    let tu = reader
-        .read_next_frame()
-        .map_err(|e| HeifError::invalid(format!("AV1 encoder output: {e:?}")))?
-        .ok_or_else(|| HeifError::invalid("AV1 encoder produced no frame"))?
-        .payload;
-    // Sequence header OBU → av1C.
-    let mut seq_hdr: Option<(oxideav_av1::SequenceHeader, Vec<u8>)> = None;
-    let mut pos = 0usize;
-    while pos < tu.len() {
-        let (obu, consumed) = oxideav_av1::parse_obu(&tu[pos..])
-            .map_err(|e| HeifError::invalid(format!("AV1 OBU parse: {e:?}")))?;
-        if obu.obu_type == oxideav_av1::ObuType::SequenceHeader {
-            let sh = oxideav_av1::parse_sequence_header(obu.payload)
-                .map_err(|e| HeifError::invalid(format!("AV1 sequence header: {e:?}")))?;
-            seq_hdr = Some((sh, tu[pos..pos + consumed].to_vec()));
-            break;
-        }
-        pos += consumed;
-    }
-    let (sh, obu_bytes) =
-        seq_hdr.ok_or_else(|| HeifError::invalid("AV1 temporal unit without a sequence header"))?;
-    let op0 = sh.operating_points.first();
-    let mut cfg = Av1Config {
-        seq_profile: sh.seq_profile,
-        seq_level_idx_0: op0.map(|o| o.seq_level_idx).unwrap_or(0),
-        seq_tier_0: op0.map(|o| o.seq_tier == 1).unwrap_or(false),
-        high_bitdepth: sh.color_config.high_bitdepth,
-        twelve_bit: sh.color_config.twelve_bit,
-        monochrome: sh.color_config.mono_chrome,
-        chroma_subsampling_x: sh.color_config.subsampling_x,
-        chroma_subsampling_y: sh.color_config.subsampling_y,
-        chroma_sample_position: sh.color_config.chroma_sample_position,
-        initial_presentation_delay_minus_one: None,
-        config_obus: obu_bytes,
-        raw: Vec::new(),
+/// Encode one picture as an AV1 still item (`reduced_still_picture_header`)
+/// at its own (depth, chroma) pairing — 8 / 10 / 12-bit, 4:0:0 /
+/// 4:2:0 / 4:2:2 / 4:4:4 — lossless when `opts.av1_quality` is `None`
+/// or 100, else at that quality. Dimensions must be multiples of 8.
+pub fn encode_av1_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<CodedPicture> {
+    use oxideav_av1::encoder::{
+        encode_still_yuv, ChromaFormat, StillOptions, StillSpeed, YuvFrame,
     };
-    cfg.raw = cfg.serialize();
+    if !matches!(frame.format.bit_depth, 8 | 10 | 12) {
+        return Err(HeifError::unsupported(format!(
+            "AV1 items code 8 / 10 / 12-bit pictures, not {}-bit",
+            frame.format.bit_depth
+        )));
+    }
+    let t = frame.without_alpha().tight();
+    let format = match t.format.chroma {
+        Chroma::Mono => ChromaFormat::Monochrome,
+        Chroma::Yuv420 => ChromaFormat::Yuv420,
+        Chroma::Yuv422 => ChromaFormat::Yuv422,
+        Chroma::Yuv444 => ChromaFormat::Yuv444,
+    };
+    let plane16 = |p: usize| -> Vec<u16> {
+        let (w, h) = t.plane_dims(p);
+        let mut v = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                v.push(t.sample(p, x, y));
+            }
+        }
+        v
+    };
+    let (u, v) = if t.format.chroma == Chroma::Mono {
+        (Vec::new(), Vec::new())
+    } else {
+        (plane16(1), plane16(2))
+    };
+    let input = YuvFrame {
+        width: t.width,
+        height: t.height,
+        bit_depth: t.format.bit_depth,
+        format,
+        y: plane16(0),
+        u,
+        v,
+    };
+    let mut so = match opts.av1_quality {
+        None | Some(100..) => StillOptions::from_quality(100),
+        Some(q) => StillOptions::from_quality(q),
+    };
+    so.speed = match opts.av1_speed.as_str() {
+        "balanced" => StillSpeed::Balanced,
+        "thorough" => StillSpeed::Thorough,
+        _ => StillSpeed::Fast,
+    };
+    so.reduced_header = true;
+    match &opts.colr {
+        Colr::Nclx {
+            primaries,
+            transfer,
+            matrix,
+            full_range,
+        } => {
+            so.full_range = *full_range;
+            so.color_description = Some((*primaries as u8, *transfer as u8, *matrix as u8));
+        }
+        _ => {
+            so.full_range = true;
+            so.color_description = None;
+        }
+    }
+    let still = encode_still_yuv(&input, &so)
+        .map_err(|e| HeifError::unsupported(format!("AV1 still encoder: {e:?}")))?;
+    let raw = still.codec_config.to_bytes();
+    let cfg = Av1Config::parse(&raw)?;
     let layout = crate::decode::av1_layout(&cfg)?;
     Ok(CodedPicture {
         item_type: ITEM_TYPE_AV01,
-        data: tu,
+        data: still.temporal_unit_bytes,
         config: Property::Av1C(cfg),
-        coded_width: frame.width,
-        coded_height: frame.height,
+        coded_width: t.width,
+        coded_height: t.height,
         layout,
     })
 }
@@ -433,7 +461,7 @@ fn encode_picture_with(
 ) -> Result<CodedPicture> {
     match opts.codec {
         StillCodec::Hevc => encode_hevc_picture_with(frame, &opts.hevc_mode, opts.qp, extra),
-        StillCodec::Av1 => encode_av1_picture(frame),
+        StillCodec::Av1 => encode_av1_picture(frame, opts),
     }
 }
 
@@ -545,7 +573,14 @@ fn add_picture_item(
 /// complete HEIF file per `opts`. Returns the file bytes.
 pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> {
     frame.validate()?;
-    let colour = to_yuv420_8(&frame.without_alpha())?;
+    // HEVC items are coded 8-bit 4:2:0; AV1 items keep the picture's
+    // own (depth, chroma) pairing up to 12 bits.
+    let native_av1 = opts.codec == StillCodec::Av1 && frame.format.bit_depth <= 12;
+    let colour = if native_av1 {
+        frame.without_alpha().tight()
+    } else {
+        to_yuv420_8(&frame.without_alpha())?
+    };
     let mut w = HeifWriter::new();
     let master = match opts.grid_tile {
         Some(tile) if tile > 0 && (colour.width > tile || colour.height > tile) => {
@@ -593,9 +628,14 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
         }
         _ => add_picture_item(&mut w, &colour, opts, Vec::new())?,
     };
-    // Alpha auxiliary: the alpha plane as a monochrome-in-4:2:0 picture.
+    // Alpha auxiliary: the alpha plane as a picture — monochrome for
+    // AV1, monochrome-in-4:2:0 for HEVC (its encoder takes 4:2:0).
     if let Some(alpha) = frame.alpha_as_frame() {
-        let a420 = to_yuv420_8(&alpha)?;
+        let a420 = if native_av1 {
+            alpha.tight()
+        } else {
+            to_yuv420_8(&alpha)?
+        };
         let a = alignment(opts);
         let hevc_pcm = opts.codec == StillCodec::Hevc && opts.hevc_mode == "pcm";
         let (pw, mut ph) = (
@@ -847,6 +887,10 @@ pub struct HeifEncoderOptions {
     pub thumbnail: u32,
     /// `range`: `full` or `limited` sample range of the written `nclx`.
     pub range: String,
+    /// `quality` (AV1, `mode=intra`): 0..=100, 100 = lossless.
+    pub quality: u32,
+    /// `speed` (AV1): `fast` / `balanced` / `thorough`.
+    pub speed: String,
 }
 
 impl Default for HeifEncoderOptions {
@@ -858,6 +902,8 @@ impl Default for HeifEncoderOptions {
             grid: 0,
             thumbnail: 0,
             range: "full".into(),
+            quality: 60,
+            speed: "fast".into(),
         }
     }
 }
@@ -900,6 +946,18 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             default: oxideav_core::OptionValue::String(String::new()),
             help: "Sample range written in nclx: full (default) or limited",
         },
+        oxideav_core::OptionField {
+            name: "quality",
+            kind: oxideav_core::OptionKind::U32,
+            default: oxideav_core::OptionValue::U32(60),
+            help: "AV1 quality 0..=100 for mode=intra (100 = lossless; mode=pcm is lossless too)",
+        },
+        oxideav_core::OptionField {
+            name: "speed",
+            kind: oxideav_core::OptionKind::Enum(&["fast", "balanced", "thorough"]),
+            default: oxideav_core::OptionValue::String(String::new()),
+            help: "AV1 search effort (default fast)",
+        },
     ];
 
     fn apply(&mut self, key: &str, value: &oxideav_core::OptionValue) -> CoreResult<()> {
@@ -910,6 +968,8 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             "grid" => self.grid = value.as_u32()?,
             "thumbnail" => self.thumbnail = value.as_u32()?,
             "range" => self.range = value.as_str()?.to_string(),
+            "quality" => self.quality = value.as_u32()?,
+            "speed" => self.speed = value.as_str()?.to_string(),
             other => {
                 return Err(CoreError::invalid(format!(
                     "heif: unknown option '{other}'"
@@ -937,6 +997,9 @@ impl HeifEncoderOptions {
             qp: u8::try_from(self.qp.min(51)).unwrap_or(51),
             grid_tile: (self.grid > 0).then_some(self.grid),
             thumbnail_max_dim: (self.thumbnail > 0).then_some(self.thumbnail),
+            // AV1: `mode=pcm` is lossless, `mode=intra` codes at `quality`.
+            av1_quality: (self.mode != "pcm").then_some(self.quality.min(100) as u8),
+            av1_speed: self.speed.clone(),
             ..EncodeOptions::default()
         };
         if let Colr::Nclx { full_range, .. } = &mut opts.colr {

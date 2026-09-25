@@ -106,7 +106,19 @@ mod tests {
             .encoder_options_schema(&CodecId::new(CODEC_ID))
             .expect("encoder options schema");
         let names: Vec<&str> = schema.iter().map(|f| f.name).collect();
-        assert_eq!(names, ["codec", "mode", "qp", "grid", "thumbnail", "range"]);
+        assert_eq!(
+            names,
+            [
+                "codec",
+                "mode",
+                "qp",
+                "grid",
+                "thumbnail",
+                "range",
+                "quality",
+                "speed"
+            ]
+        );
         assert_eq!(
             ctx.containers.probe_priority(CONTAINER_NAME),
             Some(PROBE_PRIORITY)

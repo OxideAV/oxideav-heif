@@ -353,6 +353,39 @@ fn cases() -> Vec<(&'static str, &'static str, EncodeOptions, bool, bool)> {
             false,
             false,
         ),
+        (
+            "av1_q60",
+            "avif",
+            EncodeOptions {
+                codec: StillCodec::Av1,
+                av1_quality: Some(60),
+                ..Default::default()
+            },
+            false,
+            false,
+        ),
+        (
+            "av1_q30_odd",
+            "avif",
+            EncodeOptions {
+                codec: StillCodec::Av1,
+                av1_quality: Some(30),
+                ..Default::default()
+            },
+            false,
+            false,
+        ),
+        (
+            "av1_q60_alpha",
+            "avif",
+            EncodeOptions {
+                codec: StillCodec::Av1,
+                av1_quality: Some(60),
+                ..Default::default()
+            },
+            false,
+            true,
+        ),
         ("hevc_alpha", "heic", pcm(), false, true),
         (
             "av1_alpha",
@@ -369,7 +402,7 @@ fn cases() -> Vec<(&'static str, &'static str, EncodeOptions, bool, bool)> {
 
 fn dims(name: &str) -> (u32, u32) {
     match name {
-        "hevc_odd_63x61" | "av1_odd" => (63, 61),
+        "hevc_odd_63x61" | "av1_odd" | "av1_q30_odd" => (63, 61),
         "hevc_grid" | "av1_grid" => (200, 150),
         "hevc_thumb" => (160, 120),
         _ => (96, 80),
