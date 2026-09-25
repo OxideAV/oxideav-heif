@@ -623,8 +623,8 @@ fn identity_item_carries_transforms() {
 /// Apple ImageIO refuses a file whose master and alpha carry
 /// byte-identical VPS / SPS / PPS (verified by cross-muxing: any
 /// change to the alpha's parameter sets makes the same file open). The
-/// writer gives the alpha its own parameter-set ids (VPS / SPS / PPS
-/// 1) on both HEVC modes; the coded picture geometry stays the
+/// writer gives the alpha its own parameter-set ids (VPS, SPS and PPS
+/// id 1) on both HEVC modes; the coded picture geometry stays the
 /// master's (no extra row band, no CTB change).
 #[test]
 fn alpha_parameter_sets_differ_from_the_master() {
