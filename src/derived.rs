@@ -311,7 +311,7 @@ impl ImageNode {
 }
 
 /// Build the derivation graph rooted at `item_id`.
-pub fn build_graph(file: &HeifFile, item_id: u32) -> Result<ImageNode> {
+pub fn build_graph<D: AsRef<[u8]>>(file: &HeifFile<D>, item_id: u32) -> Result<ImageNode> {
     let meta = file.meta()?;
     let mut budget = MAX_GRAPH_ITEMS;
     let mut stack = Vec::new();
@@ -319,13 +319,13 @@ pub fn build_graph(file: &HeifFile, item_id: u32) -> Result<ImageNode> {
 }
 
 /// Build the derivation graph rooted at the primary item.
-pub fn build_primary_graph(file: &HeifFile) -> Result<ImageNode> {
+pub fn build_primary_graph<D: AsRef<[u8]>>(file: &HeifFile<D>) -> Result<ImageNode> {
     let primary = file.primary_item()?;
     build_graph(file, primary.id)
 }
 
-fn build_node(
-    file: &HeifFile,
+fn build_node<D: AsRef<[u8]>>(
+    file: &HeifFile<D>,
     meta: &Meta,
     item_id: u32,
     depth: usize,

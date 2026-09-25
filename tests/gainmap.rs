@@ -19,7 +19,7 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gainmap")
 }
 
-fn load(name: &str) -> HeifFile<'static> {
+fn load(name: &str) -> HeifFile {
     HeifFile::from_vec(std::fs::read(root().join(name)).unwrap()).unwrap()
 }
 

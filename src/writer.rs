@@ -1071,7 +1071,7 @@ impl SequenceWriter {
         let (still_meta, still_mdat) = match &still_writer {
             Some(w) => {
                 let bytes = w.write_to_vec()?;
-                let f = crate::file::HeifFile::parse(&bytes)?;
+                let f = crate::file::HeifFile::parse_borrowed(&bytes)?;
                 let meta_h = f
                     .top_level
                     .iter()

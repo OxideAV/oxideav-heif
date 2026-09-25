@@ -34,8 +34,9 @@ All notable changes to this project will be documented in this file.
   operating points with output layers, layer dependencies) and `tols`
   properties; the base layer (`nuh_layer_id` 0, parameter sets and
   access unit filtered, Annex B) decodes through oxideav-h265; an
-  output layer set with enhancement layers is the typed
-  `HeifError::LayeredHevc { item_id, target_ols_idx }` unless
+  output layer set with enhancement layers is the typed refusal
+  `HeifError::layered_hevc(item_id, target_ols_idx)` (an
+  `Unsupported`; `layered_hevc_info()` reads it back) unless
   `ItemDecoder::base_layer_fallback()`. `lhv1` / `hvc2` sample
   entries carry `lhvC`.
 - New optional dependency `oxideav-h264 = "0.1"` under `registry`.
@@ -79,11 +80,19 @@ All notable changes to this project will be documented in this file.
 - `rgb::from_rgb`: RGB(A) → planar 4:4:4 / monochrome YCbCr with the
   `colr` matrix / range (the inverse of `to_rgb`).
 
-- `file`: `HeifFile<'a>` borrows its input — `HeifFile::parse(&[u8])`
-  no longer copies (item payloads that are one contiguous span borrow
-  from the caller's buffer); `from_vec` / `from_cow` / `into_owned` /
-  `is_owned` for the owned form. Callers that parsed a temporary now
-  use `from_vec`; `HeifDemuxer` holds a `HeifFile<'static>`.
+- `file`: zero-copy parsing, additively — `HeifFile` is now
+  `HeifFile<D = Vec<u8>>`; the bare name keeps every 0.0.3 signature
+  (`parse(&[u8])` copies, `from_vec`, `into_bytes`, …) and
+  `HeifFile::parse_borrowed(&'a [u8]) -> HeifFileRef<'a>`
+  (`HeifFile<&[u8]>`, `into_owned`) is the view that borrows the
+  caller's buffer; every reader (`item_data`, `build_graph`, `check`,
+  `parse_movie`, `sample_bytes`, `decode_item` / `decode_primary`) is
+  generic over `D: AsRef<[u8]>` so both forms take the same paths.
+  The `"heif"` codec and the sequence writer use the borrowed form.
+- `error`: the L-HEVC enhancement-layer refusal is an
+  `HeifError::Unsupported` built by `HeifError::layered_hevc(item_id,
+  target_ols_idx)` and read back with `layered_hevc_info()` — the
+  enum gains no variant (consumers match it exhaustively).
 - `props`: `mdcv` and `cclv` primaries are read and written
   interleaved per primary (`x, y` pairs, ISO/IEC 14496-12 §12.1.7 /
   §12.1.8); they were planar (`x x x y y y`). Bytes pinned by a test.

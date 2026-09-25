@@ -20,15 +20,6 @@ pub enum HeifError {
     /// A structural limit was exceeded (derivation depth, canvas size,
     /// item count, …). Raised before any large allocation happens.
     ResourceExhausted(String),
-    /// An L-HEVC (`lhv1`) item asks for an output layer set beyond the
-    /// base layer; this crate decodes the base layer only (opt in with
-    /// `ItemDecoder::base_layer_fallback`).
-    LayeredHevc {
-        /// The item.
-        item_id: u32,
-        /// Its `tols` `target_ols_idx`.
-        target_ols_idx: u16,
-    },
 }
 
 impl HeifError {
@@ -46,7 +37,34 @@ impl HeifError {
     pub fn exhausted(msg: impl Into<String>) -> Self {
         Self::ResourceExhausted(msg.into())
     }
+
+    /// The refusal for an L-HEVC (`lhv1`) item whose `tols` asks for
+    /// an output layer set beyond the base layer (this crate decodes
+    /// the base layer only; opt in with
+    /// `ItemDecoder::base_layer_fallback`). An [`HeifError::Unsupported`]
+    /// whose message [`HeifError::layered_hevc_info`] reads back.
+    pub fn layered_hevc(item_id: u32, target_ols_idx: u16) -> Self {
+        Self::Unsupported(format!(
+            "{LAYERED_HEVC_PREFIX}item {item_id} output layer set {target_ols_idx} needs enhancement layers (base layer only)"
+        ))
+    }
+
+    /// `(item_id, target_ols_idx)` when this is the
+    /// [`HeifError::layered_hevc`] refusal.
+    pub fn layered_hevc_info(&self) -> Option<(u32, u16)> {
+        let HeifError::Unsupported(m) = self else {
+            return None;
+        };
+        let rest = m.strip_prefix(LAYERED_HEVC_PREFIX)?;
+        let mut words = rest.split_whitespace();
+        let item_id = words.nth(1)?.parse().ok()?;
+        let tols = words.nth(3)?.parse().ok()?;
+        Some((item_id, tols))
+    }
 }
+
+/// Message prefix of [`HeifError::layered_hevc`].
+const LAYERED_HEVC_PREFIX: &str = "L-HEVC: ";
 
 impl fmt::Display for HeifError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -54,13 +72,6 @@ impl fmt::Display for HeifError {
             HeifError::InvalidData(m) => write!(f, "heif: invalid data: {m}"),
             HeifError::Unsupported(m) => write!(f, "heif: unsupported: {m}"),
             HeifError::ResourceExhausted(m) => write!(f, "heif: resource exhausted: {m}"),
-            HeifError::LayeredHevc {
-                item_id,
-                target_ols_idx,
-            } => write!(
-                f,
-                "heif: unsupported: item {item_id}: L-HEVC output layer set {target_ols_idx} needs enhancement layers (base layer only)"
-            ),
         }
     }
 }
@@ -77,7 +88,6 @@ impl From<HeifError> for oxideav_core::Error {
             HeifError::InvalidData(m) => oxideav_core::Error::InvalidData(m),
             HeifError::Unsupported(m) => oxideav_core::Error::Unsupported(m),
             HeifError::ResourceExhausted(m) => oxideav_core::Error::ResourceExhausted(m),
-            e @ HeifError::LayeredHevc { .. } => oxideav_core::Error::Unsupported(e.to_string()),
         }
     }
 }
@@ -97,5 +107,9 @@ mod tests {
             HeifError::exhausted("z").to_string(),
             "heif: resource exhausted: z"
         );
+        let e = HeifError::layered_hevc(7, 2);
+        assert!(matches!(e, HeifError::Unsupported(_)));
+        assert_eq!(e.layered_hevc_info(), Some((7, 2)));
+        assert_eq!(HeifError::unsupported("x").layered_hevc_info(), None);
     }
 }

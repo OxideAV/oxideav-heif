@@ -18,16 +18,19 @@ pub const MAX_WALK_DEPTH: usize = 32;
 /// Maximum number of boxes [`HeifFile::box_walk`] enumerates.
 pub const MAX_WALK_BOXES: usize = 1 << 20;
 
-/// A parsed HEIF / HEIC / MIAF / AVIF file.
+/// A parsed HEIF / HEIC / MIAF / AVIF file over its bytes `D`.
 ///
-/// The bytes are borrowed when the file is opened with
-/// [`HeifFile::parse`] and owned after [`HeifFile::from_vec`] /
-/// [`HeifFile::into_owned`]; item payloads are borrowed from them
-/// wherever an item is one contiguous span, so a decode never copies
-/// the input.
+/// `HeifFile` (the default, `D = Vec<u8>`) owns its bytes:
+/// [`HeifFile::parse`] copies the input, [`HeifFile::from_vec`] takes
+/// it over. [`HeifFileRef`] (`D = &[u8]`) is the zero-copy view from
+/// [`HeifFile::parse_borrowed`]. Every reader (`item_data`, the
+/// derivation graph, MIAF checks, sequences, decoding) is generic
+/// over `D: AsRef<[u8]>`, so both forms take the same paths; item
+/// payloads are borrowed from the bytes wherever an item is one
+/// contiguous span.
 #[derive(Clone, Debug)]
-pub struct HeifFile<'a> {
-    data: Cow<'a, [u8]>,
+pub struct HeifFile<D = Vec<u8>> {
+    data: D,
     /// The `ftyp` (or `styp`) box.
     pub file_type: FileType,
     /// The file-level `meta` box, when present.
@@ -36,25 +39,54 @@ pub struct HeifFile<'a> {
     pub top_level: Vec<BoxHeader>,
 }
 
-impl<'a> HeifFile<'a> {
-    /// Parse a file held in memory, borrowing the bytes (no copy).
-    pub fn parse(bytes: &'a [u8]) -> Result<Self> {
-        Self::from_cow(Cow::Borrowed(bytes))
+/// The zero-copy form of [`HeifFile`]: a view over borrowed bytes.
+pub type HeifFileRef<'a> = HeifFile<&'a [u8]>;
+
+impl HeifFile<Vec<u8>> {
+    /// Parse a file held in memory (the bytes are copied; see
+    /// [`HeifFile::parse_borrowed`] for the zero-copy view).
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        Self::from_data(bytes.to_vec())
     }
 
     /// Parse a file, taking ownership of its bytes.
-    pub fn from_vec(data: Vec<u8>) -> Result<HeifFile<'static>> {
-        HeifFile::from_cow(Cow::Owned(data))
+    pub fn from_vec(data: Vec<u8>) -> Result<Self> {
+        Self::from_data(data)
     }
 
-    /// Parse a file from borrowed or owned bytes.
-    pub fn from_cow(data: Cow<'a, [u8]>) -> Result<Self> {
+    /// Consume the view and return the file bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.data
+    }
+}
+
+impl<'a> HeifFile<&'a [u8]> {
+    /// Parse a file held in memory, borrowing the bytes (no copy).
+    pub fn parse_borrowed(bytes: &'a [u8]) -> Result<Self> {
+        Self::from_data(bytes)
+    }
+
+    /// Detach from the borrowed input (one copy of the bytes).
+    pub fn into_owned(self) -> HeifFile<Vec<u8>> {
+        HeifFile {
+            data: self.data.to_vec(),
+            file_type: self.file_type,
+            meta: self.meta,
+            top_level: self.top_level,
+        }
+    }
+}
+
+impl<D: AsRef<[u8]>> HeifFile<D> {
+    /// Parse a file from any byte container (owned or borrowed).
+    pub fn from_data(data: D) -> Result<Self> {
         let mut top_level = Vec::new();
         let mut file_type = None;
         let mut meta = None;
-        for h in iter_boxes(&data) {
+        let bytes = data.as_ref();
+        for h in iter_boxes(bytes) {
             let h = h?;
-            let p = payload(&data, &h);
+            let p = payload(bytes, &h);
             match &h.box_type {
                 b"ftyp" | b"styp" => {
                     if file_type.is_none() {
@@ -86,29 +118,7 @@ impl<'a> HeifFile<'a> {
 
     /// The file bytes.
     pub fn bytes(&self) -> &[u8] {
-        &self.data
-    }
-
-    /// Consume the view and return the file bytes (copied only when
-    /// they were borrowed).
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.data.into_owned()
-    }
-
-    /// Detach from the borrowed input (copies borrowed bytes once; a
-    /// no-op for an owned file).
-    pub fn into_owned(self) -> HeifFile<'static> {
-        HeifFile {
-            data: Cow::Owned(self.data.into_owned()),
-            file_type: self.file_type,
-            meta: self.meta,
-            top_level: self.top_level,
-        }
-    }
-
-    /// `true` when the bytes are owned by this view.
-    pub fn is_owned(&self) -> bool {
-        matches!(self.data, Cow::Owned(_))
+        self.data.as_ref()
     }
 
     /// `true` when a top-level `moov` box exists (image sequence / video).
@@ -121,12 +131,12 @@ impl<'a> HeifFile<'a> {
         self.top_level
             .iter()
             .find(|h| &h.box_type == box_type)
-            .map(|h| payload(&self.data, h))
+            .map(|h| payload(self.bytes(), h))
     }
 
     /// Flattened box tree (bounded walk), for inspection and traces.
     pub fn box_walk(&self) -> Result<Vec<WalkEntry>> {
-        walk_boxes(&self.data, MAX_WALK_DEPTH, MAX_WALK_BOXES)
+        walk_boxes(self.bytes(), MAX_WALK_DEPTH, MAX_WALK_BOXES)
     }
 
     /// The `meta` box, or an error naming what is missing.
@@ -173,7 +183,7 @@ impl<'a> HeifFile<'a> {
             )));
         }
         self.check_self_contained(meta, loc)?;
-        self.spans_in(loc, self.data.len())
+        self.spans_in(loc, self.bytes().len())
     }
 
     fn check_self_contained(&self, meta: &Meta, loc: &ItemLocation) -> Result<()> {
@@ -243,8 +253,8 @@ impl<'a> HeifFile<'a> {
         match loc.construction_method {
             0 => {
                 self.check_self_contained(meta, loc)?;
-                let spans = self.spans_in(loc, self.data.len())?;
-                Ok(concat_spans(&self.data, &spans))
+                let spans = self.spans_in(loc, self.bytes().len())?;
+                Ok(concat_spans(self.bytes(), &spans))
             }
             1 => {
                 let idat = meta.idat.as_deref().ok_or_else(|| {

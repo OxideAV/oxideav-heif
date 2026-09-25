@@ -406,7 +406,7 @@ impl Movie {
 }
 
 /// Parse the movie box of a file, `Ok(None)` when there is none.
-pub fn parse_movie(file: &HeifFile) -> Result<Option<Movie>> {
+pub fn parse_movie<D: AsRef<[u8]>>(file: &HeifFile<D>) -> Result<Option<Movie>> {
     let Some(moov) = file.top_level_payload(b"moov") else {
         return Ok(None);
     };
@@ -1224,7 +1224,7 @@ impl SampleSizes {
 }
 
 /// Bytes of a sample.
-pub fn sample_bytes<'a>(file: &'a HeifFile, s: &Sample) -> Result<&'a [u8]> {
+pub fn sample_bytes<'a, D: AsRef<[u8]>>(file: &'a HeifFile<D>, s: &Sample) -> Result<&'a [u8]> {
     let b = file.bytes();
     let end = s.offset as usize + s.size as usize;
     if end > b.len() {

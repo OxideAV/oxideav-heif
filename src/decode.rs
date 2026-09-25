@@ -106,7 +106,8 @@ impl<'r> ItemDecoder<'r> {
 
     /// Decode the base layer of an `lhv1` item whose `tols` asks for
     /// an output layer set with enhancement layers, instead of the
-    /// typed [`HeifError::LayeredHevc`] refusal.
+    /// refusal [`HeifError::layered_hevc`] (recognisable through
+    /// [`HeifError::layered_hevc_info`]).
     pub fn base_layer_fallback(mut self) -> Self {
         self.base_layer_fallback = true;
         self
@@ -166,7 +167,11 @@ impl<'r> ItemDecoder<'r> {
 
     /// Decode one coded item to its reconstructed picture (no
     /// transformative properties applied).
-    pub fn decode_coded(&self, file: &HeifFile, node: &ImageNode) -> Result<HeifFrame> {
+    pub fn decode_coded<D: AsRef<[u8]>>(
+        &self,
+        file: &HeifFile<D>,
+        node: &ImageNode,
+    ) -> Result<HeifFrame> {
         let ItemKind::Coded(kind) = classify(node)? else {
             return Err(HeifError::invalid(format!(
                 "item {} is not a coded image",
@@ -192,10 +197,7 @@ impl<'r> ItemDecoder<'r> {
                     .map(|o| o.output_layers(tols).iter().any(|l| *l != 0))
                     .unwrap_or(tols != 0);
                 if enhancement && !self.base_layer_fallback {
-                    return Err(HeifError::LayeredHevc {
-                        item_id: node.item.id,
-                        target_ols_idx: tols,
-                    });
+                    return Err(HeifError::layered_hevc(node.item.id, tols));
                 }
                 base_layer_annex_b(cfg, &file.item_data(node.item.id)?)?
             }
@@ -557,14 +559,14 @@ impl DecodedImage {
 
 /// Decodes an item and everything it derives from, caching coded
 /// reconstructions so shared inputs decode once.
-struct Session<'a, 'r> {
-    file: &'a HeifFile<'a>,
+struct Session<'a, 'r, D> {
+    file: &'a HeifFile<D>,
     decoder: ItemDecoder<'r>,
     cache: HashMap<u32, HeifFrame>,
     decodes: usize,
 }
 
-impl Session<'_, '_> {
+impl<D: AsRef<[u8]>> Session<'_, '_, D> {
     /// Reconstructed image of a node (§6.3, first bullet): decoded
     /// picture or derivation result, *before* the node's own
     /// transformative properties.
@@ -679,8 +681,8 @@ impl Session<'_, '_> {
 
 /// Decode `item_id` (coded or derived) to its output image with alpha,
 /// depth, colour information and metadata resolved.
-pub fn decode_item(
-    file: &HeifFile,
+pub fn decode_item<D: AsRef<[u8]>>(
+    file: &HeifFile<D>,
     item_id: u32,
     decoder: ItemDecoder<'_>,
 ) -> Result<DecodedImage> {
@@ -738,10 +740,10 @@ pub fn decode_item(
 /// node. The `tmap` body is the ISO 21496-1 C.2 metadata; its second
 /// input is the gain-map image. An unparsable / unsupported payload
 /// yields `None` (C.2.3: fall back to the base image).
-fn find_gain_map(
-    file: &HeifFile,
+fn find_gain_map<D: AsRef<[u8]>>(
+    file: &HeifFile<D>,
     node: &ImageNode,
-    session: &mut Session<'_, '_>,
+    session: &mut Session<'_, '_, D>,
 ) -> Result<Option<GainMapAttachment>> {
     let meta = file.meta()?;
     let (tmap_id, body, inputs): (u32, Vec<u8>, Vec<u32>) = match &node.kind {
@@ -784,7 +786,10 @@ fn find_gain_map(
 }
 
 /// Decode the primary item (`pitm`).
-pub fn decode_primary(file: &HeifFile, decoder: ItemDecoder<'_>) -> Result<DecodedImage> {
+pub fn decode_primary<D: AsRef<[u8]>>(
+    file: &HeifFile<D>,
+    decoder: ItemDecoder<'_>,
+) -> Result<DecodedImage> {
     let id = file.primary_item()?.id;
     decode_item(file, id, decoder)
 }

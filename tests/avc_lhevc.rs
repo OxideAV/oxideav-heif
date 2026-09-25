@@ -371,11 +371,11 @@ fn lhv1_base_layer_decodes_and_enhancement_layers_refuse_typed() {
     // yields the base.
     let (id1, f1) = build(1);
     match decode_primary(&f1, ItemDecoder::direct()) {
-        Err(HeifError::LayeredHevc {
-            item_id,
-            target_ols_idx,
-        }) => assert_eq!((item_id, target_ols_idx), (id1, 1)),
-        other => panic!("expected LayeredHevc, got {other:?}"),
+        Err(e) => {
+            assert!(matches!(e, HeifError::Unsupported(_)), "{e}");
+            assert_eq!(e.layered_hevc_info(), Some((id1, 1)), "{e}");
+        }
+        Ok(_) => panic!("expected the L-HEVC refusal"),
     }
     let img = decode_primary(&f1, ItemDecoder::direct().base_layer_fallback()).unwrap();
     assert_eq!(img.frame, base.frame);

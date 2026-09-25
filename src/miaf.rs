@@ -51,7 +51,7 @@ impl MiafProfile {
     }
 
     /// Every profile a file declares through its brands.
-    pub fn declared_by(file: &HeifFile) -> Vec<MiafProfile> {
+    pub fn declared_by<D: AsRef<[u8]>>(file: &HeifFile<D>) -> Vec<MiafProfile> {
         [
             MiafProfile::Miaf,
             MiafProfile::HevcBasic,
@@ -110,7 +110,11 @@ impl MiafReport {
 /// HEIF Amd 1 §6.6.2.4 / §10.2.6 (`tmap` derived image items): the
 /// input pair, the three `colr` placements, the `ToneMapImage`
 /// version and the `tmap` brand, reported under `"HEIF-A1 …"` clauses.
-fn check_tone_maps(file: &HeifFile, meta: &crate::meta::Meta, rep: &mut MiafReport) {
+fn check_tone_maps<D: AsRef<[u8]>>(
+    file: &HeifFile<D>,
+    meta: &crate::meta::Meta,
+    rep: &mut MiafReport,
+) {
     let tmaps: Vec<u32> = meta
         .items
         .iter()
@@ -236,7 +240,7 @@ pub const MIN_TILE_EDGE: u32 = 64;
 
 /// Check `file` against the general MIAF requirements and, when
 /// `profile` is a codec profile, its Annex A constraints.
-pub fn check(file: &HeifFile, profile: MiafProfile) -> Result<MiafReport> {
+pub fn check<D: AsRef<[u8]>>(file: &HeifFile<D>, profile: MiafProfile) -> Result<MiafReport> {
     let mut rep = MiafReport::default();
     let meta = match &file.meta {
         Some(m) => m,

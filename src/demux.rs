@@ -331,7 +331,7 @@ pub fn synthesize_still(
 
 /// The HEIF demuxer.
 pub struct HeifDemuxer {
-    file: HeifFile<'static>,
+    file: HeifFile,
     movie: Option<Movie>,
     streams: Vec<StreamInfo>,
     still_pending: bool,
@@ -535,7 +535,7 @@ impl HeifDemuxer {
     }
 
     /// The parsed file.
-    pub fn file(&self) -> &HeifFile<'static> {
+    pub fn file(&self) -> &HeifFile {
         &self.file
     }
 
@@ -726,7 +726,7 @@ impl Decoder for HeifCodec {
     }
 
     fn send_packet(&mut self, packet: &Packet) -> CoreResult<()> {
-        let file = HeifFile::parse(&packet.data)?;
+        let file = HeifFile::parse_borrowed(&packet.data)?;
         let img = decode_primary(&file, ItemDecoder::direct())?;
         let full = matches!(
             img.nclx,

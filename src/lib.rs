@@ -91,7 +91,7 @@ pub use derived::{
     build_graph, build_primary_graph, GridDescriptor, ImageKind, ImageNode, OverlayDescriptor,
 };
 pub use error::{HeifError, Result};
-pub use file::HeifFile;
+pub use file::{HeifFile, HeifFileRef};
 pub use ftyp::{BrandClass, FileType};
 pub use gainmap::{apply_gain_map, GainMapMetadata, LinearRgbImage};
 pub use hvcc::HevcConfig;
@@ -128,7 +128,7 @@ pub use writer::{HeifWriter, SequenceAlphaTrack, SequenceWriter};
 
 /// Parse a HEIF file held in memory. Direct entry point of the
 /// standalone container surface; see [`HeifFile`] for what it exposes.
-pub fn parse(bytes: &[u8]) -> Result<HeifFile<'_>> {
+pub fn parse(bytes: &[u8]) -> Result<HeifFile> {
     HeifFile::parse(bytes)
 }
 
