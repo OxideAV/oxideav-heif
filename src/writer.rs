@@ -39,7 +39,7 @@ use crate::derived::{GridDescriptor, OverlayDescriptor};
 use crate::error::{HeifError, Result};
 use crate::ftyp::{
     BRAND_AVIF, BRAND_AVIS, BRAND_HEIC, BRAND_HEIX, BRAND_HEVC, BRAND_HEVX, BRAND_ISO8, BRAND_MIAF,
-    BRAND_MIF1, BRAND_MSF1,
+    BRAND_MIF1, BRAND_MSF1, BRAND_TMAP,
 };
 use crate::meta::{
     reference, ITEM_TYPE_AV01, ITEM_TYPE_EXIF, ITEM_TYPE_GRID, ITEM_TYPE_HVC1, ITEM_TYPE_IDEN,
@@ -61,6 +61,8 @@ pub enum ItemBody {
     Identity,
     /// A metadata item body (Exif block / XMP packet, `mdat`).
     Metadata(Vec<u8>),
+    /// A `tmap` `ToneMapImage` body (`idat`, construction method 1).
+    ToneMap(Vec<u8>),
 }
 
 #[doc(hidden)]
@@ -214,6 +216,62 @@ impl HeifWriter {
         });
         self.references.push((reference::DIMG, id, vec![input]));
         id
+    }
+
+    /// Add a `tmap` tone-map derived item (HEIF Amd 1 §6.6.2.4) over
+    /// `base` and `gain_map` with the ISO 21496-1 `metadata`:
+    /// `alternate_colr` is the reconstructed (HDR) image's colour
+    /// information, written as the item's essential `colr`; an `ispe`
+    /// of the base's size is added when `properties` carries none (the
+    /// output size equals the base's, 21496-1 §6.2.2). The gain map is
+    /// marked hidden, the `tmap` brand joins the compatible brands, and
+    /// an `altr` entity group `[tmap, base]` is added so readers
+    /// without tone-map support fall back to the base (NOTE 1). The
+    /// caller keeps the primary item choice (the clause's example uses
+    /// the base) and may add `pixi` / `clli` hints in `properties`.
+    pub fn add_tone_map(
+        &mut self,
+        base: u32,
+        gain_map: u32,
+        metadata: &crate::gainmap::GainMapMetadata,
+        alternate_colr: Property,
+        mut properties: Vec<(Property, bool)>,
+    ) -> Result<u32> {
+        if !matches!(alternate_colr, Property::Colr(_)) {
+            return Err(HeifError::invalid("tmap: alternate_colr must be a colr"));
+        }
+        let base_ispe = self
+            .items
+            .iter()
+            .find(|i| i.id == base)
+            .and_then(|i| {
+                i.properties.iter().find_map(|(p, _)| match p {
+                    Property::Ispe(v) => Some(*v),
+                    _ => None,
+                })
+            })
+            .ok_or_else(|| HeifError::invalid("tmap: base item was not added or has no ispe"))?;
+        if !self.items.iter().any(|i| i.id == gain_map) {
+            return Err(HeifError::invalid("tmap: gain map item was not added"));
+        }
+        ensure_ispe(&mut properties, base_ispe.width, base_ispe.height);
+        properties.insert(1, (alternate_colr, true));
+        let id = self.alloc_id();
+        self.items.push(WriterItem {
+            id,
+            item_type: crate::meta::ITEM_TYPE_TMAP,
+            name: String::new(),
+            content_type: None,
+            hidden: false,
+            body: ItemBody::ToneMap(metadata.serialize_tmap_body()),
+            properties,
+        });
+        self.references
+            .push((reference::DIMG, id, vec![base, gain_map]));
+        self.set_hidden(gain_map, true);
+        let group_id = self.alloc_id();
+        self.add_entity_group(*b"altr", group_id, vec![id, base]);
+        Ok(id)
     }
 
     /// Add a thumbnail (a coded item) of `master`.
@@ -399,8 +457,19 @@ impl HeifWriter {
     }
 
     fn selected_brands(&self) -> (FourCc, Vec<FourCc>) {
+        // HEIF Amd 1 §10.2.6: 'tmap' shall be among the compatible
+        // brands whenever a tone-map derived item is present — also
+        // under a caller's brand override.
+        let has_tmap = self
+            .items
+            .iter()
+            .any(|i| matches!(i.body, ItemBody::ToneMap(_)));
         if let (Some(m), Some(c)) = (self.major_brand, &self.compatible_brands) {
-            return (m, c.clone());
+            let mut c = c.clone();
+            if has_tmap && !c.contains(&BRAND_TMAP) {
+                c.push(BRAND_TMAP);
+            }
+            return (m, c);
         }
         let mut compat = vec![BRAND_MIF1];
         let mut major = BRAND_MIF1;
@@ -423,6 +492,9 @@ impl HeifWriter {
             compat.push(BRAND_AVIF);
         }
         compat.push(BRAND_MIAF);
+        if has_tmap {
+            compat.push(BRAND_TMAP);
+        }
         (major, compat)
     }
 
@@ -618,6 +690,10 @@ impl HeifWriter {
                     let b = o.to_bytes();
                     idat_spans.push((it.id, idat.len() as u64, b.len() as u64));
                     idat.extend_from_slice(&b);
+                }
+                ItemBody::ToneMap(b) => {
+                    idat_spans.push((it.id, idat.len() as u64, b.len() as u64));
+                    idat.extend_from_slice(b);
                 }
                 ItemBody::Identity => {}
             }
@@ -1528,6 +1604,108 @@ mod tests {
         let g = &meta.entity_groups[0];
         assert_eq!((g.version, g.flags, g.group_id), (0, 0x12_3456, 5));
         assert_eq!(g.entity_ids, vec![id, exif]);
+    }
+
+    #[test]
+    fn tone_map_item_layout_follows_the_amendment() {
+        let mut w = HeifWriter::new();
+        let base = w.add_coded_item(ITEM_TYPE_HVC1, vec![1; 4], std_props(64, 48));
+        let mut gprops = std_props(32, 24);
+        gprops.retain(|(p, _)| !matches!(p, Property::Colr(_)));
+        gprops.push((
+            Property::Colr(Colr::Nclx {
+                primaries: 2,
+                transfer: 2,
+                matrix: 2,
+                full_range: true,
+            }),
+            false,
+        ));
+        let gain = w.add_coded_item(ITEM_TYPE_HVC1, vec![2; 4], gprops);
+        let meta_in = crate::gainmap::GainMapMetadata {
+            minimum_version: 0,
+            writer_version: 0,
+            is_multichannel: false,
+            use_base_colour_space: true,
+            base_hdr_headroom: crate::gainmap::Rational { num: 0, den: 1 },
+            alternate_hdr_headroom: crate::gainmap::Rational { num: 3, den: 1 },
+            channels: vec![crate::gainmap::GainMapChannel {
+                gain_map_min: crate::gainmap::Rational { num: -1, den: 1 },
+                gain_map_max: crate::gainmap::Rational { num: 3, den: 1 },
+                gamma: crate::gainmap::Rational { num: 1, den: 1 },
+                base_offset: crate::gainmap::Rational { num: 1, den: 64 },
+                alternate_offset: crate::gainmap::Rational { num: 1, den: 64 },
+            }],
+        };
+        let alt = Colr::Nclx {
+            primaries: 1,
+            transfer: 16,
+            matrix: 6,
+            full_range: true,
+        };
+        // Wrong argument shapes are refused.
+        assert!(w
+            .add_tone_map(
+                base,
+                gain,
+                &meta_in,
+                Property::Irot(crate::props::Irot { angle: 0 }),
+                vec![]
+            )
+            .is_err());
+        assert!(w
+            .add_tone_map(base, 99, &meta_in, Property::Colr(alt.clone()), vec![])
+            .is_err());
+        let tmap = w
+            .add_tone_map(base, gain, &meta_in, Property::Colr(alt.clone()), vec![])
+            .unwrap();
+        w.set_primary(base);
+        let bytes = w.write_to_vec().unwrap();
+        let f = HeifFile::parse(&bytes).unwrap();
+        assert!(f.file_type.has_brand(&BRAND_TMAP), "§10.2.6 brand");
+        let m = f.meta().unwrap();
+        assert_eq!(m.derivation_inputs(tmap), vec![base, gain]);
+        assert!(m.item(gain).unwrap().is_hidden());
+        assert!(!m.item(tmap).unwrap().is_hidden());
+        let body = f.item_data(tmap).unwrap();
+        assert_eq!(body[0], 0, "ToneMapImage version");
+        assert_eq!(
+            crate::gainmap::GainMapMetadata::parse_tmap_body(&body).unwrap(),
+            meta_in
+        );
+        assert_eq!(m.location(tmap).unwrap().construction_method, 1, "idat");
+        let props = crate::props::ItemProperties::resolve(m, tmap).unwrap();
+        assert_eq!(props.ispe().map(|i| (i.width, i.height)), Some((64, 48)));
+        assert_eq!(props.nclx(), Some(&alt));
+        assert!(props
+            .entries
+            .iter()
+            .any(|e| matches!(e.property, Property::Colr(_)) && e.essential));
+        let g = &m.entity_groups[0];
+        assert_eq!(
+            (g.grouping_type, g.entity_ids.clone()),
+            (*b"altr", vec![tmap, base])
+        );
+        assert!(g.group_id != base && g.group_id != gain && g.group_id != tmap);
+        let rep = crate::miaf::check(&f, crate::miaf::MiafProfile::Miaf).unwrap();
+        assert!(rep.is_conformant(), "{:#?}", rep.violations);
+        // A brand override still gets the mandatory tmap brand.
+        let w2 = w
+            .clone()
+            .with_brands(BRAND_AVIF, vec![BRAND_AVIF, BRAND_MIF1]);
+        let f2 = HeifFile::from_vec(w2.write_to_vec().unwrap()).unwrap();
+        assert!(f2.file_type.has_brand(&BRAND_TMAP));
+        // Missing brand / bad version / unspecified-colr rules fire.
+        let mut bad = bytes.clone();
+        let at = bad.windows(4).position(|w| w == b"tmap").unwrap();
+        bad[at..at + 4].copy_from_slice(b"zzzz");
+        let fb = HeifFile::parse(&bad).unwrap();
+        let rep = crate::miaf::check(&fb, crate::miaf::MiafProfile::Miaf).unwrap();
+        assert!(
+            rep.violations.iter().any(|v| v.clause == "HEIF-A1 10.2.6"),
+            "{:#?}",
+            rep.violations
+        );
     }
 
     #[test]

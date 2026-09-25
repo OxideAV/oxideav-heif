@@ -39,23 +39,72 @@ pub const CODEC_ID_AV1: &str = "av1";
 /// Upper bound on the number of coded items decoded for one image.
 pub const MAX_ITEM_DECODES: usize = 4096;
 
+/// What a `tmap` (tone-map) derived image item decodes to when it is
+/// the item being decoded (HEIF Amd 1 §6.6.2.4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ToneMapOutput {
+    /// The base input image (the SDR rendition an `altr`-aware reader
+    /// without tone-map support displays); the decoded gain map rides
+    /// along in [`DecodedImage::gain_map`] for on-demand application.
+    /// The default, so SDR pipelines get an SDR picture.
+    #[default]
+    Base,
+    /// The normative reconstruction (§6.6.2.4.1): the gain map fully
+    /// applied, in the `tmap` item's own `colr`, at the depth its
+    /// `pixi` hints (else the base's). A `tmap` that is the *input* of
+    /// another derived item is always reconstructed this way.
+    Applied,
+}
+
 /// Decodes coded image items.
 #[derive(Clone, Copy, Default)]
 pub struct ItemDecoder<'r> {
     registry: Option<&'r CodecRegistry>,
+    tone_map: ToneMapOutput,
+    reference_white_nits: Option<f64>,
 }
 
 impl<'r> ItemDecoder<'r> {
     /// Decode through the direct `oxideav-h265` / `oxideav-av1` factories.
     pub fn direct() -> Self {
-        Self { registry: None }
+        Self {
+            registry: None,
+            tone_map: ToneMapOutput::Base,
+            reference_white_nits: None,
+        }
     }
 
     /// Decode through `registry` (`"h265"` / `"av1"` ids).
     pub fn with_registry(registry: &'r CodecRegistry) -> Self {
         Self {
             registry: Some(registry),
+            tone_map: ToneMapOutput::Base,
+            reference_white_nits: None,
         }
+    }
+
+    /// Select what a decoded `tmap` item yields (see [`ToneMapOutput`]).
+    pub fn with_tone_map(mut self, output: ToneMapOutput) -> Self {
+        self.tone_map = output;
+        self
+    }
+
+    /// The normative tone-mapped reconstruction for `tmap` items.
+    pub fn tone_mapped(self) -> Self {
+        self.with_tone_map(ToneMapOutput::Applied)
+    }
+
+    /// The selected [`ToneMapOutput`].
+    pub fn tone_map_output(&self) -> ToneMapOutput {
+        self.tone_map
+    }
+
+    /// The HDR reference white (cd/m²) a PQ-coded tone-mapped
+    /// reconstruction is anchored to (default
+    /// [`crate::gainmap::DEFAULT_HDR_REFERENCE_WHITE_NITS`]).
+    pub fn with_reference_white(mut self, nits: f64) -> Self {
+        self.reference_white_nits = Some(nits);
+        self
     }
 
     /// The codec parameters a coded item needs, as a container demuxer
@@ -449,13 +498,42 @@ impl Session<'_, '_> {
                 })?;
                 self.output(input)
             }
-            ImageKind::ToneMap(_) => {
-                // ISO/IEC 21496-1 gain-map application is out of scope;
-                // the base image (first input) is the SDR rendition.
-                let input = node.inputs.first().ok_or_else(|| {
+            ImageKind::ToneMap(body) => {
+                let base = node.inputs.first().ok_or_else(|| {
                     HeifError::invalid(format!("tmap item {} has no input", node.item.id))
                 })?;
-                self.output(input)
+                // §6.6.2.4.1: a tmap feeding another derived item is
+                // always the fully applied image; the item itself
+                // follows the decoder's policy.
+                let applied =
+                    self.decoder.tone_map == ToneMapOutput::Applied || node.depth_in_chain > 0;
+                if !applied {
+                    return self.output(base);
+                }
+                let gain = node.inputs.get(1).ok_or_else(|| {
+                    HeifError::invalid(format!("tmap item {} has no gain map input", node.item.id))
+                })?;
+                let metadata = crate::gainmap::GainMapMetadata::parse_tmap_body(body)?;
+                let base_frame = self.output(base)?;
+                let gain_frame = self.output(gain)?;
+                let bit_depth = node
+                    .properties
+                    .pixi()
+                    .and_then(|p| p.bits_per_channel.first().copied())
+                    .filter(|d| (8..=16).contains(d))
+                    .unwrap_or(base_frame.format.bit_depth);
+                crate::gainmap::reconstruct_tone_map(
+                    &base_frame,
+                    base.properties.nclx(),
+                    &gain_frame,
+                    gain.properties.nclx(),
+                    node.properties.nclx(),
+                    &metadata,
+                    bit_depth,
+                    self.decoder
+                        .reference_white_nits
+                        .unwrap_or(crate::gainmap::DEFAULT_HDR_REFERENCE_WHITE_NITS),
+                )
             }
         }
     }
@@ -505,11 +583,17 @@ pub fn decode_item(
         Some(d) => Some(session.output(d)?),
         None => None,
     };
-    let (nclx, nclx_explicit) = match node.properties.nclx() {
+    // A tmap decoded to its base rendition carries the base's colour
+    // information; the applied rendition carries the tmap's (§6.6.2.4.1).
+    let colour_node = match (&node.kind, decoder.tone_map, node.inputs.first()) {
+        (ImageKind::ToneMap(_), ToneMapOutput::Base, Some(base)) => base,
+        _ => &node,
+    };
+    let (nclx, nclx_explicit) = match colour_node.properties.nclx() {
         Some(c) => (c.clone(), true),
         None => (Colr::MIAF_DEFAULT, false),
     };
-    let icc_profile = node.properties.icc_profile().map(<[u8]>::to_vec);
+    let icc_profile = colour_node.properties.icc_profile().map(<[u8]>::to_vec);
     let gain_map = find_gain_map(file, &node, &mut session)?;
     let mut exif = None;
     let mut xmp = None;

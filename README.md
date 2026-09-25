@@ -35,18 +35,18 @@ one stream per image-sequence track (`"h265"` / `"av1"` packets with
 | Area | Status |
 |------|--------|
 | ISOBMFF boxes | size 0 / 1 / `largesize` / `uuid`, FullBox, bounded recursive walk |
-| Brands | `mif1` `mif2` `msf1` `heic` `heix` `hevc` `hevx` `heim` `heis` `hevm` `hevs` `miaf` `MiHB` `MiHA` `MiHE` `MiAB` `avif` `avis` `avio` `MA1B` `MA1A` `jpeg` `avci` `1pic` `pred`, `styp` |
+| Brands | `mif1` `mif2` `msf1` `heic` `heix` `hevc` `hevx` `heim` `heis` `hevm` `hevs` `miaf` `MiHB` `MiHA` `MiHE` `MiAB` `avif` `avis` `avio` `MA1B` `MA1A` `jpeg` `avci` `avcs` `tmap` `1pic` `pred`, `styp` |
 | `meta` tree | `hdlr`, `pitm` v0/v1, `iinf` v0/v1 + `infe` v2/v3 (`mime` / `uri ` tails, hidden flag), `iloc` v0–v2 (all widths, construction methods 0 / 1 / 2, multi-extent, zero-length "to end"), `iref` v0/v1, `iprp` / `ipco` / `ipma` v0/v1 (7 / 15-bit indices, essential flag, index-0 placeholders), `idat`, `grpl`, `dinf` / `dref`, `ipro` |
 | Properties | `ispe` `pixi` `colr` (nclx + `rICC` / `prof`) `pasp` `clap` `irot` `imir` `iscl` `auxC` `hvcC` `av1C` `lhvC`\* `avcC`\* `clli` `mdcv` `cclv` `amve` `rloc` `lsel` `a1op` `a1lx` `rref` `crtt` `mdft` `udes` `altt`; §6.5.1 descriptive-before-transformative order, unrecognised-essential refusal, exact rational `clap` |
 | Coded items | `hvc1` / `hev1` → oxideav-h265 (`hvcC` extradata, length-prefixed AU); `av01` → oxideav-av1 (`av1C` extradata, temporal unit); 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8–16 bit; via direct factories or a caller `CodecRegistry` |
-| Derived images | `grid` (row-major, trim, tile alpha), `iovl` (sRGB fill via the H.273 matrix of the output `colr`, offsets, clipping, §6.9.1 straight / pre-multiplied alpha, translucent canvas → output alpha), `iden`, `tmap` (base image by default; gain map decoded and attached, see Gain maps) |
+| Derived images | `grid` (row-major, trim, tile alpha), `iovl` (sRGB fill via the H.273 matrix of the output `colr`, offsets, clipping, §6.9.1 straight / pre-multiplied alpha, translucent canvas → output alpha), `iden`, `tmap` (23008-12:2025/Amd 1 §6.6.2.4: base by default, normative tone-mapped reconstruction on request or as an input of another derived item; see Gain maps) |
 | Transforms | `clap` → `irot` → `imir` → `iscl` in `ipma` order; `iscl` (§6.5.13) resizes by the exact ceil-ratio with an area/bilinear resampler; sub-sample chroma positions promote to 4:4:4 (MIAF §7.3.6.7) |
 | Auxiliaries | alpha (`urn:mpeg:mpegB:cicp:systems:auxiliary:alpha` and `urn:mpeg:hevc:2015:auxid:1`, resized / depth-matched, `prem`), depth (both URN families, surfaced as a frame) |
 | Metadata | thumbnails (`thmb`), Exif (offset word resolved), XMP, ICC, effective `nclx` (MIAF default when absent), `pixi` / `clli` / `mdcv` / … via the typed property list |
-| MIAF | `MiafProfile` + `check`: §7 general requirements, §8 shared constraints, Annex A HEVC / AV1 codec limits — typed `MiafViolation`s with clause numbers |
+| MIAF | `MiafProfile` + `check`: §7 general requirements, §8 shared constraints, Annex A HEVC / AV1 codec limits, plus the HEIF Amd 1 `tmap` shalls (`"HEIF-A1 …"` clauses) — typed `MiafViolation`s with clause numbers |
 | Image sequences | `moov` / `trak` / `stbl` (`stts` `ctts` `stsc` `stsz` `stz2` `stco` `co64` `stss` `tref` `elst`), visual sample entries (`hvcC` `av1C` `ccst` `auxi` `colr` `clap` `pasp`), §7.2.1 matrix → rotation / mirror; framework `Demuxer` with pts / dts / sync / seek |
 | Writer | `HeifWriter` (coded / grid / overlay / identity items, thumbnails, alpha / depth, Exif / XMP, entity groups, de-duplicated `ipco`, MIAF `mdat` order, brand auto-selection); `SequenceWriter` (`msf1` / `hevc`, `pict` track + `ccst`, `stco` / `co64` per §8.7.5, cover-image `meta`; opens in libheif / ImageMagick / ffmpeg / Apple ImageIO) |
-| Gain maps | ISO 21496-1: `GainMapMetadata` (C.2 payload of the `tmap` item, version-prefixed), `DecodedImage::gain_map` (decoded gain-map item + metadata + alternate `colr`), opt-in `apply_gain_map(h_target)` → linear RGB in the application space (Formulas 1–3, §6.2.2 resampling, Annex B primaries conversion, H.273 transfers 1/6/8/13/14/15/16/18); matches a black-box tone-mapper within 1 code at every headroom on mono / RGB / half-size / BT.2020 gain maps |
+| Gain maps | ISO 21496-1 + HEIF Amd 1 §6.6.2.4: `ToneMapImage` body (`version` 0 + C.2 `GainMapMetadata`), `dimg` = [base, gain map] (count 2 enforced), the three `colr` placements and the `tmap` brand (§10.2.6) checked; `DecodedImage::gain_map` (decoded gain-map item + metadata + alternate `colr`), `apply_gain_map(h_target)` → linear RGB in the application space (Formulas 1–3, §6.2.2 resampling, Annex B primaries conversion, single↔multi-channel rules, limited-range clip); `ItemDecoder::tone_mapped()` → the reconstruction in the `tmap` item's `colr` at its `pixi` depth (alpha carried over); writer authors `tmap` items (`HeifWriter::add_tone_map`, `EncodeOptions::gain_map`) with the hidden map, the brand and the `altr` [tmap, base] fallback; matches a black-box tone-mapper within 1 code at every headroom (2 on the half-size map, 7 after a BT.2020→709 conversion of the 16-bit PQ reconstruction), and the tool tone-maps our authored file identically to its own |
 | Colour | `rgb::to_rgb`: YCbCr → RGB(A) with the item `colr` matrix / range (H.273), identity (GBR), monochrome, alpha carried; the renderer step over the composed frame |
 | Encoder (`registry`) | `encode_still`: HEVC (lossless `pcm` or CABAC `intra` at a QP; VUI range + colour description, Main Still Picture, `rd` / `tiles`) or AV1 stills (lossless or quality 0..=100, `speed`, native 8/10/12-bit 4:0:0–4:4:4, `av1C` from the codec configuration) items, padding + `clap`, grid tiling (MIAF 64-px floor), thumbnails, alpha (per-codec `auxC` URN, single-channel `pixi`, own parameter-set ids; AV1 alpha as a monochrome still), Exif / XMP / ICC, transforms as essential properties on the coded item; `"heif"` framework `Encoder` (frame in — planar YCbCr / grey or packed RGB / RGBA / BGR(A) / 16-bit / grey+alpha — file out; declared options `codec` / `mode` / `qp` / `grid` / `thumbnail` / `range` / `quality` / `speed` / `rd` / `tiles`); the `"heif"` muxer passes its whole-file packets through, so `oxideav convert in.png out.heic` writes a HEIC |
 | Fuzz | `fuzz/`: `heif_parse`, `heif_compose`, `heif_sequence` (standalone build), daily workflow |
@@ -120,12 +120,27 @@ and BT.2020-application-space gain maps, base headroom 0 → alternate
 `apply_gain_map` at headrooms 0 / 2 / 4 matches the tool's tone-mapped
 renditions within 1 code (2 on the half-size resample).
 
-`tmap` carriage note: ISO 21496-1 C.3 delegates the container mapping
-to the file format and C.4 covers JPEG only; the staged HEIF 3rd ed. /
-MIAF 2nd ed. texts contain no `tmap` clause. The layout this crate
-reads — `tmap` item with `dimg → [baseline, gain map]`, body = one
-`version` byte + the C.2 structure, the `tmap` item's `colr` = the
-alternate image's colour — is what every producer measured writes.
+`tmap` carriage is ISO/IEC 23008-12:2025/Amd 1 §6.6.2.4 (staged as the
+MPEG DAM text): `dimg` = [base, gain map] with `reference_count` 2, the
+item body is a `ToneMapImage` (`version` 0, then the C.2 metadata — any
+other version is refused), the base carries the baseline `colr`, the
+gain map an `nclx` with primaries = transfer = 2 (its matrix / range
+decode the stored map; limited range clips to 0..1), the `tmap` item
+the alternate `colr`; `ispe` on all three (the output is the base's
+size), `pixi` on the `tmap` as the applied colour-resolution hint, the
+gain map hidden, the `tmap` compatible brand (§10.2.6), and an `altr`
+[tmap, base] group for readers without tone-map support. Decoding the
+`tmap` item yields the base by default (an SDR pipeline's choice) and
+the normative reconstruction — the map fully applied, re-encoded in
+the `tmap` item's `colr` at the `pixi` depth — with
+`ItemDecoder::tone_mapped()`; a `tmap` feeding another derived item is
+always the applied image (§6.6.2.4.1). The 4th-ed. WD's "alpha /
+depth carried over" paragraph is followed for alpha. ISO 21496-1 anchors
+the application space at HDR reference white = 1.0 but names no
+absolute luminance for a PQ alternate; the reconstruction uses
+203 cd/m² (the example in its 3.6) unless `with_reference_white`
+overrides it, and relative transfers put the peak signal at
+2^H_alternate × reference white (3.6 / 3.10).
 
 ## Standalone build
 

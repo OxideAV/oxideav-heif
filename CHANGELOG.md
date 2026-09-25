@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `tmap` per ISO/IEC 23008-12:2025/Amd 1 §6.6.2.4 + §10.2.6 (the
+  staged DAM text), replacing the empirical rules: `ToneMapImage`
+  body = `version` (shall be 0; others refused) + C.2 metadata (the
+  bare-C.2 fallback is gone); `dimg` `reference_count` 2 enforced in
+  the graph; the single↔multi-channel gain-map rules and the
+  limited-range clip in `apply_gain_map`; `check` reports the brand
+  (present ⇔ a `tmap` item), the input pair, the base / gain-map /
+  `tmap` `colr` placements (gain map: nclx with primaries = transfer
+  = 2), the body version and mixed-hidden `altr` groups as
+  `"HEIF-A1 …"` clauses; `BRAND_TMAP`.
+- `decode`: `ToneMapOutput` — decoding a `tmap` item yields the base
+  (default; with the base's `nclx`, previously the tmap's) or, with
+  `ItemDecoder::tone_mapped()`, the normative reconstruction
+  (`gainmap::reconstruct_tone_map`: the map applied at the alternate
+  headroom, re-encoded in the `tmap` item's `colr` at its `pixi`
+  depth, base alpha carried over); a `tmap` that is the input of
+  another derived item is always the applied image. PQ alternates are
+  anchored at `DEFAULT_HDR_REFERENCE_WHITE_NITS` (203, the 21496-1
+  3.6 example; `with_reference_white` overrides), relative transfers
+  at `2^H_alternate` × reference white (`alternate_signal_scale`).
+- `writer` / `encode`: `HeifWriter::add_tone_map` (hidden gain map,
+  essential alternate `colr`, base-sized `ispe`, `idat` body, `tmap`
+  brand — also under a brand override — and the `altr` [tmap, base]
+  group) and `EncodeOptions::gain_map: Option<GainMapSpec>` (map
+  picture + metadata + alternate `colr` / `clli` / `pixi` hint; the
+  map is coded hidden with an `nclx` of primaries = transfer = 2). A
+  black-box gain-map tool tone-maps our authored AVIF identically to
+  the file it was rebuilt from; the HEVC form opens in the readers.
+- `rgb::from_rgb`: RGB(A) → planar 4:4:4 / monochrome YCbCr with the
+  `colr` matrix / range (the inverse of `to_rgb`).
+
 - `file`: `HeifFile<'a>` borrows its input — `HeifFile::parse(&[u8])`
   no longer copies (item payloads that are one contiguous span borrow
   from the caller's buffer); `from_vec` / `from_cow` / `into_owned` /

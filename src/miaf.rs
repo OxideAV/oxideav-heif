@@ -12,9 +12,9 @@ use crate::error::Result;
 use crate::file::HeifFile;
 use crate::ftyp::{
     BRAND_MA1A, BRAND_MA1B, BRAND_MIAB, BRAND_MIAF, BRAND_MIF1, BRAND_MIHA, BRAND_MIHB, BRAND_MIHE,
-    BRAND_MSF1,
+    BRAND_MSF1, BRAND_TMAP,
 };
-use crate::meta::{reference, ITEM_TYPE_AV01, ITEM_TYPE_HVC1, ITEM_TYPE_IDEN};
+use crate::meta::{reference, ITEM_TYPE_AV01, ITEM_TYPE_HVC1, ITEM_TYPE_IDEN, ITEM_TYPE_TMAP};
 use crate::props::{AuxKind, Colr, Property};
 
 /// A MIAF profile (Annex A) or the plain `miaf` brand.
@@ -104,6 +104,126 @@ impl MiafReport {
             item_id,
             message: message.into(),
         });
+    }
+}
+
+/// HEIF Amd 1 §6.6.2.4 / §10.2.6 (`tmap` derived image items): the
+/// input pair, the three `colr` placements, the `ToneMapImage`
+/// version and the `tmap` brand, reported under `"HEIF-A1 …"` clauses.
+fn check_tone_maps(file: &HeifFile, meta: &crate::meta::Meta, rep: &mut MiafReport) {
+    let tmaps: Vec<u32> = meta
+        .items
+        .iter()
+        .filter(|i| i.item_type == ITEM_TYPE_TMAP)
+        .map(|i| i.id)
+        .collect();
+    let has_brand = file.file_type.has_brand(&BRAND_TMAP);
+    if !tmaps.is_empty() && !has_brand {
+        rep.push(
+            "HEIF-A1 10.2.6",
+            None,
+            "tone-map derived image item present but 'tmap' is not among the compatible brands",
+        );
+    }
+    if has_brand && tmaps.is_empty() {
+        rep.push(
+            "HEIF-A1 10.2.6",
+            None,
+            "'tmap' brand declared but the file has no tone-map derived image item",
+        );
+    }
+    let is_nclx_unspecified = |c: Option<&Colr>| {
+        matches!(
+            c,
+            Some(Colr::Nclx {
+                primaries: 2,
+                transfer: 2,
+                ..
+            })
+        )
+    };
+    for id in tmaps {
+        let inputs = meta.derivation_inputs(id);
+        if inputs.len() != 2 {
+            rep.push(
+                "HEIF-A1 6.6.2.4.1",
+                Some(id),
+                format!(
+                    "tmap dimg reference_count {} (shall be 2: base, gain map)",
+                    inputs.len()
+                ),
+            );
+            continue;
+        }
+        let (base, gain) = (inputs[0], inputs[1]);
+        let props_of = |i: u32| crate::props::ItemProperties::resolve(meta, i).ok();
+        if let Some(p) = props_of(base) {
+            if p.colrs().is_empty() {
+                rep.push(
+                    "HEIF-A1 6.6.2.4.1",
+                    Some(base),
+                    "tmap base input image has no colr property",
+                );
+            }
+        }
+        if let Some(p) = props_of(gain) {
+            if !is_nclx_unspecified(p.nclx()) {
+                rep.push(
+                    "HEIF-A1 6.6.2.4.1",
+                    Some(gain),
+                    "tmap gain map input image needs an nclx colr with colour_primaries = transfer_characteristics = 2",
+                );
+            }
+        }
+        if let Some(p) = props_of(id) {
+            if p.colrs().is_empty() {
+                rep.push(
+                    "HEIF-A1 6.6.2.4.1",
+                    Some(id),
+                    "tmap derived image item has no colr property",
+                );
+            }
+        }
+        match file.item_data(id) {
+            Ok(body) => match body.first() {
+                Some(0) => {
+                    if let Err(e) = crate::gainmap::GainMapMetadata::parse(&body[1..]) {
+                        rep.push(
+                            "HEIF-A1 6.6.2.4.2",
+                            Some(id),
+                            format!("ToneMapImage gain_map_metadata: {e}"),
+                        );
+                    }
+                }
+                Some(v) => rep.push(
+                    "HEIF-A1 6.6.2.4.3",
+                    Some(id),
+                    format!("ToneMapImage version {v} (shall be 0)"),
+                ),
+                None => rep.push("HEIF-A1 6.6.2.4.2", Some(id), "empty ToneMapImage body"),
+            },
+            Err(e) => rep.push("HEIF-A1 6.6.2.4.2", Some(id), e.to_string()),
+        }
+        // HEIF §6.4.2: an altr group holding the tmap holds only
+        // non-hidden items (the tmap itself shall not be hidden).
+        for g in meta.groups_containing(id, b"altr") {
+            let hidden: Vec<u32> = g
+                .entity_ids
+                .iter()
+                .copied()
+                .filter(|e| meta.item(*e).map(|i| i.is_hidden()).unwrap_or(false))
+                .collect();
+            if !hidden.is_empty() {
+                rep.push(
+                    "HEIF 6.4.2",
+                    Some(id),
+                    format!(
+                        "altr group {} mixes hidden items {hidden:?} with the tmap item",
+                        g.group_id
+                    ),
+                );
+            }
+        }
     }
 }
 
@@ -203,6 +323,7 @@ pub fn check(file: &HeifFile, profile: MiafProfile) -> Result<MiafReport> {
             "primary item is an auxiliary image",
         );
     }
+    check_tone_maps(file, meta, &mut rep);
     // Per-item structural checks.
     for it in meta.items.iter().filter(|i| i.is_image()) {
         let id = it.id;

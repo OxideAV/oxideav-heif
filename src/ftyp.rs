@@ -77,6 +77,9 @@ pub const BRAND_JPGS: FourCc = *b"jpgs";
 pub const BRAND_AVCI: FourCc = *b"avci";
 /// AVC image sequence brand (HEIF Annex E).
 pub const BRAND_AVCS: FourCc = *b"avcs";
+/// `tmap` — tone-map derived image items present (ISO/IEC
+/// 23008-12:2025/Amd 1 §10.2.6; a compatible brand, never the major).
+pub const BRAND_TMAP: FourCc = *b"tmap";
 
 /// Brands that identify a file as one this crate owns (HEIF structural,
 /// HEVC-specific, MIAF, AV1/AVIF). Presence of any of them as the major
@@ -85,7 +88,7 @@ pub const HEIF_FAMILY_BRANDS: &[FourCc] = &[
     BRAND_MIF1, BRAND_MIF2, BRAND_MSF1, BRAND_HEIC, BRAND_HEIX, BRAND_HEVC, BRAND_HEVX, BRAND_HEIM,
     BRAND_HEIS, BRAND_HEVM, BRAND_HEVS, BRAND_MIAF, BRAND_MIHB, BRAND_MIHA, BRAND_MIHE, BRAND_MIAB,
     BRAND_AVIF, BRAND_AVIS, BRAND_AVIO, BRAND_MA1B, BRAND_MA1A, BRAND_JPEG, BRAND_JPGS, BRAND_AVCI,
-    BRAND_AVCS, BRAND_1PIC, BRAND_PRED,
+    BRAND_AVCS, BRAND_1PIC, BRAND_PRED, BRAND_TMAP,
 ];
 
 /// Parsed `ftyp` / `styp` box.

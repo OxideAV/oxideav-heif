@@ -73,6 +73,42 @@ pub struct EncodeOptions {
     pub hevc_rd: Option<u32>,
     /// HEVC tile layout (`"CxR"`, e.g. `"4x4"`) for parallel coding.
     pub hevc_tiles: Option<String>,
+    /// ISO 21496-1 gain map to carry as a `tmap` derived item over
+    /// the primary (HEIF Amd 1 §6.6.2.4).
+    pub gain_map: Option<GainMapSpec>,
+}
+
+/// A gain map to write next to the base image (see
+/// [`EncodeOptions::gain_map`]): the map picture, its ISO 21496-1
+/// metadata and the alternate (fully applied) rendition's colour
+/// information. The map is coded with the same codec as the base, as
+/// a hidden item with an `nclx` `colr` of `colour_primaries =
+/// transfer_characteristics = 2` (the clause's rule) carrying
+/// `gain_map_matrix` / `gain_map_full_range`; monochrome maps stay
+/// monochrome (AV1) or ride the luma of a 4:2:0 picture (HEVC).
+#[derive(Clone, Debug)]
+pub struct GainMapSpec {
+    /// The gain-map picture (monochrome or colour; any size — 21496-1
+    /// §6.2.2 resamples it to the base at application).
+    pub frame: HeifFrame,
+    /// The C.2 metadata (`GainMapMetadata`).
+    pub metadata: crate::gainmap::GainMapMetadata,
+    /// The alternate image's colour information, written as the
+    /// `tmap` item's `colr` (21496-1 §5.3.2).
+    pub alternate_colr: Colr,
+    /// `matrix_coefficients` of the stored gain map's YCbCr coding
+    /// (colour maps; ignored for monochrome).
+    pub gain_map_matrix: u16,
+    /// `full_range_flag` of the stored gain map.
+    pub gain_map_full_range: bool,
+    /// `clli` hint for the alternate rendition, written on the `tmap`
+    /// item ("should", §6.6.2.4.1).
+    pub alternate_clli: Option<crate::props::Clli>,
+    /// The `pixi` hint on the `tmap` item: "the approximate amount of
+    /// colour resolution available after fully applying the gain map"
+    /// (§6.6.2.4.1); also the depth this crate reconstructs the applied
+    /// rendition at. 10–12 suits a PQ / HLG alternate over an 8-bit base.
+    pub alternate_bit_depth: u8,
 }
 
 impl Default for EncodeOptions {
@@ -92,6 +128,7 @@ impl Default for EncodeOptions {
             av1_speed: "fast".into(),
             hevc_rd: None,
             hevc_tiles: None,
+            gain_map: None,
         }
     }
 }
@@ -794,9 +831,92 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
     if let Some(xmp) = &opts.xmp {
         w.add_xmp(master, xmp);
     }
+    // Gain map → hidden coded item + tmap derived item (HEIF Amd 1
+    // §6.6.2.4); the base stays the primary and an altr [tmap, base]
+    // group gives tone-map readers the alternate.
+    if let Some(gm) = &opts.gain_map {
+        gm.frame.validate()?;
+        let g_src = if native_av1 {
+            gm.frame.without_alpha().tight()
+        } else {
+            to_yuv420_8(&gm.frame.without_alpha())?
+        };
+        let a = alignment(opts);
+        let padded = pad_frame(
+            &g_src,
+            align_up(g_src.width, a).max(a),
+            align_up(g_src.height, a).max(a),
+        )?;
+        let gain_colr = Colr::Nclx {
+            primaries: 2,
+            transfer: 2,
+            matrix: if gm.frame.format.chroma == Chroma::Mono {
+                2
+            } else {
+                gm.gain_map_matrix
+            },
+            full_range: gm.gain_map_full_range,
+        };
+        let extra: &[(&str, &str)] = if opts.codec == StillCodec::Hevc {
+            GAIN_MAP_HEVC_OPTIONS
+        } else {
+            &[]
+        };
+        let pic = encode_picture_for(&padded, opts, &gain_colr, extra)?;
+        let mut props = coded_props(&pic, &gain_colr, None);
+        if gm.frame.format.chroma == Chroma::Mono && pic.layout.chroma != Chroma::Mono {
+            // The map rides the luma plane: one channel of information.
+            for (p, _) in props.iter_mut() {
+                if let Property::Pixi(_) = p {
+                    *p = Property::Pixi(Pixi {
+                        bits_per_channel: vec![pic.layout.bit_depth],
+                    });
+                }
+            }
+        }
+        if (pic.coded_width, pic.coded_height) != (g_src.width, g_src.height) {
+            props.push((
+                Property::Clap(Clap::for_rect(
+                    pic.coded_width,
+                    pic.coded_height,
+                    CropRect {
+                        x: 0,
+                        y: 0,
+                        width: g_src.width,
+                        height: g_src.height,
+                    },
+                )),
+                true,
+            ));
+        }
+        let gain_id = w.add_coded_item(pic.item_type, pic.data, props);
+        let mut tprops = vec![(
+            Property::Pixi(Pixi {
+                bits_per_channel: vec![
+                    gm.alternate_bit_depth.clamp(8, 16);
+                    colour.format.chroma.colour_planes()
+                ],
+            }),
+            false,
+        )];
+        if let Some(c) = gm.alternate_clli {
+            tprops.push((Property::Clli(c), false));
+        }
+        w.add_tone_map(
+            master,
+            gain_id,
+            &gm.metadata,
+            Property::Colr(gm.alternate_colr.clone()),
+            tprops,
+        )?;
+    }
     w.set_primary(master);
     w.write_to_vec()
 }
+
+/// Codec options giving the gain-map item's HEVC parameter sets their
+/// own ids (VPS / SPS / PPS 2), for the same reason as the alpha's.
+const GAIN_MAP_HEVC_OPTIONS: &[(&str, &str)] = &[("vpsid", "2"), ("spsid", "2"), ("ppsid", "2")];
 
 /// Accepted framework pixel formats of the `"heif"` encoder: the planar
 /// YCbCr / grey layouts (`HeifFrame::from_core`) plus the packed RGB /

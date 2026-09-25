@@ -152,17 +152,18 @@ impl GainMapMetadata {
         })
     }
 
-    /// Parse the body of a `tmap` item: every producer measured writes
-    /// the C.2 structure behind a one-byte `version` (0) prefix; a
-    /// bare C.2 structure (first two bytes `minimum_version = 0`
-    /// followed by a non-zero flags/version pattern) is accepted too.
+    /// Parse the body of a `tmap` item — the `ToneMapImage` of
+    /// ISO/IEC 23008-12:2025/Amd 1 §6.6.2.4.2: one `version` byte that
+    /// shall be 0, then the C.2 `GainMapMetadata` to the end of the
+    /// item. "Readers shall not process a ToneMapImage with an
+    /// unrecognized version number" (§6.6.2.4.3): any other version is
+    /// `Unsupported`.
     pub fn parse_tmap_body(b: &[u8]) -> Result<Self> {
-        if b.len() >= 62 && b[0] == 0 {
-            if let Ok(m) = Self::parse(&b[1..]) {
-                return Ok(m);
-            }
+        match b.first() {
+            Some(0) => Self::parse(&b[1..]),
+            Some(v) => Err(HeifError::unsupported(format!("ToneMapImage version {v}"))),
+            None => Err(HeifError::invalid("empty tmap item body")),
         }
-        Self::parse(b)
     }
 
     /// Serialise as a `tmap` item body (version prefix + C.2).
@@ -494,36 +495,45 @@ fn unnormalised_gain(
     width: u32,
     height: u32,
 ) -> Result<(Vec<f64>, usize)> {
-    // Stored samples as [0, 1] per channel: the luma plane of a
-    // monochrome gain map, or the RGB of a colour one (through its own
-    // matrix; 4:3 gain maps stored as YCbCr are decoded like colour).
+    // Stored samples as [0, 1] per channel through the gain map's own
+    // `colr` matrix and range (HEIF Amd 1 §6.6.2.4.1: a limited-range
+    // map is clipped to 0.0..1.0 after the matrix / range are
+    // applied — `to_rgb` clamps to the code range): the grey level of
+    // a monochrome map, the RGB of a colour one.
     let max = ((1u32 << gain.format.bit_depth) - 1) as f64;
-    let (stored, channels): (Vec<f64>, usize) = if gain.format.chroma == Chroma::Mono {
-        let mut v = Vec::with_capacity((gain.width * gain.height) as usize);
-        for y in 0..gain.height {
-            for x in 0..gain.width {
-                v.push(gain.sample(0, x, y) as f64 / max);
-            }
-        }
-        (v, 1)
+    let rgb = to_rgb(&gain.without_alpha(), gain_colr)?;
+    let stored_channels = if gain.format.chroma == Chroma::Mono {
+        1
     } else {
-        let rgb = to_rgb(&gain.without_alpha(), gain_colr)?;
-        let mut v = Vec::with_capacity(rgb.data.len());
-        for px in rgb.data.chunks_exact(rgb.channels) {
-            v.extend(px[..3].iter().map(|s| *s as f64 / max));
-        }
-        (v, 3)
+        3
+    };
+    let mut stored = Vec::with_capacity(rgb.data.len() / rgb.channels * stored_channels);
+    for px in rgb.data.chunks_exact(rgb.channels) {
+        stored.extend(px[..stored_channels].iter().map(|s| *s as f64 / max));
+    }
+    // §6.6.2.4.1: a single-channel map with multi-channel metadata is
+    // treated as three identical colour channels (each with its own
+    // metadata); a multi-channel map with single-channel metadata uses
+    // that one entry for every channel (`meta.channel`).
+    let channels = if stored_channels == 3 || meta.is_multichannel {
+        3
+    } else {
+        1
     };
     // Formula 1 per channel.
-    let mut log2 = Vec::with_capacity(stored.len());
-    for (i, s) in stored.iter().enumerate() {
-        let ch = meta.channel(if channels == 3 { i % 3 } else { 0 });
-        let (mn, mx, gamma) = (
-            ch.gain_map_min.value(),
-            ch.gain_map_max.value(),
-            ch.gamma.value(),
-        );
-        log2.push((mx - mn) * s.max(0.0).powf(1.0 / gamma) + mn);
+    let n = stored.len() / stored_channels;
+    let mut log2 = Vec::with_capacity(n * channels);
+    for i in 0..n {
+        for c in 0..channels {
+            let s = stored[i * stored_channels + if stored_channels == 3 { c } else { 0 }];
+            let ch = meta.channel(c);
+            let (mn, mx, gamma) = (
+                ch.gain_map_min.value(),
+                ch.gain_map_max.value(),
+                ch.gamma.value(),
+            );
+            log2.push((mx - mn) * s.max(0.0).powf(1.0 / gamma) + mn);
+        }
     }
     if (gain.width, gain.height) == (width, height) {
         return Ok((log2, channels));
@@ -614,6 +624,78 @@ pub fn apply_gain_map(
         primaries: app_primaries,
         data,
     })
+}
+
+/// HDR reference white assumed when a reconstructed alternate is
+/// PQ-coded: ISO 21496-1 scales the application space so the HDR
+/// reference white is 1.0 (B.2) but fixes no absolute luminance for
+/// it; 203 cd/m² is the value its definition of HDR headroom uses as
+/// the example (3.6, Note 1). Override with
+/// [`crate::decode::ItemDecoder::with_reference_white`].
+pub const DEFAULT_HDR_REFERENCE_WHITE_NITS: f64 = 203.0;
+
+/// Factor from application-space linear (HDR reference white = 1.0)
+/// to the input domain of an H.273 transfer: PQ (16) is absolute —
+/// 1.0 = 10 000 cd/m² — so the reference white lands at
+/// `reference_white_nits / 10 000`; every relative curve puts its
+/// peak signal at the alternate's nominal peak luminance, which is
+/// `2^H_alternate` × the reference white (21496-1 3.6 / 3.10).
+pub fn alternate_signal_scale(
+    transfer: u16,
+    meta: &GainMapMetadata,
+    reference_white_nits: f64,
+) -> f64 {
+    match transfer {
+        16 => reference_white_nits / 10_000.0,
+        _ => (-meta.alternate_hdr_headroom.value()).exp2(),
+    }
+}
+
+/// The normative reconstruction of a `tmap` derived image item (HEIF
+/// Amd 1 §6.6.2.4.1: "Reconstruction is done by applying the gain map
+/// to the base image according to ISO 21496-1 section 6"): the map
+/// applied at the alternate headroom, re-encoded in the `tmap` item's
+/// own `colr` (`alternate_colr`: primaries + transfer + matrix +
+/// range) as a 4:4:4 (monochrome for a grey base) frame at
+/// `bit_depth`, with [`alternate_signal_scale`] placing the reference
+/// white (`reference_white_nits` for PQ). Only colour is tone-mapped;
+/// the base's alpha plane is carried over unchanged (4th-ed. WD
+/// §6.6.2.4.1).
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_tone_map(
+    base: &HeifFrame,
+    base_colr: Option<&Colr>,
+    gain: &HeifFrame,
+    gain_colr: Option<&Colr>,
+    alternate_colr: Option<&Colr>,
+    meta: &GainMapMetadata,
+    bit_depth: u8,
+    reference_white_nits: f64,
+) -> Result<HeifFrame> {
+    let h = meta.alternate_hdr_headroom.value();
+    let mut lin = apply_gain_map(base, base_colr, gain, gain_colr, alternate_colr, meta, h)?;
+    let alt = alternate_colr.or(base_colr);
+    let (primaries, transfer) = cicp(alt);
+    let scale = alternate_signal_scale(transfer, meta, reference_white_nits) as f32;
+    for v in lin.data.iter_mut() {
+        *v *= scale;
+    }
+    let rgb = lin.encode(primaries, transfer, bit_depth)?;
+    let chroma = if base.format.chroma == Chroma::Mono && gain.format.chroma == Chroma::Mono {
+        Chroma::Mono
+    } else {
+        Chroma::Yuv444
+    };
+    let mut out = crate::rgb::from_rgb(&rgb, alt, chroma)?;
+    if let Some(alpha) = base.alpha_as_frame() {
+        let alpha = if alpha.format.bit_depth == bit_depth {
+            alpha
+        } else {
+            crate::compose::rescale_depth(&alpha, bit_depth)?
+        };
+        out = out.with_alpha_plane(&alpha)?;
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

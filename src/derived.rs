@@ -397,7 +397,18 @@ fn build_node(
             }
             ImageKind::Identity
         }
-        ITEM_TYPE_TMAP => ImageKind::ToneMap(file.item_data(item_id)?.into_owned()),
+        ITEM_TYPE_TMAP => {
+            // HEIF Amd 1 §6.6.2.4.1: reference_count shall be 2 — the
+            // base input image, then the gain map input image.
+            if input_ids.len() != 2 {
+                stack.pop();
+                return Err(HeifError::invalid(format!(
+                    "tmap item {item_id}: reference_count {} (shall be 2: base, gain map)",
+                    input_ids.len()
+                )));
+            }
+            ImageKind::ToneMap(file.item_data(item_id)?.into_owned())
+        }
         t => {
             if !input_ids.is_empty() {
                 stack.pop();
