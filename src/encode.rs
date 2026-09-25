@@ -68,6 +68,11 @@ pub struct EncodeOptions {
     pub av1_quality: Option<u8>,
     /// AV1 search effort: `"fast"` (default), `"balanced"`, `"thorough"`.
     pub av1_speed: String,
+    /// HEVC intra mode-decision effort (`rd` 0..=2; the encoder's
+    /// still default when `None`).
+    pub hevc_rd: Option<u32>,
+    /// HEVC tile layout (`"CxR"`, e.g. `"4x4"`) for parallel coding.
+    pub hevc_tiles: Option<String>,
 }
 
 impl Default for EncodeOptions {
@@ -85,6 +90,8 @@ impl Default for EncodeOptions {
             transforms: Vec::new(),
             av1_quality: None,
             av1_speed: "fast".into(),
+            hevc_rd: None,
+            hevc_tiles: None,
         }
     }
 }
@@ -297,9 +304,42 @@ pub fn encode_hevc_picture(frame: &HeifFrame, mode: &str, qp: u8) -> Result<Code
     encode_hevc_picture_with(frame, mode, qp, &[])
 }
 
+/// The HEVC encoder options that carry the item's colour information
+/// into the bitstream VUI (§E.2.1 `video_signal_type`: range + H.273
+/// colour description — the field an OS image reader takes the sample
+/// range from) and mark the access unit as a Main Still Picture.
+fn hevc_signal_options(colr: &Colr, opts: &EncodeOptions) -> Vec<(String, String)> {
+    let mut v = vec![("still".to_string(), "1".to_string())];
+    match colr {
+        Colr::Nclx {
+            primaries,
+            transfer,
+            matrix,
+            full_range,
+        } => {
+            v.push((
+                "range".into(),
+                if *full_range { "full" } else { "limited" }.into(),
+            ));
+            v.push(("colorprim".into(), primaries.to_string()));
+            v.push(("transfer".into(), transfer.to_string()));
+            v.push(("matrix".into(), matrix.to_string()));
+        }
+        // ICC / other: full range (the MIAF default), no description.
+        _ => v.push(("range".into(), "full".into())),
+    }
+    if let Some(rd) = opts.hevc_rd {
+        v.push(("rd".into(), rd.min(2).to_string()));
+    }
+    if let Some(t) = &opts.hevc_tiles {
+        v.push(("tiles".into(), t.clone()));
+    }
+    v
+}
+
 #[doc(hidden)]
-/// [`encode_hevc_picture`] with extra codec options (`ctb`, …) passed
-/// through to the HEVC encoder.
+/// [`encode_hevc_picture`] with extra codec options (`ctb`, `vpsid`,
+/// …) passed through to the HEVC encoder.
 pub fn encode_hevc_picture_with(
     frame: &HeifFrame,
     mode: &str,
@@ -439,28 +479,38 @@ fn encode_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<CodedPictur
     encode_picture_with(frame, opts, &[])
 }
 
-/// Codec options that make the alpha auxiliary's HEVC parameter sets
-/// differ from the master's. Apple ImageIO refuses a file whose two
-/// items carry byte-identical VPS / SPS / PPS (verified: any change to
-/// the alpha's SPS — size, CTB size, coding mode — makes it accept the
-/// same file). For CABAC intra the alpha is coded at a different CTB
-/// size (`ctb` 32 vs the master's default), which is lossless and
-/// changes the SPS; the `pcm` coder has no such knob, so a PCM alpha is
-/// instead coded with an extra 16-row band (clapped away, see
-/// [`ALPHA_PCM_EXTRA_ROWS`]), which also gives it a distinct SPS.
-const ALPHA_HEVC_INTRA_OPTIONS: &[(&str, &str)] = &[("ctb", "32")];
-
-/// Extra coded rows on a PCM-coded alpha auxiliary (see
-/// [`ALPHA_HEVC_INTRA_OPTIONS`]).
-const ALPHA_PCM_EXTRA_ROWS: u32 = 16;
+/// Codec options that give the alpha auxiliary's HEVC parameter sets
+/// their own ids (VPS / SPS / PPS 1): Apple ImageIO refuses a file
+/// whose two items carry byte-identical parameter sets (verified by
+/// cross-muxing), and distinct ids make them differ on every mode.
+const ALPHA_HEVC_OPTIONS: &[(&str, &str)] = &[("vpsid", "1"), ("spsid", "1"), ("ppsid", "1")];
 
 fn encode_picture_with(
     frame: &HeifFrame,
     opts: &EncodeOptions,
     extra: &[(&str, &str)],
 ) -> Result<CodedPicture> {
+    encode_picture_for(frame, opts, &opts.colr, extra)
+}
+
+/// [`encode_picture_with`] for an item whose colour information is
+/// `colr` (the alpha auxiliary signals its own range).
+fn encode_picture_for(
+    frame: &HeifFrame,
+    opts: &EncodeOptions,
+    colr: &Colr,
+    extra: &[(&str, &str)],
+) -> Result<CodedPicture> {
     match opts.codec {
-        StillCodec::Hevc => encode_hevc_picture_with(frame, &opts.hevc_mode, opts.qp, extra),
+        StillCodec::Hevc => {
+            let signal = hevc_signal_options(colr, opts);
+            let mut all: Vec<(&str, &str)> = signal
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            all.extend_from_slice(extra);
+            encode_hevc_picture_with(frame, &opts.hevc_mode, opts.qp, &all)
+        }
         StillCodec::Av1 => encode_av1_picture(frame, opts),
     }
 }
@@ -631,34 +681,33 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
     // Alpha auxiliary: the alpha plane as a picture — monochrome for
     // AV1, monochrome-in-4:2:0 for HEVC (its encoder takes 4:2:0).
     if let Some(alpha) = frame.alpha_as_frame() {
-        let a420 = if native_av1 {
+        let a_src = if native_av1 {
             alpha.tight()
         } else {
             to_yuv420_8(&alpha)?
         };
         let a = alignment(opts);
-        let hevc_pcm = opts.codec == StillCodec::Hevc && opts.hevc_mode == "pcm";
-        let (pw, mut ph) = (
-            align_up(a420.width, a).max(a),
-            align_up(a420.height, a).max(a),
+        let (pw, ph) = (
+            align_up(a_src.width, a).max(a),
+            align_up(a_src.height, a).max(a),
         );
-        let extra: &[(&str, &str)] = if opts.codec != StillCodec::Hevc {
-            &[]
-        } else if hevc_pcm {
-            ph += ALPHA_PCM_EXTRA_ROWS;
-            &[]
+        let extra: &[(&str, &str)] = if opts.codec == StillCodec::Hevc {
+            ALPHA_HEVC_OPTIONS
         } else {
-            ALPHA_HEVC_INTRA_OPTIONS
+            &[]
         };
-        let padded = pad_frame(&a420, pw, ph)?;
-        let pic = encode_picture_with(&padded, opts, extra)?;
+        let padded = pad_frame(&a_src, pw, ph)?;
+        // The alpha is an opacity: full range, no colour description.
+        let alpha_colr = Colr::Nclx {
+            primaries: 2,
+            transfer: 2,
+            matrix: 2,
+            full_range: true,
+        };
+        let pic = encode_picture_for(&padded, opts, &alpha_colr, extra)?;
         // Alpha items carry no colour information (the plane is an
         // opacity, not a colour — the shape every third-party producer
         // writes), a single-channel `pixi` and an essential `auxC`.
-        // Note: a reader that takes the sample range from the bitstream
-        // VUI (Apple ImageIO does; the oxideav HEVC stream has none)
-        // treats the alpha as video range; a full-range `colr` on the
-        // item does not change that, so none is written.
         let mut props: Vec<(Property, bool)> = coded_props(&pic, &opts.colr, None)
             .into_iter()
             .filter(|(p, _)| !matches!(p, Property::Colr(_)))
@@ -689,7 +738,7 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
             }),
             true,
         ));
-        if (pic.coded_width, pic.coded_height) != (a420.width, a420.height) {
+        if (pic.coded_width, pic.coded_height) != (a_src.width, a_src.height) {
             props.push((
                 Property::Clap(Clap::for_rect(
                     pic.coded_width,
@@ -697,8 +746,8 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
                     CropRect {
                         x: 0,
                         y: 0,
-                        width: a420.width,
-                        height: a420.height,
+                        width: a_src.width,
+                        height: a_src.height,
                     },
                 )),
                 true,
@@ -891,6 +940,11 @@ pub struct HeifEncoderOptions {
     pub quality: u32,
     /// `speed` (AV1): `fast` / `balanced` / `thorough`.
     pub speed: String,
+    /// `rd` (HEVC intra): mode-decision effort 0..=2 (255 = the
+    /// encoder's still default).
+    pub rd: u32,
+    /// `tiles` (HEVC): `CxR` tile layout (empty = none).
+    pub tiles: String,
 }
 
 impl Default for HeifEncoderOptions {
@@ -904,6 +958,8 @@ impl Default for HeifEncoderOptions {
             range: "full".into(),
             quality: 60,
             speed: "fast".into(),
+            rd: 255,
+            tiles: String::new(),
         }
     }
 }
@@ -958,6 +1014,18 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             default: oxideav_core::OptionValue::String(String::new()),
             help: "AV1 search effort (default fast)",
         },
+        oxideav_core::OptionField {
+            name: "rd",
+            kind: oxideav_core::OptionKind::U32,
+            default: oxideav_core::OptionValue::U32(255),
+            help: "HEVC intra mode-decision effort 0..=2 (255 = encoder's still default)",
+        },
+        oxideav_core::OptionField {
+            name: "tiles",
+            kind: oxideav_core::OptionKind::String,
+            default: oxideav_core::OptionValue::String(String::new()),
+            help: "HEVC tile layout CxR (e.g. 4x4) for parallel coding; empty = none",
+        },
     ];
 
     fn apply(&mut self, key: &str, value: &oxideav_core::OptionValue) -> CoreResult<()> {
@@ -970,6 +1038,8 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             "range" => self.range = value.as_str()?.to_string(),
             "quality" => self.quality = value.as_u32()?,
             "speed" => self.speed = value.as_str()?.to_string(),
+            "rd" => self.rd = value.as_u32()?,
+            "tiles" => self.tiles = value.as_str()?.to_string(),
             other => {
                 return Err(CoreError::invalid(format!(
                     "heif: unknown option '{other}'"
@@ -1000,6 +1070,8 @@ impl HeifEncoderOptions {
             // AV1: `mode=pcm` is lossless, `mode=intra` codes at `quality`.
             av1_quality: (self.mode != "pcm").then_some(self.quality.min(100) as u8),
             av1_speed: self.speed.clone(),
+            hevc_rd: (self.rd <= 2).then_some(self.rd),
+            hevc_tiles: (!self.tiles.is_empty()).then_some(self.tiles.clone()),
             ..EncodeOptions::default()
         };
         if let Colr::Nclx { full_range, .. } = &mut opts.colr {

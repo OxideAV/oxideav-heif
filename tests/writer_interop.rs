@@ -622,9 +622,10 @@ fn identity_item_carries_transforms() {
 
 /// Apple ImageIO refuses a file whose master and alpha carry
 /// byte-identical VPS / SPS / PPS (verified by cross-muxing: any
-/// change to the alpha's SPS makes the same file open). The writer
-/// codes the alpha with a distinct SPS in both HEVC modes: a different
-/// CTB size for CABAC intra, an extra (clapped) row band for PCM.
+/// change to the alpha's parameter sets makes the same file open). The
+/// writer gives the alpha its own parameter-set ids (VPS / SPS / PPS
+/// 1) on both HEVC modes; the coded picture geometry stays the
+/// master's (no extra row band, no CTB change).
 #[test]
 fn alpha_parameter_sets_differ_from_the_master() {
     for opts in [pcm(), EncodeOptions::default()] {
@@ -642,6 +643,29 @@ fn alpha_parameter_sets_differ_from_the_master() {
             ps(master_cfg),
             ps(alpha_cfg),
             "{}: alpha parameter sets must differ from the master's",
+            opts.hevc_mode
+        );
+        // The difference is the parameter-set id: SPS 0 vs SPS 1, same
+        // coded geometry.
+        let sps_id = |c: &oxideav_heif::HevcConfig| -> u8 {
+            let sps = c
+                .arrays
+                .iter()
+                .find(|a| a.nal_unit_type == 33)
+                .and_then(|a| a.nal_units.first())
+                .expect("SPS");
+            let mut annex_b = vec![0, 0, 1];
+            annex_b.extend_from_slice(sps);
+            let nals = oxideav_h265::collect_nal_units(&annex_b).unwrap();
+            oxideav_h265::SeqParameterSet::parse(&nals[0].rbsp)
+                .unwrap()
+                .sps_id
+        };
+        assert_eq!((sps_id(master_cfg), sps_id(alpha_cfg)), (0, 1));
+        assert_eq!(
+            (alpha.ispe(), master_cfg.chroma_format_idc),
+            (node.ispe(), alpha_cfg.chroma_format_idc),
+            "{}: alpha coded at the master geometry",
             opts.hevc_mode
         );
         // The alpha still decodes to the master's geometry, exactly.
@@ -674,5 +698,70 @@ impl PipeMono for oxideav_heif::HeifPlane {
             format: HeifPixelFormat::new(Chroma::Mono, 8, false).unwrap(),
             planes: vec![self],
         }
+    }
+}
+
+/// With the item's range and colour description in the bitstream VUI
+/// (h265 0.0.11), Apple ImageIO — which takes the sample range from
+/// the VUI — renders our full-range alpha exactly; the earlier
+/// video-range stretch (+20 at code 235) is gone. Needs `sips` and
+/// `magick` (to turn its PNG into an uncompressed PPM).
+#[test]
+fn apple_imageio_renders_the_alpha_plane_exactly() {
+    if !have_binary("sips") || !have_binary("magick") {
+        eprintln!("SKIP: sips + magick needed");
+        return;
+    }
+    use oxideav_heif::decode::{decode_primary, ItemDecoder};
+    let dir = scratch_dir("apple-alpha");
+    for (name, opts) in [
+        ("pcm", pcm()),
+        (
+            "intra",
+            EncodeOptions {
+                hevc_mode: "intra".into(),
+                qp: 20,
+                ..EncodeOptions::default()
+            },
+        ),
+    ] {
+        let src = picture(96, 80, false, true);
+        let bytes = encode_still(&src, &opts).unwrap();
+        let heic = dir.join(format!("{name}.heic"));
+        std::fs::write(&heic, &bytes).unwrap();
+        let png = dir.join(format!("{name}.sips.png"));
+        assert!(sips_png(&heic, &png).is_some(), "{name}: sips refused");
+        // sips PNG → alpha channel as an RGB PPM (magick), compared to
+        // our decoded alpha plane replicated to RGB.
+        let ppm = dir.join(format!("{name}.alpha.ppm"));
+        let ok = Command::new("magick")
+            .arg(&png)
+            .args(["-alpha", "extract", "-depth", "8"])
+            .arg(format!("ppm:{}", ppm.display()))
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(ok, "{name}: magick could not extract the alpha");
+        let img = decode_primary(&HeifFile::parse(&bytes).unwrap(), ItemDecoder::direct()).unwrap();
+        let a = img.frame.alpha_as_frame().unwrap();
+        let mut data = Vec::with_capacity((a.width * a.height * 3) as usize);
+        for y in 0..a.height {
+            for x in 0..a.width {
+                let v = a.sample(0, x, y);
+                data.extend_from_slice(&[v, v, v]);
+            }
+        }
+        let want = oxideav_heif::rgb::RgbImage {
+            width: a.width,
+            height: a.height,
+            channels: 3,
+            bit_depth: 8,
+            data,
+        };
+        let (max, mean) = ppm_diff(&ppm, &want).unwrap();
+        assert!(
+            max == 0.0,
+            "{name}: sips alpha differs from ours (max {max} mean {mean:.3})"
+        );
     }
 }

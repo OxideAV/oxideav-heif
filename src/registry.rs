@@ -116,7 +116,9 @@ mod tests {
                 "thumbnail",
                 "range",
                 "quality",
-                "speed"
+                "speed",
+                "rd",
+                "tiles"
             ]
         );
         assert_eq!(
