@@ -273,7 +273,8 @@ fn producer_structures_are_surfaced() {
     let root = interop_root();
     // Apple ImageIO tiles anything above 512 px into a grid of hidden
     // hvc1 tiles under a `grid` primary.
-    let f = HeifFile::parse(&std::fs::read(root.join("sips_grid_1024x768.heic")).unwrap()).unwrap();
+    let f =
+        HeifFile::from_vec(std::fs::read(root.join("sips_grid_1024x768.heic")).unwrap()).unwrap();
     let meta = f.meta().unwrap();
     let primary = f.primary_item().unwrap();
     assert_eq!(&primary.item_type, b"grid");
@@ -290,7 +291,7 @@ fn producer_structures_are_surfaced() {
 
     // heif-enc thumbnails: a `thmb` reference to a smaller hvc1 item.
     let f =
-        HeifFile::parse(&std::fs::read(root.join("henc_thumb_rgb_96x80.heic")).unwrap()).unwrap();
+        HeifFile::from_vec(std::fs::read(root.join("henc_thumb_rgb_96x80.heic")).unwrap()).unwrap();
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     assert_eq!(img.thumbnail_ids.len(), 1);
     let thumb = decode_item(&f, img.thumbnail_ids[0], ItemDecoder::direct()).unwrap();
@@ -307,7 +308,7 @@ fn producer_structures_are_surfaced() {
         "henc_rgba_80x64.heic",
         "magick_rgba_80x64.heic",
     ] {
-        let f = HeifFile::parse(&std::fs::read(root.join(name)).unwrap()).unwrap();
+        let f = HeifFile::from_vec(std::fs::read(root.join(name)).unwrap()).unwrap();
         let node = oxideav_heif::derived::build_primary_graph(&f).unwrap();
         assert!(node.alpha.is_some(), "{name}: auxl alpha");
         let a = node.alpha.as_ref().unwrap();
@@ -319,13 +320,13 @@ fn producer_structures_are_surfaced() {
 
     // Apple ImageIO writes only an ICC `prof` colr for gray sources: the
     // CICP falls back to the MIAF default.
-    let f = HeifFile::parse(&std::fs::read(root.join("sips_gray_96x80.heic")).unwrap()).unwrap();
+    let f = HeifFile::from_vec(std::fs::read(root.join("sips_gray_96x80.heic")).unwrap()).unwrap();
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     assert!(img.icc_profile.is_some());
     assert!(!img.nclx_explicit);
     assert_eq!(img.nclx, oxideav_heif::props::Colr::MIAF_DEFAULT);
     // ... while its RGB sources carry an unspecified-primaries nclx.
-    let f = HeifFile::parse(&std::fs::read(root.join("sips_rgb_96x80.heic")).unwrap()).unwrap();
+    let f = HeifFile::from_vec(std::fs::read(root.join("sips_rgb_96x80.heic")).unwrap()).unwrap();
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     assert!(img.nclx_explicit);
     assert!(matches!(
@@ -343,7 +344,7 @@ fn producer_structures_are_surfaced() {
         "henc_lossless_rgb_96x80.heic",
         "henc_avif_lossless_rgb_96x80.avif",
     ] {
-        let f = HeifFile::parse(&std::fs::read(root.join(name)).unwrap()).unwrap();
+        let f = HeifFile::from_vec(std::fs::read(root.join(name)).unwrap()).unwrap();
         let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
         assert!(
             matches!(img.nclx, oxideav_heif::props::Colr::Nclx { matrix: 0, .. }),
@@ -354,7 +355,7 @@ fn producer_structures_are_surfaced() {
 
     // Every file passes the MIAF structural checks.
     for row in manifest() {
-        let f = HeifFile::parse(&std::fs::read(path(&row)).unwrap()).unwrap();
+        let f = HeifFile::from_vec(std::fs::read(path(&row)).unwrap()).unwrap();
         let rep = check(&f, MiafProfile::Miaf).unwrap();
         assert!(rep.is_conformant(), "{}: {:#?}", row.file, rep.violations);
     }

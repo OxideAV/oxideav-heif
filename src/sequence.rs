@@ -107,6 +107,77 @@ pub struct TrackOrientation {
     pub mirror: bool,
 }
 
+/// A sample-to-group mapping (`sbgp`, ISO/IEC 14496-12 §8.9.2, or the
+/// compact `csgp`, §8.9.5, expanded to the same run list).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SampleGroup {
+    /// `grouping_type`.
+    pub grouping_type: FourCc,
+    /// `grouping_type_parameter` (`sbgp` v1 / `csgp` with the presence flag).
+    pub grouping_type_parameter: Option<u32>,
+    /// `(sample_count, group_description_index)` runs in sample order;
+    /// index 0 = no group, 1-based into the matching `sgpd` (a set
+    /// `csgp` msb marks a fragment-local description: bit 31 kept).
+    pub entries: Vec<(u32, u32)>,
+    /// `true` when parsed from a `csgp` box.
+    pub compact: bool,
+}
+
+impl SampleGroup {
+    /// The `group_description_index` of sample `index` (0-based), or
+    /// `None` past the described samples.
+    pub fn index_of(&self, index: usize) -> Option<u32> {
+        let mut at = 0usize;
+        for (count, gdi) in &self.entries {
+            let next = at.saturating_add(*count as usize);
+            if index < next {
+                return Some(*gdi);
+            }
+            at = next;
+        }
+        None
+    }
+}
+
+/// One `sgpd` box (§8.9.3): the group descriptions of a grouping type;
+/// entries stay raw (their layout is per grouping type).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SampleGroupDescription {
+    /// `grouping_type`.
+    pub grouping_type: FourCc,
+    /// Box version.
+    pub version: u8,
+    /// `default_length` (v1+; 0 = per-entry `description_length`).
+    pub default_length: u32,
+    /// `default_group_description_index` (v2+; 0 = no default).
+    pub default_group_description_index: u32,
+    /// The `SampleGroupDescriptionEntry` bodies, 1-based in the file.
+    pub entries: Vec<Vec<u8>>,
+}
+
+/// A `prft` box (§8.16.5): producer reference time for one track.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProducerReferenceTime {
+    /// Box flags (0 / 1 / 2 / 4 / 8 / 16 / 24, §8.16.5.3).
+    pub flags: u32,
+    /// `reference_track_ID`.
+    pub reference_track_id: u32,
+    /// `ntp_timestamp` (NTP 64-bit format).
+    pub ntp_timestamp: u64,
+    /// `media_time` (32-bit in v0, 64-bit in v1).
+    pub media_time: u64,
+}
+
+/// An `ssix` box (§8.16.4): per subsegment, `(level, range_size)` runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubsegmentIndex {
+    /// One `Vec<(level, range_size)>` per subsegment.
+    pub subsegments: Vec<Vec<(u8, u32)>>,
+}
+
+/// Upper bound on sample-group runs / description entries per box.
+pub const MAX_GROUP_ENTRIES: usize = 1 << 20;
+
 /// One track.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Track {
@@ -136,9 +207,60 @@ pub struct Track {
     pub references: Vec<(FourCc, Vec<u32>)>,
     /// `elst` entries.
     pub edits: Vec<Edit>,
+    /// `sbgp` / `csgp` sample-to-group mappings of the `stbl`, in file order.
+    pub sample_groups: Vec<SampleGroup>,
+    /// `sgpd` group descriptions of the `stbl`, in file order.
+    pub sample_group_descriptions: Vec<SampleGroupDescription>,
 }
 
 impl Track {
+    /// The 1-based `sgpd` entry index that applies to sample `index`
+    /// for `grouping_type` (and `parameter`, when the mapping carries
+    /// one): the `sbgp` / `csgp` mapping, else the `sgpd` default;
+    /// `None` when neither maps the sample (or maps it to 0).
+    pub fn group_description_index(
+        &self,
+        grouping_type: &FourCc,
+        parameter: Option<u32>,
+        index: usize,
+    ) -> Option<u32> {
+        let mapped = self
+            .sample_groups
+            .iter()
+            .filter(|g| {
+                &g.grouping_type == grouping_type
+                    && (parameter.is_none() || g.grouping_type_parameter == parameter)
+            })
+            .find_map(|g| g.index_of(index));
+        let idx = match mapped {
+            Some(i) => i,
+            None => self
+                .sample_group_descriptions
+                .iter()
+                .find(|d| &d.grouping_type == grouping_type)
+                .map(|d| d.default_group_description_index)
+                .unwrap_or(0),
+        };
+        (idx & 0x7fff_ffff != 0).then_some(idx)
+    }
+
+    /// The raw `sgpd` entry that applies to sample `index` for
+    /// `grouping_type` (see [`Track::group_description_index`]).
+    pub fn group_description_of(
+        &self,
+        grouping_type: &FourCc,
+        parameter: Option<u32>,
+        index: usize,
+    ) -> Option<&[u8]> {
+        let idx = self.group_description_index(grouping_type, parameter, index)? & 0x7fff_ffff;
+        self.sample_group_descriptions
+            .iter()
+            .find(|d| &d.grouping_type == grouping_type)?
+            .entries
+            .get(idx as usize - 1)
+            .map(Vec::as_slice)
+    }
+
     /// `true` for image-sequence / video / auxiliary-video tracks.
     pub fn is_visual(&self) -> bool {
         matches!(&self.handler, b"pict" | b"vide" | b"auxv")
@@ -205,6 +327,10 @@ pub struct Movie {
     pub duration: u64,
     /// The tracks, in file order.
     pub tracks: Vec<Track>,
+    /// Top-level `prft` boxes, in file order.
+    pub producer_reference_times: Vec<ProducerReferenceTime>,
+    /// Top-level `ssix` boxes, in file order.
+    pub subsegment_indexes: Vec<SubsegmentIndex>,
 }
 
 impl Movie {
@@ -242,11 +368,239 @@ pub fn parse_movie(file: &HeifFile) -> Result<Option<Movie>> {
         }
         tracks.push(parse_trak(payload(moov, &h), file_len)?);
     }
+    let mut producer_reference_times = Vec::new();
+    let mut subsegment_indexes = Vec::new();
+    for h in &file.top_level {
+        let p = crate::boxes::payload(file.bytes(), h);
+        match &h.box_type {
+            b"prft" => producer_reference_times.push(parse_prft(p)?),
+            b"ssix" => subsegment_indexes.push(parse_ssix(p)?),
+            _ => {}
+        }
+    }
     Ok(Some(Movie {
         timescale,
         duration,
         tracks,
+        producer_reference_times,
+        subsegment_indexes,
     }))
+}
+
+/// `prft` (§8.16.5.2).
+pub fn parse_prft(p: &[u8]) -> Result<ProducerReferenceTime> {
+    let (v, flags, body) = parse_full_box(p)?;
+    let mut r = Reader::new(body);
+    let reference_track_id = r.u32("prft reference_track_ID")?;
+    let ntp_timestamp = r.u64("prft ntp_timestamp")?;
+    let media_time = if v == 0 {
+        r.u32("prft media_time")? as u64
+    } else {
+        r.u64("prft media_time")?
+    };
+    Ok(ProducerReferenceTime {
+        flags,
+        reference_track_id,
+        ntp_timestamp,
+        media_time,
+    })
+}
+
+/// `ssix` (§8.16.4.2).
+pub fn parse_ssix(p: &[u8]) -> Result<SubsegmentIndex> {
+    let (_v, _f, body) = parse_full_box(p)?;
+    let mut r = Reader::new(body);
+    let n = r.u32("ssix subsegment_count")? as usize;
+    if n > r.remaining() / 4 {
+        return Err(HeifError::invalid("ssix subsegment_count exceeds the box"));
+    }
+    let mut subsegments = Vec::with_capacity(n);
+    for _ in 0..n {
+        let rc = r.u32("ssix range_count")? as usize;
+        if rc > r.remaining() / 4 {
+            return Err(HeifError::invalid("ssix range_count exceeds the box"));
+        }
+        let mut ranges = Vec::with_capacity(rc);
+        for _ in 0..rc {
+            let w = r.u32("ssix level / range_size")?;
+            ranges.push(((w >> 24) as u8, w & 0x00ff_ffff));
+        }
+        subsegments.push(ranges);
+    }
+    Ok(SubsegmentIndex { subsegments })
+}
+
+/// `sbgp` (§8.9.2.2).
+pub fn parse_sbgp(p: &[u8]) -> Result<SampleGroup> {
+    let (v, _f, body) = parse_full_box(p)?;
+    let mut r = Reader::new(body);
+    let grouping_type = r.fourcc("sbgp grouping_type")?;
+    let grouping_type_parameter = if v == 1 {
+        Some(r.u32("sbgp grouping_type_parameter")?)
+    } else {
+        None
+    };
+    let n = r.u32("sbgp entry_count")? as usize;
+    if n > r.remaining() / 8 || n > MAX_GROUP_ENTRIES {
+        return Err(HeifError::invalid("sbgp entry_count exceeds the box"));
+    }
+    let mut entries = Vec::with_capacity(n);
+    for _ in 0..n {
+        let c = r.u32("sbgp sample_count")?;
+        let g = r.u32("sbgp group_description_index")?;
+        entries.push((c, g));
+    }
+    Ok(SampleGroup {
+        grouping_type,
+        grouping_type_parameter,
+        entries,
+        compact: false,
+    })
+}
+
+/// `csgp` (§8.9.5): the pattern table is expanded to `sbgp`-shaped
+/// runs (one run per pattern element, repeated `sample_count /
+/// pattern_length` times, the remainder taken from the pattern head).
+pub fn parse_csgp(p: &[u8]) -> Result<SampleGroup> {
+    let (_v, flags, body) = parse_full_box(p)?;
+    let fragment_local_msb = flags & 0x80 != 0;
+    let parameter_present = flags & 0x40 != 0;
+    let width = |code: u32| 4u32 << (code & 3);
+    let pattern_bits = width(flags >> 4);
+    let count_bits = width(flags >> 2);
+    let index_bits = width(flags);
+    let mut r = Reader::new(body);
+    let grouping_type = r.fourcc("csgp grouping_type")?;
+    let grouping_type_parameter = if parameter_present {
+        Some(r.u32("csgp grouping_type_parameter")?)
+    } else {
+        None
+    };
+    let pattern_count = r.u32("csgp pattern_count")? as usize;
+    let rest = r.rest();
+    let mut bits = BitCursor { data: rest, pos: 0 };
+    if pattern_count as u64 * (pattern_bits + count_bits) as u64 > rest.len() as u64 * 8
+        || pattern_count > MAX_GROUP_ENTRIES
+    {
+        return Err(HeifError::invalid("csgp pattern_count exceeds the box"));
+    }
+    let mut patterns = Vec::with_capacity(pattern_count);
+    let mut total_len = 0u64;
+    for _ in 0..pattern_count {
+        let len = bits.read(pattern_bits, "csgp pattern_length")?;
+        let count = bits.read(count_bits, "csgp sample_count")?;
+        total_len += len as u64;
+        patterns.push((len, count));
+    }
+    if total_len * index_bits as u64 > (rest.len() as u64 * 8).saturating_sub(bits.pos as u64)
+        || total_len > MAX_GROUP_ENTRIES as u64
+    {
+        return Err(HeifError::invalid("csgp pattern indices exceed the box"));
+    }
+    let mut entries = Vec::new();
+    for (len, count) in patterns {
+        let mut indices = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            let mut idx = bits.read(index_bits, "csgp sample_group_description_index")?;
+            if fragment_local_msb && index_bits < 32 && idx & (1 << (index_bits - 1)) != 0 {
+                idx = (idx & !(1 << (index_bits - 1))) | 0x8000_0000;
+            }
+            indices.push(idx);
+        }
+        if len == 0 {
+            continue;
+        }
+        // `sample_count` samples follow the pattern cyclically.
+        let mut remaining = count;
+        while remaining > 0 {
+            for &idx in &indices {
+                if remaining == 0 {
+                    break;
+                }
+                match entries.last_mut() {
+                    Some((c, g)) if *g == idx => *c += 1,
+                    _ => entries.push((1u32, idx)),
+                }
+                remaining -= 1;
+            }
+            if entries.len() > MAX_GROUP_ENTRIES {
+                return Err(HeifError::exhausted("csgp expands past the run cap"));
+            }
+        }
+    }
+    Ok(SampleGroup {
+        grouping_type,
+        grouping_type_parameter,
+        entries,
+        compact: true,
+    })
+}
+
+/// `sgpd` (§8.9.3.2).
+pub fn parse_sgpd(p: &[u8]) -> Result<SampleGroupDescription> {
+    let (v, _f, body) = parse_full_box(p)?;
+    let mut r = Reader::new(body);
+    let grouping_type = r.fourcc("sgpd grouping_type")?;
+    let default_length = if v >= 1 {
+        r.u32("sgpd default_length")?
+    } else {
+        0
+    };
+    let default_group_description_index = if v >= 2 {
+        r.u32("sgpd default_group_description_index")?
+    } else {
+        0
+    };
+    let n = r.u32("sgpd entry_count")? as usize;
+    if n > r.remaining() || n > MAX_GROUP_ENTRIES {
+        return Err(HeifError::invalid("sgpd entry_count exceeds the box"));
+    }
+    let mut entries = Vec::with_capacity(n);
+    for _ in 0..n {
+        let len = if v >= 1 {
+            if default_length == 0 {
+                r.u32("sgpd description_length")? as usize
+            } else {
+                default_length as usize
+            }
+        } else {
+            // v0 entries have no length field: the layout is per
+            // grouping type; the rest of the box is kept as one entry.
+            r.remaining()
+        };
+        entries.push(r.bytes(len, "sgpd entry")?.to_vec());
+        if v == 0 {
+            break;
+        }
+    }
+    Ok(SampleGroupDescription {
+        grouping_type,
+        version: v,
+        default_length,
+        default_group_description_index,
+        entries,
+    })
+}
+
+/// MSB-first bit reader for the `csgp` packed fields.
+struct BitCursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl BitCursor<'_> {
+    fn read(&mut self, bits: u32, what: &str) -> Result<u32> {
+        let mut v = 0u64;
+        for _ in 0..bits {
+            let byte = self
+                .data
+                .get(self.pos / 8)
+                .ok_or_else(|| HeifError::invalid(format!("{what}: truncated")))?;
+            v = (v << 1) | ((byte >> (7 - self.pos % 8)) & 1) as u64;
+            self.pos += 1;
+        }
+        Ok(v as u32)
+    }
 }
 
 fn parse_mvhd(p: &[u8]) -> Result<(u32, u64)> {
@@ -353,6 +707,21 @@ fn parse_trak(trak: &[u8], file_len: u64) -> Result<Track> {
         None => Vec::new(),
     };
     let samples = parse_sample_table(stbl, file_len)?;
+    let mut sample_groups = Vec::new();
+    let mut sample_group_descriptions = Vec::new();
+    for h in iter_boxes(stbl) {
+        let h = h?;
+        let p = payload(stbl, &h);
+        match &h.box_type {
+            b"sbgp" => sample_groups.push(parse_sbgp(p)?),
+            b"csgp" => sample_groups.push(parse_csgp(p)?),
+            b"sgpd" => sample_group_descriptions.push(parse_sgpd(p)?),
+            _ => {}
+        }
+        if sample_groups.len() + sample_group_descriptions.len() > 4096 {
+            return Err(HeifError::exhausted("more than 4096 sample-group boxes"));
+        }
+    }
     let mut references = Vec::new();
     if let Some((_, tref)) = find_box(trak, b"tref")? {
         for h in iter_boxes(tref) {
@@ -406,6 +775,8 @@ fn parse_trak(trak: &[u8], file_len: u64) -> Result<Track> {
         samples,
         references,
         edits,
+        sample_groups,
+        sample_group_descriptions,
     })
 }
 
@@ -808,6 +1179,8 @@ mod tests {
             samples: vec![],
             references: vec![],
             edits: vec![],
+            sample_groups: vec![],
+            sample_group_descriptions: vec![],
         };
         assert_eq!(
             t.orientation(),
@@ -823,6 +1196,132 @@ mod tests {
         t.matrix = [0x20000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000];
         assert_eq!(t.orientation(), None);
         assert!(t.is_visual());
+    }
+
+    #[test]
+    fn sample_groups_sbgp_csgp_sgpd() {
+        use crate::boxes::write::full_boxed;
+        // sbgp v1: 2 samples → 1, 3 samples → 0, 1 sample → 2.
+        let mut b = b"eqiv".to_vec();
+        b.extend_from_slice(&7u32.to_be_bytes());
+        b.extend_from_slice(&3u32.to_be_bytes());
+        for (c, g) in [(2u32, 1u32), (3, 0), (1, 2)] {
+            b.extend_from_slice(&c.to_be_bytes());
+            b.extend_from_slice(&g.to_be_bytes());
+        }
+        let sbgp = full_boxed(b"sbgp", 1, 0, &b);
+        let g = parse_sbgp(&sbgp[8..]).unwrap();
+        assert_eq!(g.grouping_type_parameter, Some(7));
+        assert_eq!(g.entries, vec![(2, 1), (3, 0), (1, 2)]);
+        assert_eq!(g.index_of(0), Some(1));
+        assert_eq!(g.index_of(2), Some(0));
+        assert_eq!(g.index_of(5), Some(2));
+        assert_eq!(g.index_of(6), None);
+        // csgp: index 4-bit, count 8-bit, pattern-length 4-bit
+        // (flags = 0 | 1<<2 | 0<<4 = 0x04), no parameter. Pattern
+        // [1, 2] of length 2 applied to 5 samples, then pattern [3]
+        // (length 1) to 2 samples.
+        let mut c = b"eqiv".to_vec();
+        c.extend_from_slice(&2u32.to_be_bytes());
+        // pattern_length[1]=2 (4 bits), sample_count[1]=5 (8 bits),
+        // pattern_length[2]=1, sample_count[2]=2 → bits:
+        // 0010 00000101 0001 00000010 → 0x20 0x51 0x02 then indices
+        // 0001 0010 0011 → 0x12 0x30
+        c.extend_from_slice(&[0x20, 0x51, 0x02, 0x12, 0x30]);
+        let csgp = full_boxed(b"csgp", 0, 0x04, &c);
+        let g = parse_csgp(&csgp[8..]).unwrap();
+        assert!(g.compact);
+        assert_eq!(
+            g.entries,
+            vec![(1, 1), (1, 2), (1, 1), (1, 2), (1, 1), (2, 3)]
+        );
+        assert_eq!(g.index_of(4), Some(1));
+        assert_eq!(g.index_of(6), Some(3));
+        // sgpd v1 with default_length 0: two entries of 2 and 3 bytes;
+        // v2 with a default index.
+        let mut d = b"eqiv".to_vec();
+        d.extend_from_slice(&0u32.to_be_bytes());
+        d.extend_from_slice(&2u32.to_be_bytes());
+        d.extend_from_slice(&2u32.to_be_bytes());
+        d.extend_from_slice(&[0xaa, 0xbb]);
+        d.extend_from_slice(&3u32.to_be_bytes());
+        d.extend_from_slice(&[1, 2, 3]);
+        let sgpd = full_boxed(b"sgpd", 1, 0, &d);
+        let desc = parse_sgpd(&sgpd[8..]).unwrap();
+        assert_eq!(desc.entries, vec![vec![0xaa, 0xbb], vec![1, 2, 3]]);
+        let mut d2 = b"eqiv".to_vec();
+        d2.extend_from_slice(&1u32.to_be_bytes()); // default_length 1
+        d2.extend_from_slice(&2u32.to_be_bytes()); // default index 2
+        d2.extend_from_slice(&2u32.to_be_bytes());
+        d2.extend_from_slice(&[0x11, 0x22]);
+        let desc2 = parse_sgpd(&full_boxed(b"sgpd", 2, 0, &d2)[8..]).unwrap();
+        assert_eq!(desc2.default_group_description_index, 2);
+        assert_eq!(desc2.entries, vec![vec![0x11], vec![0x22]]);
+        // Track-level resolution: mapped samples use the mapping, the
+        // rest fall back to the sgpd default.
+        let t = Track {
+            track_id: 1,
+            enabled: true,
+            in_movie: true,
+            handler: *b"pict",
+            timescale: 1,
+            duration: 0,
+            width: 1,
+            height: 1,
+            matrix: [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000],
+            sample_entries: vec![],
+            samples: vec![],
+            references: vec![],
+            edits: vec![],
+            sample_groups: vec![parse_sbgp(&sbgp[8..]).unwrap()],
+            sample_group_descriptions: vec![desc2],
+        };
+        assert_eq!(t.group_description_index(b"eqiv", None, 0), Some(1));
+        assert_eq!(t.group_description_index(b"eqiv", Some(7), 0), Some(1));
+        assert_eq!(t.group_description_index(b"eqiv", Some(8), 0), Some(2));
+        assert_eq!(t.group_description_index(b"eqiv", None, 3), None);
+        assert_eq!(t.group_description_index(b"eqiv", None, 9), Some(2));
+        assert_eq!(t.group_description_of(b"eqiv", None, 9), Some(&[0x22][..]));
+        assert_eq!(t.group_description_index(b"rap ", None, 0), None);
+    }
+
+    #[test]
+    fn prft_and_ssix() {
+        use crate::boxes::write::full_boxed;
+        let mut b = 3u32.to_be_bytes().to_vec();
+        b.extend_from_slice(&0x1122_3344_5566_7788u64.to_be_bytes());
+        b.extend_from_slice(&90_000u32.to_be_bytes());
+        let p = parse_prft(&full_boxed(b"prft", 0, 24, &b)[8..]).unwrap();
+        assert_eq!(
+            p,
+            ProducerReferenceTime {
+                flags: 24,
+                reference_track_id: 3,
+                ntp_timestamp: 0x1122_3344_5566_7788,
+                media_time: 90_000
+            }
+        );
+        let mut b1 = 3u32.to_be_bytes().to_vec();
+        b1.extend_from_slice(&1u64.to_be_bytes());
+        b1.extend_from_slice(&(1u64 << 40).to_be_bytes());
+        assert_eq!(
+            parse_prft(&full_boxed(b"prft", 1, 0, &b1)[8..])
+                .unwrap()
+                .media_time,
+            1 << 40
+        );
+        let mut s = 2u32.to_be_bytes().to_vec();
+        s.extend_from_slice(&2u32.to_be_bytes());
+        s.extend_from_slice(&[0, 0x00, 0x10, 0x00]);
+        s.extend_from_slice(&[1, 0, 0, 0]);
+        s.extend_from_slice(&1u32.to_be_bytes());
+        s.extend_from_slice(&[7, 0xff, 0xff, 0xff]);
+        let x = parse_ssix(&full_boxed(b"ssix", 0, 0, &s)[8..]).unwrap();
+        assert_eq!(
+            x.subsegments,
+            vec![vec![(0, 0x1000), (1, 0)], vec![(7, 0xff_ffff)]]
+        );
+        assert!(parse_ssix(&full_boxed(b"ssix", 0, 0, &[0, 0, 0, 9])[8..]).is_err());
     }
 
     #[test]

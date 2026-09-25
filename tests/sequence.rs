@@ -14,7 +14,7 @@ fn sequence_bundle_sample_table() {
     let Some(root) = fixture_root() else {
         return;
     };
-    let f = HeifFile::parse(&fixture_bytes(&root, "image-sequence-3frame")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "image-sequence-3frame")).unwrap();
     let mv = parse_movie(&f).unwrap().expect("moov");
     assert_eq!(mv.tracks.len(), 1);
     let t = &mv.tracks[0];
@@ -48,7 +48,7 @@ fn sequence_bundle_sample_table() {
     assert_eq!(t.sample_duration_total(), t.duration);
     assert!(t.samples[0].is_sync);
     // No sequence in the still-only bundles.
-    let f = HeifFile::parse(&fixture_bytes(&root, "single-image-1x1")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "single-image-1x1")).unwrap();
     assert!(parse_movie(&f).unwrap().is_none());
 }
 

@@ -60,7 +60,7 @@ fn hvcc_events(f: &HeifFile) -> Vec<TraceEvent> {
 #[test]
 fn hvcc_fields_match_corpus_traces() {
     for (root, bundle) in all_bundles() {
-        let f = HeifFile::parse(&fixture_bytes(&root, bundle)).unwrap();
+        let f = HeifFile::from_vec(fixture_bytes(&root, bundle)).unwrap();
         let expected = read_trace(&root, bundle);
         let got = hvcc_events(&f);
         assert_trace_subset_eq(bundle, &["HVCC", "HEVC_FRAME_FOR_ITEM"], &expected, &got);
@@ -70,7 +70,7 @@ fn hvcc_fields_match_corpus_traces() {
 #[test]
 fn hvcc_records_reserialize_byte_exact_and_carry_parameter_sets() {
     for (root, bundle) in all_bundles() {
-        let f = HeifFile::parse(&fixture_bytes(&root, bundle)).unwrap();
+        let f = HeifFile::from_vec(fixture_bytes(&root, bundle)).unwrap();
         let meta = f.meta().unwrap();
         for it in meta.items.iter().filter(|i| i.item_type == ITEM_TYPE_HVC1) {
             let props = ItemProperties::resolve(meta, it.id).unwrap();
@@ -110,7 +110,7 @@ fn per_bundle_property_expectations() {
     let Some(root) = fixture_root() else {
         return;
     };
-    let load = |b: &str| HeifFile::parse(&fixture_bytes(&root, b)).unwrap();
+    let load = |b: &str| HeifFile::from_vec(fixture_bytes(&root, b)).unwrap();
     let props_of = |f: &HeifFile, id: u32| ItemProperties::resolve(f.meta().unwrap(), id).unwrap();
 
     // 1×1: clap crops a 64×64 coded picture; essential + resolves to (0,0,1,1).
@@ -131,7 +131,7 @@ fn per_bundle_property_expectations() {
 
     // nclx on the typical photo (docs superset only: the bundle is not vendored).
     if let Some(docs) = common::docs_root() {
-        let f = HeifFile::parse(&fixture_bytes(&docs, "single-image-512x512-q60")).unwrap();
+        let f = HeifFile::from_vec(fixture_bytes(&docs, "single-image-512x512-q60")).unwrap();
         let p = props_of(&f, f.meta().unwrap().primary_item_id.unwrap());
         match p.nclx() {
             Some(Colr::Nclx { matrix, .. }) => assert!(*matrix <= 14),
@@ -178,7 +178,7 @@ fn derivation_graphs_have_the_expected_shape() {
     let Some(root) = fixture_root() else {
         return;
     };
-    let load = |b: &str| HeifFile::parse(&fixture_bytes(&root, b)).unwrap();
+    let load = |b: &str| HeifFile::from_vec(fixture_bytes(&root, b)).unwrap();
 
     let g = build_primary_graph(&load("still-image-grid-2x2")).unwrap();
     match &g.kind {
@@ -231,7 +231,7 @@ fn derivation_graphs_have_the_expected_shape() {
 #[test]
 fn corpus_is_miaf_conformant() {
     for (root, bundle) in all_bundles() {
-        let f = HeifFile::parse(&fixture_bytes(&root, bundle)).unwrap();
+        let f = HeifFile::from_vec(fixture_bytes(&root, bundle)).unwrap();
         let rep = check(&f, MiafProfile::Miaf).unwrap();
         // The corpus was written by a MIAF-aware producer; the general
         // requirements hold for every bundle. (The 1×1 bundle's grid /

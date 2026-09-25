@@ -84,7 +84,7 @@ pub fn predict_output(node: &ImageNode) -> Result<(HeifPixelFormat, (u32, u32))>
             let (ff, _) = layouts
                 .first()
                 .ok_or_else(|| HeifError::invalid("iovl without inputs"))?;
-            let any_alpha = layouts.iter().any(|(f, _)| f.has_alpha);
+            let any_alpha = ff.chroma != Chroma::Mono && layouts.iter().any(|(f, _)| f.has_alpha);
             let promote = any_alpha
                 || needs_444(
                     ff.chroma,
@@ -125,7 +125,9 @@ pub fn predict_output(node: &ImageNode) -> Result<(HeifPixelFormat, (u32, u32))>
             }
             Property::Irot(r) => {
                 if r.angle & 3 != 0 {
-                    if needs_444(fmt.chroma, w % 2 == 1, h % 2 == 1) {
+                    let (sx, sy) = fmt.chroma.shift();
+                    let axis_swap = r.angle & 1 == 1 && sx != sy;
+                    if axis_swap || needs_444(fmt.chroma, w % 2 == 1, h % 2 == 1) {
                         fmt.chroma = Chroma::Yuv444;
                     }
                     if r.angle & 1 == 1 {
@@ -201,7 +203,7 @@ struct TrackStream {
 
 /// The HEIF demuxer.
 pub struct HeifDemuxer {
-    file: HeifFile,
+    file: HeifFile<'static>,
     movie: Option<Movie>,
     streams: Vec<StreamInfo>,
     still_pending: bool,
@@ -345,7 +347,7 @@ impl HeifDemuxer {
     }
 
     /// The parsed file.
-    pub fn file(&self) -> &HeifFile {
+    pub fn file(&self) -> &HeifFile<'static> {
         &self.file
     }
 

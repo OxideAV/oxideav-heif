@@ -88,7 +88,7 @@ pub struct WriterItem {
 pub struct HeifWriter {
     items: Vec<WriterItem>,
     references: Vec<(FourCc, u32, Vec<u32>)>,
-    entity_groups: Vec<(FourCc, u32, Vec<u32>)>,
+    entity_groups: Vec<(FourCc, u32, u32, Vec<u32>)>,
     primary: Option<u32>,
     next_id: u32,
     major_brand: Option<FourCc>,
@@ -307,20 +307,55 @@ impl HeifWriter {
         id
     }
 
+    /// Add an Exif metadata item from a complete item body — the
+    /// `exif_tiff_header_offset` word already in place (Annex A.2.1),
+    /// as read back from another file or built by the caller.
+    pub fn add_exif_raw(&mut self, image: u32, body: Vec<u8>) -> u32 {
+        self.add_metadata_item(image, ITEM_TYPE_EXIF, None, body)
+    }
+
     /// Add an XMP metadata item (`mime` / `application/rdf+xml`).
     pub fn add_xmp(&mut self, image: u32, xmp: &str) -> u32 {
+        self.add_xmp_bytes(image, xmp.as_bytes().to_vec())
+    }
+
+    /// Add an XMP metadata item from its packet bytes (any encoding —
+    /// Annex A.3 only requires the `application/rdf+xml` content
+    /// type, so a packet that is not UTF-8 is written as is).
+    pub fn add_xmp_bytes(&mut self, image: u32, packet: Vec<u8>) -> u32 {
+        self.add_metadata_item(image, ITEM_TYPE_MIME, Some("application/rdf+xml"), packet)
+    }
+
+    /// Add a metadata item of any type (`Exif`, `mime` with a content
+    /// type, `uri ` …) describing `image` through a `cdsc` reference;
+    /// the body is written verbatim.
+    pub fn add_metadata_item(
+        &mut self,
+        image: u32,
+        item_type: FourCc,
+        content_type: Option<&str>,
+        body: Vec<u8>,
+    ) -> u32 {
         let id = self.alloc_id();
         self.items.push(WriterItem {
             id,
-            item_type: ITEM_TYPE_MIME,
+            item_type,
             name: String::new(),
-            content_type: Some("application/rdf+xml".into()),
+            content_type: content_type.map(str::to_owned),
             hidden: false,
-            body: ItemBody::Metadata(xmp.as_bytes().to_vec()),
+            body: ItemBody::Metadata(body),
             properties: Vec::new(),
         });
         self.references.push((reference::CDSC, id, vec![image]));
         id
+    }
+
+    /// Set an item's `infe` `item_name` (a UTF-8 string, written
+    /// null-terminated; interior NULs are dropped).
+    pub fn set_item_name(&mut self, id: u32, name: &str) {
+        if let Some(it) = self.items.iter_mut().find(|i| i.id == id) {
+            it.name = name.chars().filter(|c| *c != '\0').collect();
+        }
     }
 
     /// Add an arbitrary item reference.
@@ -328,9 +363,22 @@ impl HeifWriter {
         self.references.push((reference_type, from, to));
     }
 
-    /// Add an entity group (`altr`, `brst`, …).
+    /// Add an entity group (`altr`, `brst`, …) with `flags = 0`.
     pub fn add_entity_group(&mut self, grouping_type: FourCc, group_id: u32, entities: Vec<u32>) {
-        self.entity_groups.push((grouping_type, group_id, entities));
+        self.add_entity_group_with_flags(grouping_type, group_id, 0, entities);
+    }
+
+    /// Add an entity group carrying `EntityToGroupBox` flags (a
+    /// 24-bit FullBox field whose meaning is per grouping type).
+    pub fn add_entity_group_with_flags(
+        &mut self,
+        grouping_type: FourCc,
+        group_id: u32,
+        flags: u32,
+        entities: Vec<u32>,
+    ) {
+        self.entity_groups
+            .push((grouping_type, group_id, flags & 0x00ff_ffff, entities));
     }
 
     /// Mark an item hidden (`infe` flags bit 0).
@@ -519,13 +567,13 @@ impl HeifWriter {
             Vec::new()
         } else {
             let mut body = Vec::new();
-            for (t, gid, ents) in &self.entity_groups {
+            for (t, gid, flags, ents) in &self.entity_groups {
                 let mut b = gid.to_be_bytes().to_vec();
                 b.extend_from_slice(&(ents.len() as u32).to_be_bytes());
                 for e in ents {
                     b.extend_from_slice(&e.to_be_bytes());
                 }
-                body.extend(full_boxed(t, 0, 0, &b));
+                body.extend(full_boxed(t, 0, *flags, &b));
             }
             boxed(b"grpl", &body)
         };
@@ -696,7 +744,9 @@ impl HeifWriter {
             }
         }
         for it in &self.items {
-            let is_image = it.item_type != ITEM_TYPE_EXIF && it.item_type != ITEM_TYPE_MIME;
+            let is_image = !matches!(it.body, ItemBody::Metadata(_))
+                && it.item_type != ITEM_TYPE_EXIF
+                && it.item_type != ITEM_TYPE_MIME;
             if is_image
                 && !it
                     .properties
@@ -773,6 +823,15 @@ pub struct SequenceWriter {
     pub still: Option<HeifWriter>,
     /// `ccst` fields: `(all_ref_pics_intra, intra_pred_used, max_ref_per_pic)`.
     pub coding_constraints: (bool, bool, u8),
+    /// Brand override `(major, compatible)`; otherwise selected from the
+    /// entry type (`hevc` / `hevx` / `avis` + `msf1` / `iso8` / `miaf`,
+    /// plus `mif1` with a cover still).
+    pub brands: Option<(FourCc, Vec<FourCc>)>,
+    /// Alias the cover still's primary item onto a track sample: the
+    /// primary item's `iloc` extent points at that sample's bytes in
+    /// the track `mdat` instead of carrying a copy (the still's
+    /// primary must be a coded item; its queued body is ignored).
+    pub cover_sample: Option<usize>,
 }
 
 impl SequenceWriter {
@@ -794,7 +853,15 @@ impl SequenceWriter {
             samples: Vec::new(),
             still: None,
             coding_constraints: (true, true, 15),
+            brands: None,
+            cover_sample: None,
         }
+    }
+
+    /// Override the brands (see [`SequenceWriter::brands`]).
+    pub fn with_brands(mut self, major: FourCc, compatible: Vec<FourCc>) -> Self {
+        self.brands = Some((major, compatible));
+        self
     }
 
     /// Queue a sample.
@@ -829,19 +896,64 @@ impl SequenceWriter {
             b"av01" => BRAND_AVIS,
             _ => BRAND_MSF1,
         };
-        let mut compat = vec![BRAND_MSF1, codec_brand, BRAND_ISO8, BRAND_MIAF];
-        if self.still.is_some() {
-            compat.push(BRAND_MIF1);
-        }
+        let (major, compat) = match &self.brands {
+            Some((m, c)) => (*m, c.clone()),
+            None => {
+                let mut compat = vec![BRAND_MSF1, codec_brand, BRAND_ISO8, BRAND_MIAF];
+                if self.still.is_some() {
+                    compat.push(BRAND_MIF1);
+                }
+                (codec_brand, compat)
+            }
+        };
         let ftyp = crate::ftyp::FileType {
             box_type: *b"ftyp",
-            major_brand: codec_brand,
+            major_brand: major,
             minor_version: 0,
             compatible_brands: compat,
         }
         .to_box();
+        // Cover aliasing: the still's primary item is written with an
+        // empty body and its iloc extent re-pointed at the sample.
+        let alias = match (self.cover_sample, &self.still) {
+            (Some(i), Some(w)) => {
+                if i >= self.samples.len() {
+                    return Err(HeifError::invalid(format!(
+                        "sequence writer: cover_sample {i} but only {} samples",
+                        self.samples.len()
+                    )));
+                }
+                let primary = w
+                    .primary
+                    .ok_or_else(|| HeifError::invalid("sequence writer: still has no primary"))?;
+                let is_coded = w
+                    .items
+                    .iter()
+                    .any(|it| it.id == primary && matches!(it.body, ItemBody::Coded(_)));
+                if !is_coded {
+                    return Err(HeifError::invalid(
+                        "sequence writer: cover_sample needs a coded primary item",
+                    ));
+                }
+                Some((primary, i))
+            }
+            _ => None,
+        };
+        let still_writer = match (&self.still, alias) {
+            (Some(w), Some((primary, _))) => {
+                let mut w = w.clone();
+                for it in w.items.iter_mut() {
+                    if it.id == primary {
+                        it.body = ItemBody::Coded(Vec::new());
+                    }
+                }
+                Some(w)
+            }
+            (Some(w), None) => Some(w.clone()),
+            (None, _) => None,
+        };
         // Optional still meta (a HeifWriter file minus its ftyp/mdat).
-        let (still_meta, still_mdat) = match &self.still {
+        let (still_meta, still_mdat) = match &still_writer {
             Some(w) => {
                 let bytes = w.write_to_vec()?;
                 let f = crate::file::HeifFile::parse(&bytes)?;
@@ -1031,14 +1143,23 @@ impl SequenceWriter {
         let (still_mdat_bytes, still_mdat_old_base) = still_mdat;
         let mdat_start = ftyp.len() as u64 + moov_len + still_meta.len() as u64;
         let mdat_payload = mdat_start + 8;
+        let samples_base = mdat_payload + still_mdat_bytes.len() as u64;
         if !still_meta.is_empty() {
             // Relocate the still's iloc offsets: they were written for
             // an mdat at `still_mdat_old_base + 8`; the same payload now
-            // starts at `mdat_payload`.
+            // starts at `mdat_payload`. An aliased primary points at
+            // its sample instead.
             let delta = mdat_payload as i128 - (still_mdat_old_base + 8) as i128;
-            relocate_iloc(&mut still_meta, delta)?;
+            let override_extent = alias.map(|(primary, i)| {
+                let off: u64 = self.samples[..i].iter().map(|s| s.data.len() as u64).sum();
+                (
+                    primary,
+                    samples_base + off,
+                    self.samples[i].data.len() as u64,
+                )
+            });
+            relocate_iloc(&mut still_meta, delta, override_extent)?;
         }
-        let samples_base = mdat_payload + still_mdat_bytes.len() as u64;
         let mut out = ftyp;
         out.extend(moov_for(samples_base));
         out.extend_from_slice(&still_meta);
@@ -1052,9 +1173,15 @@ impl SequenceWriter {
 }
 
 /// Shift every construction-method-0 extent offset of the `iloc` inside
-/// a serialized `meta` box by `delta`. The writer always emits `iloc`
-/// v1 with 8-byte offsets, so the patch is in place.
-fn relocate_iloc(meta: &mut [u8], delta: i128) -> Result<()> {
+/// a serialized `meta` box by `delta`; `override_extent = (item_id,
+/// offset, length)` re-points that item's (single) extent instead. The
+/// writer always emits `iloc` v1 / v2 with 8-byte offsets and lengths,
+/// so the patch is in place.
+fn relocate_iloc(
+    meta: &mut [u8],
+    delta: i128,
+    override_extent: Option<(u32, u64, u64)>,
+) -> Result<()> {
     let body_start = 8 + 4; // box header + FullBox
     let mut cursor = body_start;
     while cursor + 8 <= meta.len() {
@@ -1090,7 +1217,15 @@ fn relocate_iloc(meta: &mut [u8], delta: i128) -> Result<()> {
                 c
             };
             for _ in 0..count {
-                p += if version < 2 { 2 } else { 4 };
+                let item_id = if version < 2 {
+                    let v = u16::from_be_bytes([b[p], b[p + 1]]) as u32;
+                    p += 2;
+                    v
+                } else {
+                    let v = u32::from_be_bytes([b[p], b[p + 1], b[p + 2], b[p + 3]]);
+                    p += 4;
+                    v
+                };
                 let cm = if version >= 1 {
                     let w = u16::from_be_bytes([b[p], b[p + 1]]);
                     p += 2;
@@ -1104,7 +1239,13 @@ fn relocate_iloc(meta: &mut [u8], delta: i128) -> Result<()> {
                 p += 2;
                 for _ in 0..extents {
                     p += index_size;
-                    if cm == 0 && offset_size == 8 {
+                    let over = override_extent.filter(|(id, _, _)| *id == item_id);
+                    if let (Some((_, off, len)), true) =
+                        (over, offset_size == 8 && length_size == 8)
+                    {
+                        b[p..p + 8].copy_from_slice(&off.to_be_bytes());
+                        b[p + 8..p + 16].copy_from_slice(&len.to_be_bytes());
+                    } else if cm == 0 && offset_size == 8 {
                         let mut o = [0u8; 8];
                         o.copy_from_slice(&b[p..p + 8]);
                         let v = (u64::from_be_bytes(o) as i128 + delta) as u64;
@@ -1310,6 +1451,83 @@ mod tests {
         assert_eq!(f.primary_item().unwrap().id, id);
         let rep = crate::miaf::check(&f, crate::miaf::MiafProfile::Miaf).unwrap();
         assert!(rep.is_conformant(), "{:#?}", rep.violations);
+    }
+
+    #[test]
+    fn sequence_writer_brand_override_and_cover_alias() {
+        let mut sw = SequenceWriter::new(ITEM_TYPE_HVC1, Property::HvcC(hvcc()), 64, 64, 30)
+            .with_brands(*b"avis", vec![*b"avis", *b"msf1", *b"iso8", *b"mif1"]);
+        sw.push_sample(vec![1; 10], 1, true);
+        sw.push_sample(vec![2; 12], 1, true);
+        let mut still = HeifWriter::new();
+        // The queued body is ignored once the primary aliases a sample.
+        let id = still.add_coded_item(ITEM_TYPE_HVC1, vec![9; 99], std_props(64, 64));
+        still.set_primary(id);
+        sw.still = Some(still);
+        sw.cover_sample = Some(1);
+        let bytes = sw.write_to_vec().unwrap();
+        let f = HeifFile::parse(&bytes).unwrap();
+        assert_eq!(f.file_type.major_brand, *b"avis");
+        assert_eq!(
+            f.file_type.compatible_brands,
+            vec![*b"avis", *b"msf1", *b"iso8", *b"mif1"]
+        );
+        assert!(!f.file_type.has_brand(&BRAND_HEVC));
+        let mv = crate::sequence::parse_movie(&f).unwrap().unwrap();
+        let t = &mv.tracks[0];
+        assert_eq!(f.item_data(id).unwrap().as_ref(), &[2u8; 12]);
+        let span = f.item_file_spans(id).unwrap()[0];
+        assert_eq!(
+            span,
+            (
+                t.samples[1].offset as usize,
+                t.samples[1].offset as usize + 12
+            )
+        );
+        // No duplicate bytes: the mdat holds exactly the samples.
+        let mdat = f.top_level.iter().find(|h| &h.box_type == b"mdat").unwrap();
+        assert_eq!(mdat.end() - mdat.payload_start, 22);
+        assert!(!bytes.windows(99).any(|w| w == [9u8; 99]));
+        let rep = crate::miaf::check(&f, crate::miaf::MiafProfile::Miaf).unwrap();
+        assert!(rep.is_conformant(), "{:#?}", rep.violations);
+        // Out-of-range alias is refused.
+        sw.cover_sample = Some(7);
+        assert!(sw.write_to_vec().is_err());
+    }
+
+    #[test]
+    fn raw_metadata_bodies_item_names_and_group_flags() {
+        let mut w = HeifWriter::new();
+        let id = w.add_coded_item(ITEM_TYPE_HVC1, vec![1; 4], std_props(8, 8));
+        w.set_primary(id);
+        w.set_item_name(id, "primary\0image");
+        let exif = w.add_exif_raw(id, b"\0\0\0\x06XXXXXXMM\0*".to_vec());
+        let xmp = w.add_xmp_bytes(id, vec![0xff, 0xfe, b'<', b'x', b'/', b'>']);
+        let uri = w.add_metadata_item(id, *b"uri ", None, b"custom".to_vec());
+        w.set_item_name(uri, "note");
+        w.add_entity_group_with_flags(*b"altr", 5, 0x12_3456, vec![id, exif]);
+        let bytes = w.write_to_vec().unwrap();
+        let f = HeifFile::parse(&bytes).unwrap();
+        let meta = f.meta().unwrap();
+        assert_eq!(meta.item(id).unwrap().name, "primaryimage");
+        assert_eq!(meta.item(uri).unwrap().name, "note");
+        assert_eq!(
+            f.item_data(exif).unwrap().as_ref(),
+            b"\0\0\0\x06XXXXXXMM\0*"
+        );
+        let body = f.item_data(exif).unwrap();
+        let off = u32::from_be_bytes([body[0], body[1], body[2], body[3]]) as usize;
+        assert_eq!(&body[4 + off..], b"MM\0*");
+        assert_eq!(
+            f.item_data(xmp).unwrap().as_ref(),
+            &[0xff, 0xfe, b'<', b'x', b'/', b'>']
+        );
+        assert!(meta.item(xmp).unwrap().is_xmp());
+        assert_eq!(meta.item(uri).unwrap().item_type, *b"uri ");
+        assert_eq!(meta.metadata_of(id), vec![exif, xmp, uri]);
+        let g = &meta.entity_groups[0];
+        assert_eq!((g.version, g.flags, g.group_id), (0, 0x12_3456, 5));
+        assert_eq!(g.entity_ids, vec![id, exif]);
     }
 
     #[test]

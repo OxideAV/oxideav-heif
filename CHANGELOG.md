@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `file`: `HeifFile<'a>` borrows its input — `HeifFile::parse(&[u8])`
+  no longer copies (item payloads that are one contiguous span borrow
+  from the caller's buffer); `from_vec` / `from_cow` / `into_owned` /
+  `is_owned` for the owned form. Callers that parsed a temporary now
+  use `from_vec`; `HeifDemuxer` holds a `HeifFile<'static>`.
+- `props`: `mdcv` and `cclv` primaries are read and written
+  interleaved per primary (`x, y` pairs, ISO/IEC 14496-12 §12.1.7 /
+  §12.1.8); they were planar (`x x x y y y`). Bytes pinned by a test.
+- `compose`: a quarter turn (`irot` 1 / 3) of a 4:2:2 picture promotes
+  to 4:4:4 (MIAF §7.3.6.7) instead of keeping a 4:2:2 label over
+  vertically subsampled planes; a monochrome overlay stays monochrome
+  even with alpha-carrying inputs (nothing to promote). The demuxer's
+  output prediction mirrors both.
+- `writer`: `SequenceWriter::brands` / `with_brands` (brand override)
+  and `cover_sample` (the cover still's primary item aliases a track
+  sample through its `iloc` extent — one copy of the bytes; the
+  framework muxer now aliases sample 0); `HeifWriter::add_exif_raw`
+  (body with the offset word as is), `add_xmp_bytes` (any encoding),
+  `add_metadata_item` (any `cdsc` item type / content type),
+  `set_item_name` (`infe` `item_name`), `add_entity_group_with_flags`;
+  metadata items of any type no longer need an `ispe`.
+- `meta`: `EntityGroup::version` / `flags` surfaced from the
+  `EntityToGroupBox` FullBox header.
+- `sequence`: `sbgp` / `csgp` (§8.9.2 / §8.9.5, patterns expanded to
+  runs, fragment-local msb kept in bit 31) and `sgpd` (§8.9.3, v0–v2,
+  raw entries) on `Track::sample_groups` /
+  `sample_group_descriptions` with `group_description_index` /
+  `group_description_of` (mapping, else the `sgpd` default); top-level
+  `prft` (§8.16.5) and `ssix` (§8.16.4) on
+  `Movie::producer_reference_times` / `subsegment_indexes`.
+
 ## [0.0.3](https://github.com/OxideAV/oxideav-heif/compare/v0.0.2...v0.0.3) - 2026-09-25
 
 ### Other

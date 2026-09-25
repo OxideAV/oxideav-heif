@@ -124,7 +124,7 @@ pub use writer::{HeifWriter, SequenceWriter};
 
 /// Parse a HEIF file held in memory. Direct entry point of the
 /// standalone container surface; see [`HeifFile`] for what it exposes.
-pub fn parse(bytes: &[u8]) -> Result<HeifFile> {
+pub fn parse(bytes: &[u8]) -> Result<HeifFile<'_>> {
     HeifFile::parse(bytes)
 }
 

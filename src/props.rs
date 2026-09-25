@@ -350,11 +350,14 @@ pub struct Clli {
     pub max_pic_average_light_level: u16,
 }
 
-/// `mdcv` — mastering display colour volume (ST 2086 layout: primaries
-/// in G, B, R order, chromaticity × 50000, luminance × 10000).
+/// `mdcv` — mastering display colour volume (ISO/IEC 14496-12 §12.1.7:
+/// three interleaved `(display_primaries_x, display_primaries_y)`
+/// pairs, chromaticity in 0.00002 steps, luminance in 0.0001 cd/m²;
+/// semantics of the H.265 D.3.28 SEI, primaries in G, B, R order).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mdcv {
-    /// `display_primaries_x/y[c]`, `c` = 0..3 in file order (G, B, R).
+    /// `(display_primaries_x, display_primaries_y)[c]`, `c` = 0..3 in
+    /// file order (G, B, R).
     pub display_primaries: [(u16, u16); 3],
     /// `white_point_x/y`.
     pub white_point: (u16, u16),
@@ -1025,19 +1028,18 @@ fn parse_clli(b: &[u8]) -> Result<Clli> {
 
 fn parse_mdcv(b: &[u8]) -> Result<Mdcv> {
     let mut r = Reader::new(plain_or_full(b, 24, "mdcv")?);
-    let mut xs = [0u16; 3];
-    let mut ys = [0u16; 3];
-    for x in xs.iter_mut() {
-        *x = r.u16("mdcv display_primaries_x")?;
-    }
-    for y in ys.iter_mut() {
-        *y = r.u16("mdcv display_primaries_y")?;
+    // ISO/IEC 14496-12 §12.1.7: `for (c = 0; c < 3; c++) { x; y }` —
+    // the chromaticities are interleaved per primary.
+    let mut display_primaries = [(0u16, 0u16); 3];
+    for p in display_primaries.iter_mut() {
+        p.0 = r.u16("mdcv display_primaries_x")?;
+        p.1 = r.u16("mdcv display_primaries_y")?;
     }
     let white_point = (r.u16("mdcv white_point_x")?, r.u16("mdcv white_point_y")?);
     let max_luminance = r.u32("mdcv max_display_mastering_luminance")?;
     let min_luminance = r.u32("mdcv min_display_mastering_luminance")?;
     Ok(Mdcv {
-        display_primaries: [(xs[0], ys[0]), (xs[1], ys[1]), (xs[2], ys[2])],
+        display_primaries,
         white_point,
         max_luminance,
         min_luminance,
@@ -1051,15 +1053,13 @@ fn parse_cclv(b: &[u8]) -> Result<Cclv> {
     let cancel = flags & 0x80 != 0;
     let persistence = flags & 0x40 != 0;
     let primaries = if flags & 0x20 != 0 {
-        let mut xs = [0i32; 3];
-        let mut ys = [0i32; 3];
-        for x in xs.iter_mut() {
-            *x = r.i32("cclv ccv_primaries_x")?;
+        // §12.1.8: `for (c) { ccv_primaries_x[c]; ccv_primaries_y[c] }`.
+        let mut p = [(0i32, 0i32); 3];
+        for e in p.iter_mut() {
+            e.0 = r.i32("cclv ccv_primaries_x")?;
+            e.1 = r.i32("cclv ccv_primaries_y")?;
         }
-        for y in ys.iter_mut() {
-            *y = r.i32("cclv ccv_primaries_y")?;
-        }
-        Some([(xs[0], ys[0]), (xs[1], ys[1]), (xs[2], ys[2])])
+        Some(p)
     } else {
         None
     };
@@ -1246,10 +1246,8 @@ pub mod write {
             }
             Property::Mdcv(m) => {
                 let mut b = Vec::with_capacity(24);
-                for (x, _) in m.display_primaries {
+                for (x, y) in m.display_primaries {
                     b.extend_from_slice(&x.to_be_bytes());
-                }
-                for (_, y) in m.display_primaries {
                     b.extend_from_slice(&y.to_be_bytes());
                 }
                 b.extend_from_slice(&m.white_point.0.to_be_bytes());
@@ -1280,10 +1278,8 @@ pub mod write {
                 }
                 let mut b = vec![flags];
                 if let Some(p) = c.primaries {
-                    for (x, _) in p {
+                    for (x, y) in p {
                         b.extend_from_slice(&x.to_be_bytes());
-                    }
-                    for (_, y) in p {
                         b.extend_from_slice(&y.to_be_bytes());
                     }
                 }
@@ -1480,6 +1476,60 @@ mod tests {
             ambient_light_x: 15635,
             ambient_light_y: 16450,
         }));
+    }
+
+    /// ISO/IEC 14496-12 §12.1.7: the primaries are interleaved
+    /// `(x, y)` pairs — a symmetric parse / write pair would hide a
+    /// planar (x x x y y y) reading, so pin the bytes.
+    #[test]
+    fn mdcv_bytes_are_interleaved_per_primary() {
+        let m = Mdcv {
+            display_primaries: [(13250, 34500), (7500, 3000), (34000, 16000)],
+            white_point: (15635, 16450),
+            max_luminance: 10_000_000,
+            min_luminance: 50,
+        };
+        let bytes = write::property_box(&Property::Mdcv(m));
+        let body = &bytes[8..];
+        assert_eq!(body.len(), 24, "plain Box, no version / flags");
+        let u16_at = |i: usize| u16::from_be_bytes([body[i], body[i + 1]]);
+        assert_eq!(
+            [
+                u16_at(0),
+                u16_at(2),
+                u16_at(4),
+                u16_at(6),
+                u16_at(8),
+                u16_at(10)
+            ],
+            [13250, 34500, 7500, 3000, 34000, 16000]
+        );
+        assert_eq!((u16_at(12), u16_at(14)), (15635, 16450));
+        assert_eq!(Property::parse(&raw_of(&bytes)).unwrap(), Property::Mdcv(m));
+        // §12.1.8 `cclv` primaries likewise.
+        let c = Cclv {
+            cancel: false,
+            persistence: false,
+            primaries: Some([(1, -2), (3, 4), (5, 6)]),
+            min_luminance: None,
+            max_luminance: None,
+            avg_luminance: None,
+        };
+        let bytes = write::property_box(&Property::Cclv(c));
+        let body = &bytes[bytes.len() - 25..];
+        let i32_at =
+            |i: usize| i32::from_be_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]);
+        assert_eq!(
+            [
+                i32_at(1),
+                i32_at(5),
+                i32_at(9),
+                i32_at(13),
+                i32_at(17),
+                i32_at(21)
+            ],
+            [1, -2, 3, 4, 5, 6]
+        );
         round_trip(Property::Rloc(Rloc {
             horizontal_offset: 64,
             vertical_offset: 128,

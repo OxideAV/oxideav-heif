@@ -396,7 +396,7 @@ impl DecodedImage {
 /// Decodes an item and everything it derives from, caching coded
 /// reconstructions so shared inputs decode once.
 struct Session<'a, 'r> {
-    file: &'a HeifFile,
+    file: &'a HeifFile<'a>,
     decoder: ItemDecoder<'r>,
     cache: HashMap<u32, HeifFrame>,
     decodes: usize,

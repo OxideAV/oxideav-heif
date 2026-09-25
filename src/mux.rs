@@ -229,6 +229,8 @@ impl HeifSequenceMuxer {
             );
             still.set_primary(id);
             sw.still = Some(still);
+            // The cover aliases sample 0 (one copy of the bytes).
+            sw.cover_sample = Some(0);
         }
         let bytes = sw.write_to_vec()?;
         self.output

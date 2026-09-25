@@ -119,7 +119,17 @@ pub fn apply_irot(f: &HeifFrame, irot: &Irot) -> Result<HeifFrame> {
     if angle == 0 {
         return Ok(f.clone());
     }
-    let src = ensure_444(f, f.width % 2 == 1, f.height % 2 == 1)?;
+    // A quarter turn exchanges the axes: a layout subsampled on one
+    // axis only (4:2:2) has no rotated counterpart, so the picture is
+    // promoted to 4:4:4 (MIAF §7.3.6.7) before rotating, as are odd
+    // extents that would land a chroma sample between positions.
+    let (sx, sy) = f.format.chroma.shift();
+    let axis_swap = angle % 2 == 1 && sx != sy;
+    let src = ensure_444(
+        f,
+        axis_swap || f.width % 2 == 1,
+        axis_swap || f.height % 2 == 1,
+    )?;
     let (ow, oh) = if angle % 2 == 1 {
         (src.height, src.width)
     } else {
@@ -530,8 +540,10 @@ pub fn composite_overlay(
     // 4:4:4; so does any alpha-carrying input, because §6.9.1 blends
     // "each co-located pixel" and a subsampled chroma plane cannot hold
     // a per-pixel edge (the alpha boundary would smear over 2x2
-    // blocks).
-    let any_alpha = inputs.iter().any(|i| i.frame.format.has_alpha);
+    // blocks). Monochrome inputs have no chroma to promote: a mono
+    // overlay stays mono, alpha or not.
+    let any_alpha =
+        first.format.chroma != Chroma::Mono && inputs.iter().any(|i| i.frame.format.has_alpha);
     let promote = any_alpha
         || needs_444(
             first.format.chroma,
@@ -784,6 +796,24 @@ mod tests {
         let ro = apply_irot(&odd, &Irot { angle: 1 }).unwrap();
         assert_eq!(ro.format.chroma, Chroma::Yuv444);
         assert_eq!((ro.width, ro.height), (2, 3));
+        // A quarter turn of 4:2:2 (even extents) has no 4:2:2 result —
+        // the subsampled axis would become vertical — so it promotes;
+        // a half turn keeps the layout.
+        let f422 = ramp(4, 2, Chroma::Yuv422);
+        let q = apply_irot(&f422, &Irot { angle: 1 }).unwrap();
+        assert_eq!(q.format.chroma, Chroma::Yuv444);
+        assert_eq!((q.width, q.height), (2, 4));
+        assert_eq!(q.sample(0, 0, 0), 3);
+        assert_eq!(q.sample(1, 0, 0), f422.sample(1, 1, 0));
+        q.validate().unwrap();
+        let half = apply_irot(&f422, &Irot { angle: 2 }).unwrap();
+        assert_eq!(half.format.chroma, Chroma::Yuv422);
+        half.validate().unwrap();
+        let q3 = apply_irot(&f422, &Irot { angle: 3 }).unwrap();
+        assert_eq!(
+            (q3.format.chroma, q3.width, q3.height),
+            (Chroma::Yuv444, 2, 4)
+        );
         // 16-bit horizontal mirror.
         let mut deep = HeifFrame::zeroed(3, 1, fmt(Chroma::Mono, 10, false)).unwrap();
         deep.set_sample(0, 0, 0, 1000);
@@ -952,6 +982,48 @@ mod tests {
         );
         // Pure red, BT.601 full range: Y ≈ 76, Cb ≈ 85, Cr = 255.
         assert_eq!(fill_to_ycbcr([65535, 0, 0], 8, None), [76, 85, 255]);
+    }
+
+    /// A monochrome overlay stays monochrome — alpha inputs and odd
+    /// offsets only promote layouts that have chroma to promote.
+    #[test]
+    fn mono_overlay_with_alpha_stays_mono() {
+        let base = HeifFrame::filled(5, 3, fmt(Chroma::Mono, 12, false), 500).unwrap();
+        let mut stamp = HeifFrame::filled(2, 2, fmt(Chroma::Mono, 12, true), 4000).unwrap();
+        stamp.set_sample(1, 0, 0, 4095);
+        stamp.set_sample(1, 1, 0, 0);
+        stamp.set_sample(1, 0, 1, 2048);
+        stamp.set_sample(1, 1, 1, 4095);
+        let d = OverlayDescriptor {
+            canvas_fill: [0, 0, 0, 65535],
+            output_width: 5,
+            output_height: 3,
+            offsets: vec![(0, 0), (3, 1)],
+        };
+        let out = composite_overlay(
+            &d,
+            &[
+                OverlayInput {
+                    frame: &base,
+                    premultiplied: false,
+                },
+                OverlayInput {
+                    frame: &stamp,
+                    premultiplied: false,
+                },
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.format.chroma, Chroma::Mono);
+        assert_eq!(out.planes.len(), 1);
+        assert_eq!(out.sample(0, 3, 1), 4000);
+        assert_eq!(out.sample(0, 4, 1), 500);
+        assert_eq!(
+            out.sample(0, 3, 2) as u32,
+            (4000u32 * 2048 + 500 * 2047 + 2047) / 4095
+        );
+        assert_eq!(out.sample(0, 4, 2), 4000);
     }
 
     #[test]

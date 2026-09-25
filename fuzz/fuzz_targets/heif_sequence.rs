@@ -22,10 +22,17 @@ fuzz_target!(|data: &[u8]| {
         let _ = t.primary_entry();
         let _ = t.sample_duration_total();
         let _ = t.references_of(b"auxl");
-        for s in t.samples.iter().take(1024) {
+        for (i, s) in t.samples.iter().enumerate().take(1024) {
             let _ = sample_bytes(&file, s);
             let _ = s.pts();
+            for g in t.sample_groups.iter().take(16) {
+                let _ = t.group_description_of(&g.grouping_type, g.grouping_type_parameter, i);
+            }
+        }
+        for g in &t.sample_groups {
+            let _ = g.index_of(usize::MAX / 2);
         }
     }
     let _ = movie.visual_tracks().count();
+    let _ = movie.producer_reference_times.len() + movie.subsegment_indexes.len();
 });

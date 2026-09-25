@@ -197,7 +197,7 @@ fn transforms_are_written_as_essential_properties_on_the_coded_item() {
         ],
     );
     w.set_primary(iden);
-    let f = HeifFile::parse(&w.write_to_vec().unwrap()).unwrap();
+    let f = HeifFile::from_vec(w.write_to_vec().unwrap()).unwrap();
     assert_eq!(f.primary_item().unwrap().item_type, *b"iden");
     assert!(check(&f, MiafProfile::Miaf).unwrap().is_conformant());
 }
@@ -314,7 +314,7 @@ fn av1_native_layouts_and_quality() {
         codec: StillCodec::Av1,
         ..EncodeOptions::default()
     };
-    let f = HeifFile::parse(&encode_still(&ten, &av1).unwrap()).unwrap();
+    let f = HeifFile::from_vec(encode_still(&ten, &av1).unwrap()).unwrap();
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     assert_eq!(img.frame, ten, "10-bit 4:2:0 lossless");
     let mono = HeifFrame::filled(
@@ -324,7 +324,7 @@ fn av1_native_layouts_and_quality() {
         77,
     )
     .unwrap();
-    let f = HeifFile::parse(&encode_still(&mono, &av1).unwrap()).unwrap();
+    let f = HeifFile::from_vec(encode_still(&mono, &av1).unwrap()).unwrap();
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     assert_eq!(img.frame, mono, "monochrome lossless");
     // 4:4:4 + alpha: the alpha auxiliary is a monochrome av01 item.
@@ -342,7 +342,7 @@ fn av1_native_layouts_and_quality() {
             src.set_sample(3, x, y, (255 - x * 4) as u16);
         }
     }
-    let f = HeifFile::parse(&encode_still(&src, &av1).unwrap()).unwrap();
+    let f = HeifFile::from_vec(encode_still(&src, &av1).unwrap()).unwrap();
     let node = oxideav_heif::derived::build_primary_graph(&f).unwrap();
     let a = node.alpha.as_ref().unwrap();
     assert!(a.properties.av1c().unwrap().monochrome, "alpha coded 4:0:0");

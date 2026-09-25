@@ -143,7 +143,7 @@ fn container_model_matches_corpus_traces() {
 #[test]
 fn every_bundle_declares_heif_brands_and_a_pict_handler() {
     for (root, bundle) in all_bundles() {
-        let f = HeifFile::parse(&fixture_bytes(&root, bundle)).unwrap();
+        let f = HeifFile::from_vec(fixture_bytes(&root, bundle)).unwrap();
         assert!(f.file_type.is_heif_family(), "{bundle}");
         let c = f.file_type.classify();
         assert!(c.image_collection, "{bundle}");
@@ -178,20 +178,20 @@ fn derived_payloads_and_metadata_items_resolve() {
     let Some(root) = fixture_root() else {
         return;
     };
-    let f = HeifFile::parse(&fixture_bytes(&root, "still-image-grid-2x2")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "still-image-grid-2x2")).unwrap();
     let grid = f.item_data(1).unwrap();
     assert_eq!(grid.len(), 8, "grid payload with 16-bit dims");
     assert_eq!(&grid[..4], &[0, 0, 1, 1]);
     assert_eq!(f.meta().unwrap().derivation_inputs(1), vec![2, 3, 4, 5]);
 
-    let f = HeifFile::parse(&fixture_bytes(&root, "still-image-overlay")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "still-image-overlay")).unwrap();
     let meta = f.meta().unwrap();
     assert_eq!(meta.derivation_inputs(4), vec![1, 2]);
     assert_eq!(meta.auxiliaries_of(2), vec![3]);
     let iovl = f.item_data(4).unwrap();
     assert_eq!(iovl.len(), 2 + 8 + 4 + 2 * 4);
 
-    let f = HeifFile::parse(&fixture_bytes(&root, "still-image-with-exif")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "still-image-with-exif")).unwrap();
     let meta = f.meta().unwrap();
     let exif_ids = meta.metadata_of(1);
     assert_eq!(exif_ids.len(), 1);
@@ -203,7 +203,7 @@ fn derived_payloads_and_metadata_items_resolve() {
         "TIFF header after offset word"
     );
 
-    let f = HeifFile::parse(&fixture_bytes(&root, "still-image-with-xmp")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "still-image-with-xmp")).unwrap();
     let meta = f.meta().unwrap();
     let xmp_id = meta.metadata_of(1)[0];
     assert!(meta.item(xmp_id).unwrap().is_xmp());
@@ -212,12 +212,12 @@ fn derived_payloads_and_metadata_items_resolve() {
         .unwrap()
         .contains("OxideAV HEIF test"));
 
-    let f = HeifFile::parse(&fixture_bytes(&root, "single-image-with-thumbnail")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "single-image-with-thumbnail")).unwrap();
     let meta = f.meta().unwrap();
     let primary = meta.primary_item_id.unwrap();
     assert_eq!(meta.thumbnails_of(primary).len(), 1);
 
-    let f = HeifFile::parse(&fixture_bytes(&root, "still-image-with-alpha")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "still-image-with-alpha")).unwrap();
     let meta = f.meta().unwrap();
     let alpha = meta.auxiliaries_of(meta.primary_item_id.unwrap());
     assert_eq!(alpha.len(), 1);

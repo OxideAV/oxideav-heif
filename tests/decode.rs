@@ -16,7 +16,7 @@ use oxideav_heif::HeifFile;
 
 /// Decode the primary coded item of `bundle` (no composition).
 fn decode_primary_coded(root: &Path, bundle: &str) -> oxideav_heif::HeifFrame {
-    let f = HeifFile::parse(&fixture_bytes(root, bundle)).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(root, bundle)).unwrap();
     let node = build_primary_graph(&f).unwrap();
     ItemDecoder::direct().decode_coded(&f, &node).unwrap()
 }
@@ -54,7 +54,7 @@ const PLAIN_CODED: &[&str] = &[
 #[test]
 fn every_coded_item_decodes_to_its_announced_layout() {
     for (root, bundle) in all_bundles() {
-        let f = HeifFile::parse(&fixture_bytes(&root, bundle)).unwrap();
+        let f = HeifFile::from_vec(fixture_bytes(&root, bundle)).unwrap();
         let node = build_primary_graph(&f).unwrap();
         for coded in node.coded_items() {
             let frame = ItemDecoder::direct().decode_coded(&f, coded).unwrap();
@@ -135,7 +135,7 @@ fn registry_path_decodes_through_a_codec_registry() {
     oxideav_h265::register(&mut ctx);
     oxideav_av1::register(&mut ctx);
     std::mem::swap(&mut reg, &mut ctx.codecs);
-    let f = HeifFile::parse(&fixture_bytes(&root, "still-yuv444")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "still-yuv444")).unwrap();
     let node = build_primary_graph(&f).unwrap();
     let via_registry = ItemDecoder::with_registry(&reg)
         .decode_coded(&f, &node)

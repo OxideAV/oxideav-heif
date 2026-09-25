@@ -86,12 +86,48 @@ fn sequence_mux_demux_round_trip_is_exact() {
     muxer.write_trailer().unwrap();
     drop(muxer);
     let bytes = std::fs::read(&path).unwrap();
+    // Third-party readers open the aliased-cover sequence file (the
+    // primary item's iloc points into the track mdat) — asserted when
+    // the binary is present, SKIP otherwise.
+    for (bin, args) in [
+        ("heif-info", vec![path.to_string_lossy().to_string()]),
+        (
+            "ffmpeg",
+            vec![
+                "-nostdin".into(),
+                "-loglevel".into(),
+                "error".into(),
+                "-i".into(),
+                path.to_string_lossy().to_string(),
+                "-f".into(),
+                "null".into(),
+                "-".into(),
+            ],
+        ),
+        (
+            "sips",
+            vec![
+                "-g".into(),
+                "pixelWidth".into(),
+                path.to_string_lossy().to_string(),
+            ],
+        ),
+    ] {
+        match std::process::Command::new(bin).args(&args).output() {
+            Ok(out) => assert!(
+                out.status.success(),
+                "{bin} refused the aliased-cover sequence: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(_) => eprintln!("SKIP: {bin} not installed"),
+        }
+    }
     let _ = std::fs::remove_file(&path);
     assert!(!bytes.is_empty());
     // Demux + decode.
     let mut cur = Cursor::new(bytes.clone());
     assert_eq!(ctx.containers.probe_input(&mut cur, None).unwrap(), "heif");
-    let f = oxideav_heif::HeifFile::parse(&bytes).unwrap();
+    let f = oxideav_heif::HeifFile::from_vec(bytes.clone()).unwrap();
     assert!(f.file_type.has_brand(b"msf1") && f.file_type.has_brand(b"hevc"));
     let rep = oxideav_heif::miaf::check(&f, oxideav_heif::miaf::MiafProfile::Miaf).unwrap();
     assert!(rep.is_conformant(), "{:#?}", rep.violations);

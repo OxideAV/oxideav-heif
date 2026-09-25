@@ -266,6 +266,10 @@ pub struct ItemReference {
 pub struct EntityGroup {
     /// `grouping_type` (`altr`, `brst`, `eqiv`, `ster`, …).
     pub grouping_type: FourCc,
+    /// `EntityToGroupBox` version (0 in ISO/IEC 14496-12 §8.18.3).
+    pub version: u8,
+    /// `EntityToGroupBox` flags (24 bits; meaning per grouping type).
+    pub flags: u32,
     /// `group_id`.
     pub group_id: u32,
     /// `entity_id[]` (item ids or track ids).
@@ -851,7 +855,7 @@ fn parse_grpl(p: &[u8]) -> Result<Vec<EntityGroup>> {
                 "grpl holds more than {MAX_ENTITY_GROUPS} groups"
             )));
         }
-        let (_v, _f, body) = parse_full_box(payload(p, &h))?;
+        let (version, flags, body) = parse_full_box(payload(p, &h))?;
         let mut r = Reader::new(body);
         let group_id = r.u32("EntityToGroupBox group_id")?;
         let n = r.u32("EntityToGroupBox num_entities_in_group")? as usize;
@@ -868,6 +872,8 @@ fn parse_grpl(p: &[u8]) -> Result<Vec<EntityGroup>> {
         }
         out.push(EntityGroup {
             grouping_type: h.box_type,
+            version,
+            flags,
             group_id,
             entity_ids,
         });

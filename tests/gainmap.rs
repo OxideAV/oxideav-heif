@@ -18,8 +18,8 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gainmap")
 }
 
-fn load(name: &str) -> HeifFile {
-    HeifFile::parse(&std::fs::read(root().join(name)).unwrap()).unwrap()
+fn load(name: &str) -> HeifFile<'static> {
+    HeifFile::from_vec(std::fs::read(root().join(name)).unwrap()).unwrap()
 }
 
 const VARIANTS: &[&str] = &["gm_mono", "gm_rgb", "gm_half", "gm_2020"];
@@ -144,8 +144,8 @@ fn base_headroom_reproduces_the_base_and_full_headroom_matches_the_oracle() {
 
 #[test]
 fn files_without_a_gain_map_carry_none() {
-    let f = HeifFile::parse(
-        &std::fs::read(common::interop_root().join("henc_avif_rgb_96x80.avif")).unwrap(),
+    let f = HeifFile::from_vec(
+        std::fs::read(common::interop_root().join("henc_avif_rgb_96x80.avif")).unwrap(),
     )
     .unwrap();
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();

@@ -19,9 +19,15 @@ pub const MAX_WALK_DEPTH: usize = 32;
 pub const MAX_WALK_BOXES: usize = 1 << 20;
 
 /// A parsed HEIF / HEIC / MIAF / AVIF file.
+///
+/// The bytes are borrowed when the file is opened with
+/// [`HeifFile::parse`] and owned after [`HeifFile::from_vec`] /
+/// [`HeifFile::into_owned`]; item payloads are borrowed from them
+/// wherever an item is one contiguous span, so a decode never copies
+/// the input.
 #[derive(Clone, Debug)]
-pub struct HeifFile {
-    data: Vec<u8>,
+pub struct HeifFile<'a> {
+    data: Cow<'a, [u8]>,
     /// The `ftyp` (or `styp`) box.
     pub file_type: FileType,
     /// The file-level `meta` box, when present.
@@ -30,14 +36,19 @@ pub struct HeifFile {
     pub top_level: Vec<BoxHeader>,
 }
 
-impl HeifFile {
-    /// Parse a file held in memory (the bytes are copied).
-    pub fn parse(bytes: &[u8]) -> Result<Self> {
-        Self::from_vec(bytes.to_vec())
+impl<'a> HeifFile<'a> {
+    /// Parse a file held in memory, borrowing the bytes (no copy).
+    pub fn parse(bytes: &'a [u8]) -> Result<Self> {
+        Self::from_cow(Cow::Borrowed(bytes))
     }
 
     /// Parse a file, taking ownership of its bytes.
-    pub fn from_vec(data: Vec<u8>) -> Result<Self> {
+    pub fn from_vec(data: Vec<u8>) -> Result<HeifFile<'static>> {
+        HeifFile::from_cow(Cow::Owned(data))
+    }
+
+    /// Parse a file from borrowed or owned bytes.
+    pub fn from_cow(data: Cow<'a, [u8]>) -> Result<Self> {
         let mut top_level = Vec::new();
         let mut file_type = None;
         let mut meta = None;
@@ -78,9 +89,26 @@ impl HeifFile {
         &self.data
     }
 
-    /// Consume the view and return the file bytes.
+    /// Consume the view and return the file bytes (copied only when
+    /// they were borrowed).
     pub fn into_bytes(self) -> Vec<u8> {
-        self.data
+        self.data.into_owned()
+    }
+
+    /// Detach from the borrowed input (copies borrowed bytes once; a
+    /// no-op for an owned file).
+    pub fn into_owned(self) -> HeifFile<'static> {
+        HeifFile {
+            data: Cow::Owned(self.data.into_owned()),
+            file_type: self.file_type,
+            meta: self.meta,
+            top_level: self.top_level,
+        }
+    }
+
+    /// `true` when the bytes are owned by this view.
+    pub fn is_owned(&self) -> bool {
+        matches!(self.data, Cow::Owned(_))
     }
 
     /// `true` when a top-level `moov` box exists (image sequence / video).

@@ -144,7 +144,7 @@ const EXACT: &[&str] = &[
 fn every_bundle_matches_its_png_oracle() {
     let mut report = Vec::new();
     for (root, bundle) in all_bundles() {
-        let f = HeifFile::parse(&fixture_bytes(&root, bundle)).unwrap();
+        let f = HeifFile::from_vec(fixture_bytes(&root, bundle)).unwrap();
         let img =
             decode_primary(&f, ItemDecoder::direct()).unwrap_or_else(|e| panic!("{bundle}: {e}"));
         let png = oracle(&root, bundle, "expected.png");
@@ -186,7 +186,7 @@ fn burst_and_sequence_stills_match_their_per_item_oracles() {
     let Some(root) = fixture_root() else {
         return;
     };
-    let f = HeifFile::parse(&fixture_bytes(&root, "multi-image-burst-3")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "multi-image-burst-3")).unwrap();
     let meta = f.meta().unwrap();
     let ids: Vec<u32> = meta
         .items
@@ -213,29 +213,29 @@ fn thumbnails_and_metadata_are_surfaced() {
     let Some(root) = fixture_root() else {
         return;
     };
-    let f = HeifFile::parse(&fixture_bytes(&root, "single-image-with-thumbnail")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "single-image-with-thumbnail")).unwrap();
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     assert_eq!(img.thumbnail_ids.len(), 1);
     let thumb = decode_item(&f, img.thumbnail_ids[0], ItemDecoder::direct()).unwrap();
     assert_eq!((thumb.width(), thumb.height()), (96, 96));
 
-    let f = HeifFile::parse(&fixture_bytes(&root, "still-image-with-exif")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "still-image-with-exif")).unwrap();
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     let exif = img.exif.expect("Exif surfaced");
     assert!(exif.starts_with(b"II") || exif.starts_with(b"MM"));
     assert!(exif.windows(16).any(|w| w == b"OxideAV-test-fix"));
 
-    let f = HeifFile::parse(&fixture_bytes(&root, "still-image-with-xmp")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "still-image-with-xmp")).unwrap();
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     assert!(img.xmp.as_deref().unwrap().contains("OxideAV HEIF test"));
 
-    let f = HeifFile::parse(&fixture_bytes(&root, "still-image-with-icc")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "still-image-with-icc")).unwrap();
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     assert_eq!(img.icc_profile.as_ref().map(Vec::len), Some(2576));
     assert!(!img.nclx_explicit, "ICC bundle carries only a prof colr");
     assert_eq!(img.nclx, Colr::MIAF_DEFAULT);
 
-    let f = HeifFile::parse(&fixture_bytes(&root, "still-image-overlay")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "still-image-overlay")).unwrap();
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     assert!(
         !img.nclx_explicit,
@@ -270,7 +270,7 @@ fn grid_composition_matches_black_box_decoder_byte_exact() {
     }
     let raw = std::fs::read(&out).unwrap();
     let _ = std::fs::remove_file(&out);
-    let f = HeifFile::parse(&fixture_bytes(&root, "still-image-grid-2x2")).unwrap();
+    let f = HeifFile::from_vec(fixture_bytes(&root, "still-image-grid-2x2")).unwrap();
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     assert_eq!((img.width(), img.height()), (256, 256));
     let mut ours = Vec::new();
