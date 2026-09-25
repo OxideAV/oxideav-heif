@@ -151,14 +151,31 @@ pub fn predict_output(node: &ImageNode) -> Result<(HeifPixelFormat, (u32, u32))>
 /// The framework pixel format the `"heif"` decoder will emit for a
 /// predicted layout (applies the same 4:4:4 promotion as
 /// [`crate::HeifFrame::to_core`]).
-pub fn core_pixel_format(fmt: HeifPixelFormat) -> Option<PixelFormat> {
-    fmt.to_core().or_else(|| {
-        HeifPixelFormat {
-            chroma: Chroma::Yuv444,
-            ..fmt
-        }
-        .to_core()
-    })
+pub fn core_pixel_format(fmt: HeifPixelFormat, full_range: bool) -> Option<PixelFormat> {
+    fmt.to_core()
+        .or_else(|| {
+            HeifPixelFormat {
+                chroma: Chroma::Yuv444,
+                ..fmt
+            }
+            .to_core()
+        })
+        .map(|pf| {
+            if full_range {
+                crate::image::core_bridge::full_range_variant(pf)
+            } else {
+                pf
+            }
+        })
+}
+
+/// The sample range an item's colour information declares (the MIAF
+/// default — full — when it carries no `nclx`).
+fn item_full_range(node: &ImageNode) -> bool {
+    match node.properties.nclx() {
+        Some(crate::props::Colr::Nclx { full_range, .. }) => *full_range,
+        _ => true,
+    }
 }
 
 /// Codec id for a sample-entry type, through the resolver first and
@@ -230,7 +247,7 @@ impl HeifDemuxer {
                     Ok((fmt, (w, h))) => {
                         params.width = Some(w);
                         params.height = Some(h);
-                        params.pixel_format = core_pixel_format(fmt);
+                        params.pixel_format = core_pixel_format(fmt, item_full_range(&node));
                     }
                     Err(_) => {
                         if let Ok((w, h)) = node.output_size() {
@@ -505,7 +522,14 @@ impl Decoder for HeifCodec {
     fn send_packet(&mut self, packet: &Packet) -> CoreResult<()> {
         let file = HeifFile::parse(&packet.data)?;
         let img = decode_primary(&file, ItemDecoder::direct())?;
-        let (mut vf, _pf) = img.frame.to_core()?;
+        let full = matches!(
+            img.nclx,
+            crate::props::Colr::Nclx {
+                full_range: true,
+                ..
+            }
+        );
+        let (mut vf, _pf) = img.frame.to_core_ranged(full)?;
         vf.pts = packet.pts;
         self.queue.push_back(Frame::Video(vf));
         self.last = Some(img);
@@ -545,9 +569,10 @@ mod tests {
     #[test]
     fn core_pixel_format_promotes_unmapped_layouts() {
         let f = HeifPixelFormat::new(Chroma::Mono, 10, true).unwrap();
-        assert_eq!(core_pixel_format(f), Some(PixelFormat::Yuva444P10Le));
+        assert_eq!(core_pixel_format(f, true), Some(PixelFormat::Yuva444P10Le));
         let g = HeifPixelFormat::new(Chroma::Yuv420, 8, false).unwrap();
-        assert_eq!(core_pixel_format(g), Some(PixelFormat::Yuv420P));
+        assert_eq!(core_pixel_format(g, false), Some(PixelFormat::Yuv420P));
+        assert_eq!(core_pixel_format(g, true), Some(PixelFormat::YuvJ420P));
     }
 
     #[test]

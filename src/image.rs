@@ -401,6 +401,17 @@ pub mod core_bridge {
     use super::*;
     use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 
+    /// The full-range (`YuvJ*`) variant of an 8-bit YCbCr framework
+    /// format; other formats have none and are returned unchanged.
+    pub fn full_range_variant(pf: PixelFormat) -> PixelFormat {
+        match pf {
+            PixelFormat::Yuv420P => PixelFormat::YuvJ420P,
+            PixelFormat::Yuv422P => PixelFormat::YuvJ422P,
+            PixelFormat::Yuv444P => PixelFormat::YuvJ444P,
+            other => other,
+        }
+    }
+
     impl HeifPixelFormat {
         /// The framework pixel format for this layout, when one exists.
         ///
@@ -515,6 +526,22 @@ pub mod core_bridge {
                 })
                 .collect();
             Ok((VideoFrame { pts: None, planes }, pf))
+        }
+
+        /// As [`HeifFrame::to_core`], labelling an 8-bit YCbCr layout
+        /// with the framework's full-range variant (`YuvJ420P` /
+        /// `YuvJ422P` / `YuvJ444P`) when `full_range` is set, so
+        /// downstream converters do not stretch 16..235.
+        pub fn to_core_ranged(&self, full_range: bool) -> Result<(VideoFrame, PixelFormat)> {
+            let (vf, pf) = self.to_core()?;
+            Ok((
+                vf,
+                if full_range {
+                    full_range_variant(pf)
+                } else {
+                    pf
+                },
+            ))
         }
 
         /// Build from a framework frame of known geometry / format.

@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `mux` (`registry`): a `"heif"` still stream (whole-file packets from
+  the `"heif"` encoder) passes through the muxer as the file — exactly
+  one packet; a second is a typed refusal. `oxideav convert in.png
+  out.heic` now writes a HEIC.
+- `encode` (`registry`): packed RGB / RGBA / BGR(A) / 16-bit /
+  grey+alpha input (`packed_to_planar`, H.273 matrix + range of the
+  output `nclx`); `range` option (`full` default / `limited`); declared
+  `HeifEncoderOptions` schema (`codec` / `mode` / `qp` / `grid` /
+  `thumbnail` / `range`) so `oxideav info heif` lists them and unknown
+  keys are refused; capabilities list the accepted pixel formats.
+- `demux` (`registry`): full-range stills (nclx `full_range`, the MIAF
+  default) are announced and emitted as the framework's `YuvJ*`
+  layouts (`HeifFrame::to_core_ranged`), limited-range ones as `Yuv*`.
+- `writer`: `SequenceWriter` emits `stco` for 32-bit chunk offsets
+  (`co64` only beyond 4 GiB); libheif / ImageMagick now open the
+  written `msf1` sequences.
+
 ## [0.0.2](https://github.com/OxideAV/oxideav-heif/compare/v0.0.1...v0.0.2) - 2026-09-23
 
 ### Other

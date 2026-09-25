@@ -135,3 +135,49 @@ fn set_active_streams_skips_the_still() {
     let p = d.next_packet().unwrap();
     assert_eq!(p.stream_index, 1);
 }
+
+/// A full-range still (the MIAF default and what every producer in the
+/// interop corpus writes) is announced and emitted with the framework's
+/// full-range (`YuvJ*`) layout; a limited-range file keeps `Yuv*`.
+#[test]
+fn still_stream_carries_the_full_range_pixel_format() {
+    use oxideav_core::PixelFormat;
+    let ctx = context();
+    let open = |bytes: Vec<u8>| {
+        let mut d = ctx
+            .containers
+            .open_demuxer("heif", Box::new(Cursor::new(bytes)), &ctx.codecs)
+            .unwrap();
+        let pf = d.streams()[0].params.pixel_format.unwrap();
+        let pkt = d.next_packet().unwrap();
+        let mut dec = ctx.codecs.first_decoder(&d.streams()[0].params).unwrap();
+        dec.send_packet(&pkt).unwrap();
+        dec.flush().unwrap();
+        let Frame::Video(v) = dec.receive_frame().unwrap() else {
+            panic!("video frame");
+        };
+        (pf, v.image_plane_count())
+    };
+    let full = std::fs::read(common::interop_root().join("sips_rgb_96x80.heic")).unwrap();
+    assert_eq!(open(full), (PixelFormat::YuvJ420P, 3));
+    // A limited-range file written by this crate.
+    let src = oxideav_heif::HeifFrame::filled(
+        32,
+        32,
+        oxideav_heif::HeifPixelFormat::new(oxideav_heif::Chroma::Yuv420, 8, false).unwrap(),
+        128,
+    )
+    .unwrap();
+    let mut opts = oxideav_heif::EncodeOptions {
+        hevc_mode: "pcm".into(),
+        ..Default::default()
+    };
+    opts.colr = oxideav_heif::props::Colr::Nclx {
+        primaries: 1,
+        transfer: 13,
+        matrix: 6,
+        full_range: false,
+    };
+    let limited = oxideav_heif::encode_still(&src, &opts).unwrap();
+    assert_eq!(open(limited), (PixelFormat::Yuv420P, 3));
+}
