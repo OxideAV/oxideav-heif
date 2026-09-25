@@ -283,6 +283,38 @@ impl Track {
         self.sample_entries.first()
     }
 
+    /// The auxiliary kind announced by the first sample entry's `auxi`
+    /// URN (alpha / depth / other), `None` for a non-auxiliary track.
+    pub fn aux_kind(&self) -> Option<crate::props::AuxKind> {
+        let urn = self.primary_entry()?.aux_track_type.as_deref()?;
+        Some(
+            crate::props::AuxC {
+                aux_type: urn.to_string(),
+                aux_subtype: Vec::new(),
+            }
+            .kind(),
+        )
+    }
+
+    /// Index of the sample that is time-parallel to decode time `dts`
+    /// of another track with `timescale` (HEIF §7.5.3.1: the sample of
+    /// this track whose time span covers that instant — the last one
+    /// starting at or before it).
+    pub fn sample_index_at(&self, dts: u64, timescale: u32) -> Option<usize> {
+        let here = self.timescale.max(1) as u128;
+        let there = timescale.max(1) as u128;
+        let target = dts as u128 * here;
+        let mut best = None;
+        for (i, s) in self.samples.iter().enumerate() {
+            if s.dts as u128 * there <= target {
+                best = Some(i);
+            } else {
+                break;
+            }
+        }
+        best
+    }
+
     /// Tracks this one references with `reference_type`.
     pub fn references_of(&self, reference_type: &FourCc) -> Vec<u32> {
         self.references
@@ -354,6 +386,22 @@ impl Movie {
     /// Look up a track by id.
     pub fn track(&self, id: u32) -> Option<&Track> {
         self.tracks.iter().find(|t| t.track_id == id)
+    }
+
+    /// The auxiliary tracks of `track_id` (HEIF §7.5.3.1: linked by an
+    /// `auxl` track reference from the auxiliary track), in file order.
+    pub fn auxiliary_tracks_of(&self, track_id: u32) -> Vec<&Track> {
+        self.tracks
+            .iter()
+            .filter(|t| t.track_id != track_id && t.references_of(b"auxl").contains(&track_id))
+            .collect()
+    }
+
+    /// The alpha auxiliary track of `track_id`, when one exists.
+    pub fn alpha_track_of(&self, track_id: u32) -> Option<&Track> {
+        self.auxiliary_tracks_of(track_id)
+            .into_iter()
+            .find(|t| t.aux_kind() == Some(crate::props::AuxKind::Alpha))
     }
 }
 
@@ -870,7 +918,14 @@ fn parse_visual_entry(entry_type: FourCc, p: &[u8]) -> Result<SampleEntry> {
                 });
             }
             b"auxi" => {
-                let (_v, _f, b) = parse_full_box(body)?;
+                // HEIF §7.5.3.3: a FullBox holding the URN. Apple ImageIO
+                // writes the string directly after the box header (no
+                // version / flags); a body whose first byte is printable
+                // is read that way.
+                let b = match body.first() {
+                    Some(c) if c.is_ascii_graphic() => body,
+                    _ => parse_full_box(body)?.2,
+                };
                 let mut cr = Reader::new(b);
                 entry.aux_track_type = Some(cr.cstr("auxi aux_track_type")?);
             }

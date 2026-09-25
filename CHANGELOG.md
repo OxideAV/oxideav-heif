@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Alpha auxiliary tracks in image sequences (HEIF §7.5.3):
+  `Movie::auxiliary_tracks_of` / `alpha_track_of`, `Track::aux_kind`
+  / `sample_index_at` (the time-parallel sample); the framework
+  demuxer adds a composed `"heif"` stream per master track that has
+  an alpha track — each packet a synthesized single-image HEIF
+  (master sample + time-parallel alpha sample, `auxl` + `auxC`) so
+  the `"heif"` codec yields frames with alpha under the still-image
+  alpha rules (resize / depth match). `SequenceWriter::alpha`
+  (`SequenceAlphaTrack`) writes the `auxv` track with its `auxl`
+  reference and `auxi` FullBox. `auxi` written as a plain Box (Apple
+  ImageIO; libheif 1.23.4 refuses those files) is read too. New
+  producer fixture `sips_seq_rgba_96x80.heics` pinned to the
+  black-box decoder's raw planes of both tracks.
+
 - `avc1` items (HEIF Annex E): typed `AvcConfig` (`avcC`, ISO/IEC
   14496-15 §5.3.2.1 incl. the High-family trailer) and decoding
   through oxideav-h264 (`"h264"`, record as `extradata`,

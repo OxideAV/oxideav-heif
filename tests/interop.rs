@@ -38,6 +38,8 @@ struct Row {
     /// Black-box raw fingerprint, when the layouts coincide.
     bb_raw: Option<(String, usize, u64)>,
     oracle_png: bool,
+    /// `false` for `png-alpha` rows: alpha exact, colour reported only.
+    oracle_colour: bool,
 }
 
 fn manifest() -> Vec<Row> {
@@ -72,7 +74,8 @@ fn manifest() -> Vec<Row> {
                 depth: f[5].parse().unwrap(),
                 alpha: f[6] == "true",
                 bb_raw,
-                oracle_png: f[10] == "png",
+                oracle_png: f[10].starts_with("png"),
+                oracle_colour: f[10] == "png",
             }
         })
         .collect()
@@ -198,11 +201,18 @@ fn every_png_oracle_matches_within_rounding_with_exact_alpha() {
         // The black-box reader rounds its YCbCr→RGB differently by at
         // most one code (its integer pipeline vs this crate's exact
         // conversion); anything larger is a composition / colour bug.
-        assert!(
-            max <= 2.0 && mean <= 0.5,
-            "{}: colour max {max:.1} mean {mean:.3}",
-            row.file
-        );
+        if row.oracle_colour {
+            assert!(
+                max <= 2.0 && mean <= 0.5,
+                "{}: colour max {max:.1} mean {mean:.3}",
+                row.file
+            );
+        } else {
+            // Reported, not asserted (see the manifest note); the
+            // black-box video decoder fingerprint / sequence test pins
+            // the planes instead.
+            assert!(max <= 8.0, "{}: colour max {max:.1}", row.file);
+        }
         assert_eq!(alpha_bad, 0, "{}: alpha plane differs", row.file);
         if row.alpha {
             assert_eq!(png.channels, 4, "{}: oracle carries alpha", row.file);
@@ -260,10 +270,26 @@ fn framework_path_agrees_with_the_direct_path() {
             "{}: framework planes",
             row.file
         );
-        // The .heics still carries a sequence track as stream 1.
+        // The .heics still is followed by the sequence track(s): raw
+        // `h265` streams, preceded by a composed `"heif"` stream when
+        // an alpha track exists.
         if ext == "heics" {
             assert!(streams.len() >= 2, "{}: sequence track", row.file);
-            assert_eq!(streams[1].params.codec_id.as_str(), "h265");
+            assert!(
+                streams[1..]
+                    .iter()
+                    .any(|s| s.params.codec_id.as_str() == "h265"),
+                "{}: raw sequence track",
+                row.file
+            );
+            if row.alpha {
+                assert_eq!(
+                    streams[1].params.codec_id.as_str(),
+                    "heif",
+                    "composed alpha stream"
+                );
+                assert!(streams[1].params.pixel_format.unwrap().has_alpha());
+            }
         }
     }
 }

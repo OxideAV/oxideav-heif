@@ -124,7 +124,7 @@ pub use registry::__oxideav_entry;
 pub use registry::{register, register_codecs, register_containers};
 pub use rgb::{to_rgb, RgbImage};
 pub use sequence::{Movie, Sample, SampleEntry, Track};
-pub use writer::{HeifWriter, SequenceWriter};
+pub use writer::{HeifWriter, SequenceAlphaTrack, SequenceWriter};
 
 /// Parse a HEIF file held in memory. Direct entry point of the
 /// standalone container surface; see [`HeifFile`] for what it exposes.

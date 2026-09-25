@@ -201,6 +201,132 @@ struct TrackStream {
     track_index: usize,
     cursor: usize,
     time_base: TimeBase,
+    /// Alpha auxiliary track (HEIF §7.5.3) composed into this stream:
+    /// each packet is a synthesized single-image HEIF file (master
+    /// sample + time-parallel alpha sample) for the `"heif"` codec.
+    alpha_track_index: Option<usize>,
+}
+
+/// Sample layout a decoder-configuration property announces.
+fn config_layout(config: &Property) -> Option<HeifPixelFormat> {
+    match config {
+        Property::HvcC(h) => decode::hevc_layout(h).ok(),
+        Property::Av1C(a) => decode::av1_layout(a).ok(),
+        Property::AvcC(a) => a.layout().ok(),
+        _ => None,
+    }
+}
+
+/// A visual sample entry's coded-item description for a synthesized
+/// still: item type + decoder configuration + descriptive properties.
+fn entry_item(
+    entry: &crate::sequence::SampleEntry,
+) -> Option<(crate::boxes::FourCc, Property, Vec<Property>)> {
+    let (item_type, config) = match &entry.entry_type {
+        b"hvc1" | b"hev1" => (*b"hvc1", Property::HvcC(entry.hvcc.clone()?)),
+        b"av01" => (*b"av01", Property::Av1C(entry.av1c.clone()?)),
+        b"avc1" | b"avc3" => (*b"avc1", Property::AvcC(entry.avcc.clone()?)),
+        _ => return None,
+    };
+    let mut extra = Vec::new();
+    if let Some(c) = entry.colr.first() {
+        extra.push(Property::Colr(c.clone()));
+    }
+    if let Some(c) = entry.clap {
+        extra.push(Property::Clap(c));
+    }
+    if let Some(p) = entry.pasp {
+        extra.push(Property::Pasp(p));
+    }
+    Some((item_type, config, extra))
+}
+
+/// One `"heif"` still file holding `master` (with its alpha auxiliary
+/// when `alpha` is given), built from the tracks' sample entries: the
+/// still-image alpha rules (`auxl` + `auxC`, resize / depth match at
+/// composition) then apply unchanged.
+#[doc(hidden)]
+pub fn synthesize_still(
+    master: (&Track, &[u8]),
+    alpha: Option<(&Track, &[u8])>,
+) -> Result<Vec<u8>> {
+    let (mt, mdata) = master;
+    let me = mt
+        .primary_entry()
+        .ok_or_else(|| HeifError::invalid("track without a sample entry"))?;
+    let (item_type, config, extra) = entry_item(me)
+        .ok_or_else(|| HeifError::unsupported("sample entry without a decoder configuration"))?;
+    let layout =
+        config_layout(&config).ok_or_else(|| HeifError::unsupported("sample entry layout"))?;
+    let mut w = crate::writer::HeifWriter::new();
+    let mut props = vec![
+        (config, true),
+        (
+            Property::Ispe(crate::props::Ispe {
+                width: me.width as u32,
+                height: me.height as u32,
+            }),
+            false,
+        ),
+        (
+            Property::Pixi(crate::props::Pixi {
+                bits_per_channel: vec![layout.bit_depth; layout.chroma.colour_planes()],
+            }),
+            false,
+        ),
+    ];
+    if !extra.iter().any(|p| matches!(p, Property::Colr(_))) {
+        props.push((Property::Colr(crate::props::Colr::MIAF_DEFAULT), false));
+    }
+    for p in extra {
+        let essential = matches!(p, Property::Clap(_));
+        props.push((p, essential));
+    }
+    let id = w.add_coded_item(item_type, mdata.to_vec(), props);
+    if let Some((at, adata)) = alpha {
+        let ae = at
+            .primary_entry()
+            .ok_or_else(|| HeifError::invalid("alpha track without a sample entry"))?;
+        let (a_type, a_config, a_extra) = entry_item(ae).ok_or_else(|| {
+            HeifError::unsupported("alpha sample entry without a decoder configuration")
+        })?;
+        let a_layout = config_layout(&a_config)
+            .ok_or_else(|| HeifError::unsupported("alpha sample entry layout"))?;
+        let mut aprops = vec![
+            (a_config, true),
+            (
+                Property::Ispe(crate::props::Ispe {
+                    width: ae.width as u32,
+                    height: ae.height as u32,
+                }),
+                false,
+            ),
+            (
+                Property::Pixi(crate::props::Pixi {
+                    bits_per_channel: vec![a_layout.bit_depth],
+                }),
+                false,
+            ),
+            (
+                Property::AuxC(crate::props::AuxC {
+                    aux_type: ae
+                        .aux_track_type
+                        .clone()
+                        .unwrap_or_else(|| crate::props::AUX_URN_ALPHA.to_string()),
+                    aux_subtype: Vec::new(),
+                }),
+                true,
+            ),
+        ];
+        for p in a_extra {
+            if let Property::Clap(_) = p {
+                aprops.push((p, true));
+            }
+        }
+        w.add_alpha(id, a_type, adata.to_vec(), aprops, false);
+    }
+    w.set_primary(id);
+    w.write_to_vec()
 }
 
 /// The HEIF demuxer.
@@ -275,9 +401,63 @@ impl HeifDemuxer {
                 });
             }
         }
-        // Track streams.
+        // Composed streams: a master track with an alpha auxiliary
+        // track yields a `"heif"` stream whose packets are synthesized
+        // stills (master + time-parallel alpha) — frames with alpha
+        // through the ordinary decoder path. The raw tracks follow.
         let mut tracks = Vec::new();
         if let Some(mv) = &movie {
+            for (ti, t) in mv.tracks.iter().enumerate() {
+                if !t.is_visual() || &t.handler == b"auxv" {
+                    continue;
+                }
+                let Some(alpha) = mv.alpha_track_of(t.track_id) else {
+                    continue;
+                };
+                let Some(ai) = mv.tracks.iter().position(|x| x.track_id == alpha.track_id) else {
+                    continue;
+                };
+                let Some(entry) = t.primary_entry() else {
+                    continue;
+                };
+                let Some(layout) = entry_item(entry).and_then(|(_, c, _)| config_layout(&c)) else {
+                    continue;
+                };
+                let full = match entry.colr.first() {
+                    Some(crate::props::Colr::Nclx { full_range, .. }) => *full_range,
+                    _ => true,
+                };
+                let mut params = CodecParameters::video(CodecId::new(CODEC_ID));
+                params.width = Some(entry.width as u32);
+                params.height = Some(entry.height as u32);
+                params.pixel_format = core_pixel_format(layout.with_alpha(), full);
+                let time_base = TimeBase::new(1, t.timescale.max(1) as i64);
+                let index = streams.len() as u32;
+                streams.push(StreamInfo {
+                    index,
+                    time_base,
+                    duration: Some(t.duration as i64),
+                    start_time: t.samples.first().map(|s| s.pts() as i64),
+                    params,
+                });
+                tracks.push((
+                    index,
+                    TrackStream {
+                        track_index: ti,
+                        cursor: 0,
+                        time_base,
+                        alpha_track_index: Some(ai),
+                    },
+                ));
+                metadata.push((
+                    format!("track:{}:alpha_track", t.track_id),
+                    alpha.track_id.to_string(),
+                ));
+                metadata.push((
+                    format!("stream:{index}:composed_from_track"),
+                    t.track_id.to_string(),
+                ));
+            }
             for (ti, t) in mv.tracks.iter().enumerate() {
                 if !t.is_visual() {
                     continue;
@@ -319,6 +499,7 @@ impl HeifDemuxer {
                         track_index: ti,
                         cursor: 0,
                         time_base,
+                        alpha_track_index: None,
                     },
                 ));
                 metadata.push((
@@ -425,7 +606,23 @@ impl oxideav_core::Demuxer for HeifDemuxer {
         let idx = *idx;
         let t = self.track(ts);
         let s = t.samples[ts.cursor];
-        let data = sample_bytes(&self.file, &s)?.to_vec();
+        let data = match ts.alpha_track_index {
+            None => sample_bytes(&self.file, &s)?.to_vec(),
+            Some(ai) => {
+                let at = &self
+                    .movie
+                    .as_ref()
+                    .expect("track stream implies movie")
+                    .tracks[ai];
+                let alpha = at
+                    .sample_index_at(s.dts, t.timescale)
+                    .and_then(|i| at.samples.get(i))
+                    .map(|a| sample_bytes(&self.file, a))
+                    .transpose()?
+                    .map(|bytes| (at, bytes));
+                synthesize_still((t, sample_bytes(&self.file, &s)?), alpha)?
+            }
+        };
         let tb = ts.time_base;
         self.tracks[i].1.cursor += 1;
         Ok(Packet::new(idx, tb, data)

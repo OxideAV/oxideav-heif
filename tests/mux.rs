@@ -6,7 +6,8 @@
 use std::io::Cursor;
 
 use oxideav_core::{
-    CodecId, CodecParameters, Error, Frame, PixelFormat, RuntimeContext, StreamInfo, TimeBase,
+    CodecId, CodecParameters, Decoder, Error, Frame, PixelFormat, RuntimeContext, StreamInfo,
+    TimeBase,
 };
 use oxideav_heif::image::Chroma;
 use oxideav_heif::{HeifFrame, HeifPixelFormat};
@@ -308,5 +309,160 @@ fn sequence_file_carries_stco_and_opens_in_third_party_readers() {
         }
     }
     eprintln!("sequence opened by {opened:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `SequenceWriter` with an alpha auxiliary track (HEIF §7.5.3): the
+/// file re-parses with the `auxl` link, the demuxer composes frames
+/// with the exact alpha, and the third-party readers present open it.
+#[test]
+fn sequence_writer_alpha_track_round_trips_and_opens_in_readers() {
+    use oxideav_heif::encode::encode_hevc_picture;
+    use oxideav_heif::writer::{SequenceAlphaTrack, SequenceWriter};
+    let frames: Vec<HeifFrame> = (0..2).map(frame).collect();
+    let alphas: Vec<HeifFrame> = (0..2u32)
+        .map(|i| {
+            let mut a = HeifFrame::zeroed(
+                32,
+                32,
+                HeifPixelFormat::new(Chroma::Mono, 8, false).unwrap(),
+            )
+            .unwrap();
+            for y in 0..32 {
+                for x in 0..32 {
+                    a.set_sample(0, x, y, ((x * 8 + y * 3 + i * 50) % 256) as u16);
+                }
+            }
+            a
+        })
+        .collect();
+    let mut sw: Option<SequenceWriter> = None;
+    let mut alpha_track: Option<SequenceAlphaTrack> = None;
+    for (f, a) in frames.iter().zip(&alphas) {
+        let pic = encode_hevc_picture(f, "pcm", 0).unwrap();
+        let apic =
+            encode_hevc_picture(&oxideav_heif::encode::to_yuv420_8(a).unwrap(), "pcm", 0).unwrap();
+        let w =
+            sw.get_or_insert_with(|| SequenceWriter::new(*b"hvc1", pic.config.clone(), 32, 32, 10));
+        w.push_sample(pic.data.clone(), 1, true);
+        let at = alpha_track.get_or_insert_with(|| SequenceAlphaTrack {
+            entry_type: *b"hvc1",
+            config: apic.config.clone(),
+            width: 32,
+            height: 32,
+            aux_type: oxideav_heif::props::AUX_URN_ALPHA_HEVC.to_string(),
+            samples: Vec::new(),
+            entry_properties: Vec::new(),
+        });
+        at.samples.push(oxideav_heif::writer::SequenceSample {
+            data: apic.data.clone(),
+            duration: 1,
+            sync: true,
+        });
+    }
+    let mut sw = sw.unwrap();
+    sw.alpha = alpha_track;
+    // Cover still (MIAF §7.2.1.4 wants a file-level meta), aliasing
+    // sample 0 of the master track.
+    let mut still = oxideav_heif::HeifWriter::new();
+    let cover = still.add_coded_item(
+        *b"hvc1",
+        Vec::new(),
+        vec![
+            (sw.config.clone(), true),
+            (
+                oxideav_heif::props::Property::Ispe(oxideav_heif::props::Ispe {
+                    width: 32,
+                    height: 32,
+                }),
+                false,
+            ),
+            (
+                oxideav_heif::props::Property::Pixi(oxideav_heif::props::Pixi {
+                    bits_per_channel: vec![8, 8, 8],
+                }),
+                false,
+            ),
+            (
+                oxideav_heif::props::Property::Colr(oxideav_heif::props::Colr::MIAF_DEFAULT),
+                false,
+            ),
+        ],
+    );
+    still.set_primary(cover);
+    sw.still = Some(still);
+    sw.cover_sample = Some(0);
+    let bytes = sw.write_to_vec().unwrap();
+    let f = oxideav_heif::HeifFile::parse(&bytes).unwrap();
+    let mv = oxideav_heif::sequence::parse_movie(&f).unwrap().unwrap();
+    assert_eq!(mv.tracks.len(), 2);
+    let at = mv.alpha_track_of(1).expect("alpha track");
+    assert_eq!(at.track_id, 2);
+    assert!(!at.in_movie);
+    assert_eq!(at.samples.len(), 2);
+    let rep = oxideav_heif::miaf::check(&f, oxideav_heif::miaf::MiafProfile::Miaf).unwrap();
+    assert!(rep.is_conformant(), "{:#?}", rep.violations);
+    // Demux: the composed stream yields frames with the exact alpha.
+    let ctx = context();
+    let mut d = ctx
+        .containers
+        .open_demuxer("heif", Box::new(Cursor::new(bytes.clone())), &ctx.codecs)
+        .unwrap();
+    let streams = d.streams().to_vec();
+    assert_eq!(streams.len(), 4, "still + composed + 2 raw");
+    assert_eq!(streams[1].params.codec_id.as_str(), "heif");
+    assert!(streams[1].params.pixel_format.unwrap().has_alpha());
+    let mut n = 0;
+    while let Ok(p) = d.next_packet() {
+        if p.stream_index != 1 {
+            continue;
+        }
+        let mut codec = oxideav_heif::demux::HeifCodec::new(CodecId::new("heif"));
+        codec.send_packet(&p).unwrap();
+        let img = codec.last_image().unwrap();
+        let i = p.pts.unwrap() as usize;
+        assert_eq!(img.frame.without_alpha(), frames[i].tight(), "frame {i}");
+        assert_eq!(
+            img.frame.alpha_as_frame().unwrap(),
+            alphas[i].tight(),
+            "alpha {i}"
+        );
+        n += 1;
+    }
+    assert_eq!(n, 2);
+    // Third-party readers (SKIP when absent).
+    let path = std::env::temp_dir().join(format!(
+        "oxideav-heif-alpha-seq-{}.heics",
+        std::process::id()
+    ));
+    std::fs::write(&path, &bytes).unwrap();
+    for (bin, args) in [
+        ("heif-info", vec![]),
+        (
+            "ffprobe",
+            vec!["-hide_banner", "-loglevel", "error", "-show_streams"],
+        ),
+        ("sips", vec!["-g", "pixelWidth"]),
+    ] {
+        match std::process::Command::new(bin)
+            .args(&args)
+            .arg(&path)
+            .output()
+        {
+            Ok(out) => {
+                assert!(
+                    out.status.success(),
+                    "{bin} refused the alpha sequence: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                if bin == "ffprobe" {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    // The two tracks (the reader may list the cover still too).
+                    assert!(text.matches("codec_type=video").count() >= 2, "{text}");
+                }
+            }
+            Err(_) => eprintln!("SKIP: {bin} not installed"),
+        }
+    }
     let _ = std::fs::remove_file(&path);
 }

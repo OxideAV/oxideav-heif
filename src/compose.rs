@@ -322,26 +322,26 @@ pub fn resize_nearest(f: &HeifFrame, w: u32, h: u32) -> Result<HeifFrame> {
     Ok(out)
 }
 
-/// Rescale every sample of a monochrome frame from `f.format.bit_depth`
-/// to `depth` (shift, rounding on narrowing).
+/// Rescale every sample of a frame from `f.format.bit_depth` to
+/// `depth` proportionally to the code range — `round(v × (2^new − 1)
+/// / (2^old − 1))` — so the maximum stays the maximum: HEIF §6.9.1
+/// normalises an alpha plane by "the maximum value (e.g. 255 for
+/// 8-bit)", and a shift would turn a fully opaque 8-bit plane into a
+/// 99.7 % one at 10 bits.
 pub fn rescale_depth(f: &HeifFrame, depth: u8) -> Result<HeifFrame> {
     if f.format.bit_depth == depth {
         return Ok(f.clone());
     }
     let fmt = HeifPixelFormat::new(f.format.chroma, depth, f.format.has_alpha)?;
     let mut out = HeifFrame::zeroed(f.width, f.height, fmt)?;
-    let from = f.format.bit_depth;
+    let old_max = ((1u32 << f.format.bit_depth) - 1) as u64;
+    let new_max = ((1u32 << depth) - 1) as u64;
     for p in 0..f.format.plane_count() {
         let (pw, ph) = f.plane_dims(p);
         for y in 0..ph {
             for x in 0..pw {
-                let v = f.sample(p, x, y) as u32;
-                let nv = if depth > from {
-                    v << (depth - from)
-                } else {
-                    let s = from - depth;
-                    ((v + (1 << (s - 1))) >> s).min((1 << depth) - 1)
-                };
+                let v = f.sample(p, x, y) as u64;
+                let nv = ((v * new_max + old_max / 2) / old_max).min(new_max);
                 out.set_sample(p, x, y, nv as u16);
             }
         }
@@ -1186,6 +1186,15 @@ mod tests {
             10,
         )
         .unwrap();
-        assert_eq!(small.sample(0, 0, 0), 1020);
+        // §6.9.1: full opacity stays full opacity across depths.
+        assert_eq!(small.sample(0, 0, 0), 1023);
+        let mid = rescale_depth(
+            &HeifFrame::filled(1, 1, fmt(Chroma::Mono, 8, false), 128).unwrap(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(mid.sample(0, 0, 0), 514);
+        let back = rescale_depth(&mid, 8).unwrap();
+        assert_eq!(back.sample(0, 0, 0), 128);
     }
 }

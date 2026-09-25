@@ -1,5 +1,6 @@
 # file	producer	width	height	chroma	depth	alpha	bb_pix_fmt	bb_raw_bytes	bb_raw_fnv1a64	oracle_png
 # bb_* = the black-box video decoder's rawvideo output of the same file (planar, native layout), fingerprinted with FNV-1a 64 over the concatenated planes; '-' when its layout differs from this crate's output (odd sizes are cropped to even there; alpha is a separate stream).
+# oracle_png: 'png' = the producer's own PNG render matches within rounding with exact alpha; 'png-alpha' = alpha exact, colour reported (the producer's 10-bit render pipeline differs by more than rounding).
 henc_10bit_rgb16_96x80.heic	heif-enc	96	80	Yuv420	10	false	yuv420p10le	23040	05bdc28af1fff07a	png
 henc_12bit_rgb16_96x80.heic	heif-enc	96	80	Yuv420	12	false	yuv420p12le	23040	1ea7c2ef9261d2b3	-
 henc_422_rgb_96x80.heic	heif-enc	96	80	Yuv422	8	false	yuv422p	15360	062774cbc0d1ea43	png
@@ -39,3 +40,4 @@ sips_rgb_96x80.heic	sips	96	80	Yuv420	8	false	yuvj420p	11520	69dd639975b4d168	pn
 sips_rgba_63x61.heic	sips	63	61	Yuv444	8	true	-	-	-	png
 sips_rgba_80x64.heic	sips	80	64	Yuv420	8	true	-	-	-	png
 sips_seq_rgb_96x80.heics	sips	96	80	Yuv420	8	false	yuvj420p	11520	70b7e4667bd0e1ee	-
+sips_seq_rgba_96x80.heics	sips	96	80	Yuv420	10	true	-	-	-	png-alpha
