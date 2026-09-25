@@ -829,7 +829,10 @@ pub fn packed_to_planar(
 }
 
 /// Typed options of the `"heif"` framework encoder (declared schema:
-/// `oxideav info heif` lists them; unknown keys are refused).
+/// `oxideav info heif` lists them; unknown keys are refused). The
+/// enum fields' listed default is empty because a `const` schema can
+/// only hold `String::new()`; the effective defaults are `hevc`,
+/// `intra` and `full` (see [`Default`] and the `help` text).
 #[derive(Clone, Debug)]
 pub struct HeifEncoderOptions {
     /// `codec`: `hevc` (alias `h265`) or `av1`.
@@ -864,13 +867,13 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
         oxideav_core::OptionField {
             name: "codec",
             kind: oxideav_core::OptionKind::Enum(&["hevc", "h265", "av1"]),
-            default: oxideav_core::OptionValue::String("hevc".into()),
+            default: oxideav_core::OptionValue::String(String::new()),
             help: "Coded item codec: hevc (heic file) or av1 (avif file, lossless)",
         },
         oxideav_core::OptionField {
             name: "mode",
             kind: oxideav_core::OptionKind::Enum(&["intra", "pcm"]),
-            default: oxideav_core::OptionValue::String("intra".into()),
+            default: oxideav_core::OptionValue::String(String::new()),
             help: "HEVC coding: intra (CABAC at qp) or pcm (lossless)",
         },
         oxideav_core::OptionField {
@@ -894,7 +897,7 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
         oxideav_core::OptionField {
             name: "range",
             kind: oxideav_core::OptionKind::Enum(&["full", "limited"]),
-            default: oxideav_core::OptionValue::String("full".into()),
+            default: oxideav_core::OptionValue::String(String::new()),
             help: "Sample range written in nclx: full (default) or limited",
         },
     ];
