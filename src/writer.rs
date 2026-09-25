@@ -988,10 +988,18 @@ impl SequenceWriter {
             }
             full_boxed(b"stss", 0, 0, &b)
         };
+        // ISO/IEC 14496-12 §8.7.5: `stco` (32-bit offsets) whenever the
+        // chunk offset fits, `co64` only when it does not — several
+        // third-party readers refuse a table without `stco`.
         let co64_for = |base: u64| -> Vec<u8> {
             let mut b = 1u32.to_be_bytes().to_vec();
-            b.extend_from_slice(&base.to_be_bytes());
-            full_boxed(b"co64", 0, 0, &b)
+            if let Ok(off32) = u32::try_from(base) {
+                b.extend_from_slice(&off32.to_be_bytes());
+                full_boxed(b"stco", 0, 0, &b)
+            } else {
+                b.extend_from_slice(&base.to_be_bytes());
+                full_boxed(b"co64", 0, 0, &b)
+            }
         };
         let moov_for = |base: u64| -> Vec<u8> {
             let mut stbl = Vec::new();

@@ -201,3 +201,76 @@ fn still_stream_passes_through_as_the_file() {
     assert_eq!(std::fs::metadata(&path2).unwrap().len(), 0);
     let _ = std::fs::remove_file(&path2);
 }
+
+/// The sequence writer emits `stco` (32-bit chunk offsets, ISO/IEC
+/// 14496-12 §8.7.5) and third-party readers open the file.
+#[test]
+fn sequence_file_carries_stco_and_opens_in_third_party_readers() {
+    let ctx = context();
+    let mut params = CodecParameters::video(CodecId::new("h265"));
+    params.width = Some(32);
+    params.height = Some(32);
+    params.pixel_format = Some(PixelFormat::Yuv420P);
+    params.options = oxideav_core::CodecOptions::new().set("mode", "pcm");
+    let mut enc = ctx.codecs.first_encoder(&params).unwrap();
+    let mut packets = Vec::new();
+    for i in 0..2u32 {
+        let (mut vf, _) = frame(i).to_core().unwrap();
+        vf.pts = Some(i as i64);
+        enc.send_frame(&Frame::Video(vf)).unwrap();
+        while let Ok(p) = enc.receive_packet() {
+            packets.push(p);
+        }
+    }
+    enc.flush().unwrap();
+    while let Ok(p) = enc.receive_packet() {
+        packets.push(p);
+    }
+    let path = std::env::temp_dir().join(format!("oxideav-heif-stco-{}.heics", std::process::id()));
+    let stream = StreamInfo {
+        index: 0,
+        time_base: TimeBase::new(1, 10),
+        duration: Some(2),
+        start_time: Some(0),
+        params: enc.output_params().clone(),
+    };
+    let sink: Box<dyn oxideav_core::WriteSeek> = Box::new(std::fs::File::create(&path).unwrap());
+    let mut muxer = ctx.containers.open_muxer("heif", sink, &[stream]).unwrap();
+    muxer.write_header().unwrap();
+    for p in &packets {
+        muxer
+            .write_packet(&p.clone().with_duration(1).with_stream_index(0))
+            .unwrap();
+    }
+    muxer.write_trailer().unwrap();
+    drop(muxer);
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(has_box(&bytes, b"stco"), "stco present");
+    assert!(!has_box(&bytes, b"co64"), "no co64 for small offsets");
+    let f = oxideav_heif::HeifFile::parse(&bytes).unwrap();
+    let mv = oxideav_heif::sequence::parse_movie(&f).unwrap().unwrap();
+    assert_eq!(mv.tracks[0].samples.len(), 2);
+    // Third-party readers, when present.
+    let p = path.to_str().unwrap();
+    let mut opened = Vec::new();
+    for (bin, args) in [
+        ("heif-info", vec![p]),
+        ("magick", vec!["identify", p]),
+        ("ffprobe", vec!["-v", "error", p]),
+        ("/usr/bin/sips", vec!["-g", "pixelWidth", p]),
+    ] {
+        match std::process::Command::new(bin).args(&args).output() {
+            Ok(o) => {
+                assert!(
+                    o.status.success(),
+                    "{bin} refused the sequence: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                opened.push(bin);
+            }
+            Err(_) => eprintln!("SKIP {bin}: not installed"),
+        }
+    }
+    eprintln!("sequence opened by {opened:?}");
+    let _ = std::fs::remove_file(&path);
+}
