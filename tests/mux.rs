@@ -131,3 +131,73 @@ fn sequence_mux_demux_round_trip_is_exact() {
     let img = oxideav_heif::decode_primary(&f, oxideav_heif::ItemDecoder::direct()).unwrap();
     assert_eq!(img.frame, frames[0]);
 }
+
+/// Find a top-level / nested box type anywhere in the file bytes.
+fn has_box(bytes: &[u8], t: &[u8; 4]) -> bool {
+    bytes.windows(4).any(|w| w == t)
+}
+
+/// A `"heif"` still stream (the `"heif"` encoder's whole-file packets)
+/// passes through the muxer as the file: exactly one packet.
+#[test]
+fn still_stream_passes_through_as_the_file() {
+    let ctx = context();
+    let src = frame(0);
+    let bytes = oxideav_heif::encode_still(
+        &src,
+        &oxideav_heif::EncodeOptions {
+            hevc_mode: "pcm".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut params = CodecParameters::video(CodecId::new("heif"));
+    params.width = Some(32);
+    params.height = Some(32);
+    params.pixel_format = Some(PixelFormat::Yuv420P);
+    let stream = StreamInfo {
+        index: 0,
+        time_base: TimeBase::new(1, 1),
+        duration: Some(1),
+        start_time: Some(0),
+        params,
+    };
+    let path = std::env::temp_dir().join(format!("oxideav-heif-still-{}.heic", std::process::id()));
+    let sink: Box<dyn oxideav_core::WriteSeek> = Box::new(std::fs::File::create(&path).unwrap());
+    let mut muxer = ctx
+        .containers
+        .open_muxer("heif", sink, std::slice::from_ref(&stream))
+        .unwrap();
+    muxer.write_header().unwrap();
+    let pkt = oxideav_core::Packet::new(0, TimeBase::new(1, 1), bytes.clone()).with_keyframe(true);
+    muxer.write_packet(&pkt).unwrap();
+    // A second still packet is a typed refusal, not a silent append.
+    let err = muxer.write_packet(&pkt).unwrap_err();
+    assert!(err.to_string().contains("exactly one packet"), "{err}");
+    muxer.write_trailer().unwrap();
+    drop(muxer);
+    let written = std::fs::read(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(written, bytes, "the packet is the file");
+    let img = oxideav_heif::decode_primary(
+        &oxideav_heif::HeifFile::parse(&written).unwrap(),
+        oxideav_heif::ItemDecoder::direct(),
+    )
+    .unwrap();
+    assert_eq!(img.frame, src);
+    // Garbage is refused before anything is written.
+    let path2 =
+        std::env::temp_dir().join(format!("oxideav-heif-still2-{}.heic", std::process::id()));
+    let sink: Box<dyn oxideav_core::WriteSeek> = Box::new(std::fs::File::create(&path2).unwrap());
+    let mut muxer = ctx
+        .containers
+        .open_muxer("heif", sink, std::slice::from_ref(&stream))
+        .unwrap();
+    muxer.write_header().unwrap();
+    let junk = oxideav_core::Packet::new(0, TimeBase::new(1, 1), vec![0u8; 64]);
+    assert!(muxer.write_packet(&junk).is_err());
+    assert!(muxer.write_trailer().is_err(), "nothing to write");
+    drop(muxer);
+    assert_eq!(std::fs::metadata(&path2).unwrap().len(), 0);
+    let _ = std::fs::remove_file(&path2);
+}

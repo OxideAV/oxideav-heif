@@ -11,6 +11,10 @@
 //! `extradata`. The first packet also becomes the file-level `meta`
 //! still (cover image, HEIF §7.1) when it is a sync sample of a
 //! self-contained codec configuration.
+//!
+//! A `"heif"` still stream (the `"heif"` encoder's output: every packet
+//! is a complete file) is passed through: exactly one packet, written
+//! as the file; a second packet is refused.
 
 use std::io::Write;
 
@@ -32,6 +36,8 @@ pub const MUXER_NAME: &str = "heif";
 enum Codec {
     Hevc,
     Av1,
+    /// A `"heif"` still stream: one whole-file packet.
+    Still,
 }
 
 /// The image-sequence muxer.
@@ -43,6 +49,8 @@ pub struct HeifSequenceMuxer {
     av1c: Option<Av1Config>,
     coded_size: Option<(u32, u32)>,
     samples: Vec<(Vec<u8>, u32, bool)>,
+    /// The whole-file packet of a still stream.
+    still: Option<Vec<u8>>,
     header_written: bool,
     finished: bool,
 }
@@ -58,9 +66,10 @@ impl HeifSequenceMuxer {
         let codec = match stream.params.codec_id.as_str() {
             "h265" | "hevc" => Codec::Hevc,
             "av1" => Codec::Av1,
+            crate::demux::CODEC_ID => Codec::Still,
             other => {
                 return Err(HeifError::unsupported(format!(
-                    "heif muxer: codec '{other}' (h265 / av1 supported)"
+                    "heif muxer: codec '{other}' (heif still, h265 / av1 sequences supported)"
                 )))
             }
         };
@@ -74,6 +83,7 @@ impl HeifSequenceMuxer {
                     }
                 }
                 Codec::Av1 => av1c = Some(Av1Config::parse(&stream.params.extradata)?),
+                Codec::Still => {}
             }
         }
         let coded_size = match (stream.params.width, stream.params.height) {
@@ -88,6 +98,7 @@ impl HeifSequenceMuxer {
             av1c,
             coded_size,
             samples: Vec::new(),
+            still: None,
             header_written: false,
             finished: false,
         })
@@ -96,6 +107,19 @@ impl HeifSequenceMuxer {
     fn push(&mut self, packet: &Packet) -> Result<()> {
         let duration = packet.duration.unwrap_or(1).max(1) as u32;
         match self.codec {
+            Codec::Still => {
+                if self.still.is_some() {
+                    return Err(HeifError::invalid(
+                        "heif muxer: a still stream carries exactly one packet (one file); \
+                         a second packet cannot be appended",
+                    ));
+                }
+                // The packet must be a HEIF file this crate can read.
+                crate::file::HeifFile::parse(&packet.data).map_err(|e| {
+                    HeifError::invalid(format!("heif muxer: still packet is not a HEIF file: {e}"))
+                })?;
+                self.still = Some(packet.data.clone());
+            }
             Codec::Hevc => {
                 // Length-prefixed input when an hvcC was supplied and the
                 // payload does not start with an Annex B start code.
@@ -137,6 +161,19 @@ impl HeifSequenceMuxer {
     }
 
     fn finish(&mut self) -> Result<()> {
+        if let Codec::Still = self.codec {
+            let bytes = self
+                .still
+                .take()
+                .ok_or_else(|| HeifError::invalid("heif muxer: no still packet was written"))?;
+            self.output
+                .write_all(&bytes)
+                .map_err(|e| HeifError::invalid(format!("heif muxer: write: {e}")))?;
+            self.output
+                .flush()
+                .map_err(|e| HeifError::invalid(format!("heif muxer: flush: {e}")))?;
+            return Ok(());
+        }
         let (w, h) = self
             .coded_size
             .ok_or_else(|| HeifError::invalid("heif muxer: unknown picture size"))?;
@@ -158,6 +195,7 @@ impl HeifSequenceMuxer {
                 let layout = crate::decode::av1_layout(&c)?;
                 (ITEM_TYPE_AV01, Property::Av1C(c), layout)
             }
+            Codec::Still => unreachable!("handled above"),
         };
         let timescale = self.stream.time_base.den().max(1) as u32;
         let mut sw = SequenceWriter::new(entry_type, config.clone(), w as u16, h as u16, timescale);
@@ -229,7 +267,7 @@ impl Muxer for HeifSequenceMuxer {
             return Ok(());
         }
         self.finished = true;
-        if self.samples.is_empty() {
+        if self.samples.is_empty() && self.still.is_none() {
             return Err(CoreError::invalid("heif muxer: no packets were written"));
         }
         self.finish()?;
