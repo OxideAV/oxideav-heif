@@ -341,7 +341,8 @@ impl AuxC {
     }
 }
 
-/// `clli` — content light level (ISO/IEC 14496-12 `ContentLightLevelBox`).
+/// `clli` — content light level (ISO/IEC 14496-12 §12.1.6, a plain
+/// 4-byte Box; H.265 D.3.35 semantics, CTA-861-G zero = unknown).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Clli {
     /// `max_content_light_level` (MaxCLL, cd/m²).
@@ -367,7 +368,11 @@ pub struct Mdcv {
     pub min_luminance: u32,
 }
 
-/// `cclv` — content colour volume (HEVC SEI 144 shape).
+/// `cclv` — content colour volume (ISO/IEC 14496-12 §12.1.8: one flag
+/// byte — `ccv_cancel_flag`, `ccv_persistence_flag`, three presence
+/// flags, 2 reserved bits — then interleaved signed 32-bit primaries
+/// and the present luminance values; semantics of the H.265 D.3.40
+/// SEI, where in a sample entry the two leading flags are 0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cclv {
     /// `ccv_cancel_flag`.
@@ -384,7 +389,8 @@ pub struct Cclv {
     pub avg_luminance: Option<u32>,
 }
 
-/// `amve` — ambient viewing environment (§6.5.36).
+/// `amve` — ambient viewing environment (HEIF §6.5.36 / ISO/IEC
+/// 14496-12 §12.1.9: a plain 8-byte Box; H.265 D.3.39 semantics).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Amve {
     /// `ambient_illuminance` (0.0001 lux).
@@ -1003,8 +1009,9 @@ fn parse_auxc(b: &[u8]) -> Result<AuxC> {
     })
 }
 
-/// `clli` / `mdcv` are plain boxes in ISO/IEC 14496-12; some writers
-/// emit them with a FullBox prefix. Accept both shapes by length.
+/// `clli` / `mdcv` / `cclv` / `amve` are plain boxes in ISO/IEC 14496-12
+/// §12.1.6–9 ("This is a Box, not a FullBox"); some writers emit them
+/// with a FullBox prefix. Accept both shapes by length.
 fn plain_or_full<'a>(b: &'a [u8], plain_len: usize, what: &str) -> Result<&'a [u8]> {
     if b.len() == plain_len {
         Ok(b)
@@ -1046,8 +1053,28 @@ fn parse_mdcv(b: &[u8]) -> Result<Mdcv> {
     })
 }
 
+/// Body length of a `cclv` (§12.1.8) from its flag byte: 1 + 24 with
+/// the primaries + 4 per present luminance value.
+fn cclv_body_len(flags: u8) -> usize {
+    1 + if flags & 0x20 != 0 { 24 } else { 0 }
+        + 4 * ((flags >> 4) & 1) as usize
+        + 4 * ((flags >> 3) & 1) as usize
+        + 4 * ((flags >> 2) & 1) as usize
+}
+
 fn parse_cclv(b: &[u8]) -> Result<Cclv> {
-    let (_v, _f, body) = parse_full_box(b)?;
+    // Plain Box (the specification's shape); a FullBox prefix is
+    // accepted when the plain reading does not fit the length.
+    let body = match b.first() {
+        Some(f) if cclv_body_len(*f) == b.len() => b,
+        _ if b.len() >= 5 && cclv_body_len(b[4]) + 4 == b.len() => &b[4..],
+        _ => {
+            return Err(HeifError::invalid(format!(
+                "cclv: body is {} bytes, inconsistent with its flags",
+                b.len()
+            )))
+        }
+    };
     let mut r = Reader::new(body);
     let flags = r.u8("cclv flags")?;
     let cancel = flags & 0x80 != 0;
@@ -1289,13 +1316,15 @@ pub mod write {
                 {
                     b.extend_from_slice(&v.to_be_bytes());
                 }
-                full_boxed(b"cclv", 0, 0, &b)
+                // §12.1.8: a Box, not a FullBox.
+                boxed(b"cclv", &b)
             }
             Property::Amve(a) => {
                 let mut b = a.ambient_illuminance.to_be_bytes().to_vec();
                 b.extend_from_slice(&a.ambient_light_x.to_be_bytes());
                 b.extend_from_slice(&a.ambient_light_y.to_be_bytes());
-                full_boxed(b"amve", 0, 0, &b)
+                // §12.1.9: a Box, not a FullBox.
+                boxed(b"amve", &b)
             }
             Property::Rloc(r) => {
                 let mut b = r.horizontal_offset.to_be_bytes().to_vec();
@@ -1576,6 +1605,75 @@ mod tests {
         }
         let bad = crate::boxes::write::boxed(b"clli", &[0, 1, 0]);
         assert!(Property::parse(&raw_of(&bad)).is_err());
+        // cclv / amve: the FullBox-prefixed shape is read too.
+        let c = Cclv {
+            cancel: false,
+            persistence: false,
+            primaries: None,
+            min_luminance: Some(5),
+            max_luminance: Some(6),
+            avg_luminance: None,
+        };
+        let plain = write::property_box(&Property::Cclv(c));
+        let full = crate::boxes::write::full_boxed(b"cclv", 0, 0, &plain[8..]);
+        assert_eq!(Property::parse(&raw_of(&full)).unwrap(), Property::Cclv(c));
+        let a = Amve {
+            ambient_illuminance: 1,
+            ambient_light_x: 2,
+            ambient_light_y: 3,
+        };
+        let full = crate::boxes::write::full_boxed(
+            b"amve",
+            0,
+            0,
+            &write::property_box(&Property::Amve(a))[8..],
+        );
+        assert_eq!(Property::parse(&raw_of(&full)).unwrap(), Property::Amve(a));
+        let short = crate::boxes::write::boxed(b"cclv", &[0x38, 0, 0]);
+        assert!(Property::parse(&raw_of(&short)).is_err());
+    }
+
+    /// ISO/IEC 14496-12 §12.1.6–9 on the wire: plain Boxes (no
+    /// version / flags), the field widths and order of each clause.
+    #[test]
+    fn hdr_boxes_have_the_isobmff_wire_shape() {
+        let clli = write::property_box(&Property::Clli(Clli {
+            max_content_light_level: 0x1234,
+            max_pic_average_light_level: 0x0056,
+        }));
+        assert_eq!(&clli[4..8], b"clli");
+        assert_eq!(&clli[8..], &[0x12, 0x34, 0x00, 0x56]);
+        let mdcv = write::property_box(&Property::Mdcv(Mdcv {
+            display_primaries: [(1, 2), (3, 4), (5, 6)],
+            white_point: (7, 8),
+            max_luminance: 9,
+            min_luminance: 10,
+        }));
+        assert_eq!(mdcv.len(), 8 + 24);
+        assert_eq!(
+            &mdcv[8..],
+            &[0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8, 0, 0, 0, 9, 0, 0, 0, 10]
+        );
+        let cclv = write::property_box(&Property::Cclv(Cclv {
+            cancel: false,
+            persistence: false,
+            primaries: Some([(1, -1), (2, -2), (3, -3)]),
+            min_luminance: None,
+            max_luminance: Some(0x0102_0304),
+            avg_luminance: Some(7),
+        }));
+        // flags: primaries (0x20) + max (0x08) + avg (0x04).
+        assert_eq!(cclv.len(), 8 + 1 + 24 + 8);
+        assert_eq!(cclv[8], 0x2c);
+        assert_eq!(&cclv[9..17], &[0, 0, 0, 1, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(&cclv[33..41], &[1, 2, 3, 4, 0, 0, 0, 7]);
+        let amve = write::property_box(&Property::Amve(Amve {
+            ambient_illuminance: 0x0001_0203,
+            ambient_light_x: 0x0405,
+            ambient_light_y: 0x0607,
+        }));
+        assert_eq!(amve.len(), 8 + 8);
+        assert_eq!(&amve[8..], &[0, 1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[test]

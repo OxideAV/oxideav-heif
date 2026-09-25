@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `props` / `sequence`: `clli` / `mdcv` / `cclv` / `amve` follow ISO/IEC
+  14496-12 8th ed. §12.1.6–9 exactly — plain Boxes on the wire (`cclv`
+  and `amve` were written as FullBoxes; a FullBox prefix is still
+  accepted on read, `cclv` by its flag-derived length), interleaved
+  `(x, y)` primaries, wire bytes pinned by tests; the four boxes are
+  typed on `SampleEntry` (`clli` / `mdcv` / `cclv` / `amve`) for image
+  sequences, and `SequenceWriter::entry_properties` round-trips them.
+
 - `tmap` per ISO/IEC 23008-12:2025/Amd 1 §6.6.2.4 + §10.2.6 (the
   staged DAM text), replacing the empirical rules: `ToneMapImage`
   body = `version` (shall be 0; others refused) + C.2 metadata (the

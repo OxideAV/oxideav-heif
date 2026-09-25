@@ -14,7 +14,7 @@ use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
 use crate::hvcc::HevcConfig;
 use crate::meta::RawProperty;
-use crate::props::{Clap, Colr, Pasp, Property};
+use crate::props::{Amve, Cclv, Clap, Clli, Colr, Mdcv, Pasp, Property};
 
 /// Upper bound on the samples one track may expand to.
 pub const MAX_SAMPLES: usize = 1 << 24;
@@ -57,6 +57,14 @@ pub struct SampleEntry {
     pub clap: Option<Clap>,
     /// `pasp` child.
     pub pasp: Option<Pasp>,
+    /// `clli` child (ISO/IEC 14496-12 §12.1.6).
+    pub clli: Option<Clli>,
+    /// `mdcv` child (§12.1.7).
+    pub mdcv: Option<Mdcv>,
+    /// `cclv` child (§12.1.8).
+    pub cclv: Option<Cclv>,
+    /// `amve` child (§12.1.9).
+    pub amve: Option<Amve>,
     /// Every child box, raw, in order.
     pub children: Vec<RawProperty>,
 }
@@ -825,6 +833,10 @@ fn parse_visual_entry(entry_type: FourCc, p: &[u8]) -> Result<SampleEntry> {
         colr: Vec::new(),
         clap: None,
         pasp: None,
+        clli: None,
+        mdcv: None,
+        cclv: None,
+        amve: None,
         children: Vec::new(),
     };
     for h in iter_boxes(rest) {
@@ -869,6 +881,13 @@ fn parse_visual_entry(entry_type: FourCc, p: &[u8]) -> Result<SampleEntry> {
                     entry.pasp = Some(c);
                 }
             }
+            b"clli" | b"mdcv" | b"cclv" | b"amve" => match Property::parse(&raw)? {
+                Property::Clli(v) => entry.clli = Some(v),
+                Property::Mdcv(v) => entry.mdcv = Some(v),
+                Property::Cclv(v) => entry.cclv = Some(v),
+                Property::Amve(v) => entry.amve = Some(v),
+                _ => {}
+            },
             _ => {}
         }
         entry.children.push(raw);

@@ -1709,6 +1709,51 @@ mod tests {
     }
 
     #[test]
+    fn sample_entry_hdr_boxes_round_trip() {
+        let mut sw = SequenceWriter::new(ITEM_TYPE_HVC1, Property::HvcC(hvcc()), 64, 64, 30);
+        let mdcv = crate::props::Mdcv {
+            display_primaries: [(34000, 16000), (13250, 34500), (7500, 3000)],
+            white_point: (15635, 16450),
+            max_luminance: 10_000_000,
+            min_luminance: 50,
+        };
+        let amve = crate::props::Amve {
+            ambient_illuminance: 314_000,
+            ambient_light_x: 15635,
+            ambient_light_y: 16450,
+        };
+        let cclv = crate::props::Cclv {
+            cancel: false,
+            persistence: false,
+            primaries: Some([(1, 2), (3, 4), (5, 6)]),
+            min_luminance: Some(0),
+            max_luminance: Some(1000),
+            avg_luminance: None,
+        };
+        sw.entry_properties.push(Property::Clli(crate::props::Clli {
+            max_content_light_level: 4000,
+            max_pic_average_light_level: 400,
+        }));
+        sw.entry_properties.push(Property::Mdcv(mdcv));
+        sw.entry_properties.push(Property::Cclv(cclv));
+        sw.entry_properties.push(Property::Amve(amve));
+        sw.push_sample(vec![1; 10], 1, true);
+        let bytes = sw.write_to_vec().unwrap();
+        let f = HeifFile::parse(&bytes).unwrap();
+        let mv = crate::sequence::parse_movie(&f).unwrap().unwrap();
+        let e = mv.tracks[0].primary_entry().unwrap();
+        assert_eq!(e.clli.map(|c| c.max_content_light_level), Some(4000));
+        assert_eq!(e.mdcv, Some(mdcv));
+        assert_eq!(e.cclv, Some(cclv));
+        assert_eq!(e.amve, Some(amve));
+        // Plain boxes on the wire: 8-byte header + body.
+        let amve_box = e.children.iter().find(|c| &c.box_type == b"amve").unwrap();
+        assert_eq!(amve_box.body.len(), 8);
+        let cclv_box = e.children.iter().find(|c| &c.box_type == b"cclv").unwrap();
+        assert_eq!(cclv_box.body.len(), 1 + 24 + 8);
+    }
+
+    #[test]
     fn large_ids_switch_to_32_bit_boxes() {
         let mut w = HeifWriter::new();
         w.next_id = 70_000;
