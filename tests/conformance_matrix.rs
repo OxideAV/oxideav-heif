@@ -496,6 +496,15 @@ fn produce(dir: &Path, p: Producer, f: Feature) -> Result<Option<PathBuf>, Cell>
             run(&mut c).map_err(refuse)?;
         }
     }
+    // A producer without a HEIF delegate may "succeed" by writing
+    // another format under the .heic name (ImageMagick without
+    // libheif writes a PNG): only an ISOBMFF file counts.
+    let head = std::fs::read(&out).unwrap_or_default();
+    if head.len() < 12 || !matches!(&head[4..8], b"ftyp" | b"styp") {
+        return Err(Cell::ProducerRefused(
+            "wrote a non-HEIF file (no HEIF delegate)".into(),
+        ));
+    }
     Ok(Some(out))
 }
 
