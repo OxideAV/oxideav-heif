@@ -189,6 +189,8 @@ pub struct SubsegmentIndex {
 
 /// Upper bound on sample-group runs / description entries per box.
 pub const MAX_GROUP_ENTRIES: usize = 1 << 20;
+/// Upper bound on the runs a `csgp` pattern table may expand to.
+pub const MAX_CSGP_RUNS: usize = 1 << 16;
 
 /// One track.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -546,11 +548,20 @@ pub fn parse_csgp(p: &[u8]) -> Result<SampleGroup> {
     }
     let mut patterns = Vec::with_capacity(pattern_count);
     let mut total_len = 0u64;
+    let mut total_samples = 0u64;
     for _ in 0..pattern_count {
         let len = bits.read(pattern_bits, "csgp pattern_length")?;
         let count = bits.read(count_bits, "csgp sample_count")?;
         total_len += len as u64;
+        total_samples += count as u64;
         patterns.push((len, count));
+    }
+    // §8.9.5.3: the sample counts cannot exceed the track's samples;
+    // bound the expansion by the sample cap before walking it.
+    if total_samples > MAX_SAMPLES as u64 {
+        return Err(HeifError::exhausted(format!(
+            "csgp maps {total_samples} samples (cap {MAX_SAMPLES})"
+        )));
     }
     if total_len * index_bits as u64 > (rest.len() as u64 * 8).saturating_sub(bits.pos as u64)
         || total_len > MAX_GROUP_ENTRIES as u64
@@ -567,10 +578,20 @@ pub fn parse_csgp(p: &[u8]) -> Result<SampleGroup> {
             }
             indices.push(idx);
         }
-        if len == 0 {
+        if len == 0 || count == 0 {
             continue;
         }
-        // `sample_count` samples follow the pattern cyclically.
+        // `sample_count` samples follow the pattern cyclically. A
+        // pattern of one distinct index is one run; otherwise the runs
+        // are emitted cycle by cycle under the expansion cap (a
+        // compact box that expands to more runs than that is refused).
+        if indices.iter().all(|i| *i == indices[0]) {
+            match entries.last_mut() {
+                Some((c, g)) if *g == indices[0] => *c += count,
+                _ => entries.push((count, indices[0])),
+            }
+            continue;
+        }
         let mut remaining = count;
         while remaining > 0 {
             for &idx in &indices {
@@ -583,8 +604,10 @@ pub fn parse_csgp(p: &[u8]) -> Result<SampleGroup> {
                 }
                 remaining -= 1;
             }
-            if entries.len() > MAX_GROUP_ENTRIES {
-                return Err(HeifError::exhausted("csgp expands past the run cap"));
+            if entries.len() > MAX_CSGP_RUNS {
+                return Err(HeifError::exhausted(format!(
+                    "csgp expands past {MAX_CSGP_RUNS} runs"
+                )));
             }
         }
     }
@@ -1319,6 +1342,34 @@ mod tests {
         );
         assert_eq!(g.index_of(4), Some(1));
         assert_eq!(g.index_of(6), Some(3));
+        // A pattern applied to 2^32 − 1 samples is refused up front
+        // (fuzz finding: the expansion walked every sample).
+        let mut huge = b"eqiv".to_vec();
+        huge.extend_from_slice(&1u32.to_be_bytes());
+        // flags 0x3f: pattern 32-bit, count 32-bit, index 32-bit.
+        huge.extend_from_slice(&1u32.to_be_bytes());
+        huge.extend_from_slice(&u32::MAX.to_be_bytes());
+        huge.extend_from_slice(&1u32.to_be_bytes());
+        assert!(matches!(
+            parse_csgp(&full_boxed(b"csgp", 0, 0x3f, &huge)[8..]),
+            Err(HeifError::ResourceExhausted(_))
+        ));
+        // A single-index pattern over many samples is one run.
+        let mut one = b"eqiv".to_vec();
+        one.extend_from_slice(&1u32.to_be_bytes());
+        one.extend_from_slice(&1u32.to_be_bytes());
+        one.extend_from_slice(&1_000_000u32.to_be_bytes());
+        one.extend_from_slice(&2u32.to_be_bytes());
+        let g = parse_csgp(&full_boxed(b"csgp", 0, 0x3f, &one)[8..]).unwrap();
+        assert_eq!(g.entries, vec![(1_000_000, 2)]);
+        // A two-index pattern over 1 M samples exceeds the run cap.
+        let mut two = b"eqiv".to_vec();
+        two.extend_from_slice(&1u32.to_be_bytes());
+        two.extend_from_slice(&2u32.to_be_bytes());
+        two.extend_from_slice(&1_000_000u32.to_be_bytes());
+        two.extend_from_slice(&1u32.to_be_bytes());
+        two.extend_from_slice(&2u32.to_be_bytes());
+        assert!(parse_csgp(&full_boxed(b"csgp", 0, 0x3f, &two)[8..]).is_err());
         // sgpd v1 with default_length 0: two entries of 2 and 3 bytes;
         // v2 with a default index.
         let mut d = b"eqiv".to_vec();

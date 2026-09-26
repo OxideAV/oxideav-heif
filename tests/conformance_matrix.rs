@@ -1026,25 +1026,27 @@ fn writer_shapes() -> Vec<(String, &'static str, HeifFrame, EncodeOptions)> {
             av1(Some(60)),
         ));
     }
-    v.push((
-        "hevc 4032×3024 grid (12 MP)".into(),
-        "heic",
-        frame_from_source(4032, 3024, 3, 8),
-        EncodeOptions {
-            grid_tile: Some(512),
-            ..intra(26)
-        },
-    ));
-    v.push((
-        "av1 4032×3024 grid (12 MP)".into(),
-        "avif",
-        frame_from_source(4032, 3024, 3, 8),
-        EncodeOptions {
-            grid_tile: Some(512),
-            av1_speed: "fast".into(),
-            ..av1(Some(60))
-        },
-    ));
+    if twelve_mp() {
+        v.push((
+            "hevc 4032×3024 grid (12 MP)".into(),
+            "heic",
+            frame_from_source(4032, 3024, 3, 8),
+            EncodeOptions {
+                grid_tile: Some(512),
+                ..intra(26)
+            },
+        ));
+        v.push((
+            "av1 4032×3024 grid (12 MP)".into(),
+            "avif",
+            frame_from_source(4032, 3024, 3, 8),
+            EncodeOptions {
+                grid_tile: Some(512),
+                av1_speed: "fast".into(),
+                ..av1(Some(60))
+            },
+        ));
+    }
     v.push((
         "hevc lossless (pcm)".into(),
         "heic",
@@ -1146,9 +1148,21 @@ fn writer_shapes() -> Vec<(String, &'static str, HeifFrame, EncodeOptions)> {
     v
 }
 
+/// The 12 MP rows (a 4032×3024 encode per codec, ~90 s for AV1 in
+/// release, far longer in a debug build) run only when
+/// `OXIDEAV_HEIF_MATRIX_12MP=1`; CI prints SKIP for them.
+fn twelve_mp() -> bool {
+    std::env::var("OXIDEAV_HEIF_MATRIX_12MP")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
 #[test]
 fn conformance_matrix_both_directions() {
     let dir = scratch_dir("matrix");
+    if !twelve_mp() {
+        eprintln!("SKIP: 12 MP rows (set OXIDEAV_HEIF_MATRIX_12MP=1 for the full matrix)");
+    }
     let producers = [
         Producer::Sips,
         Producer::HeifEncX265,
@@ -1174,6 +1188,11 @@ fn conformance_matrix_both_directions() {
         for (fi, f) in FEATURES.iter().enumerate() {
             let cell = if !present {
                 (Cell::NoProducer("absent".into()), String::new())
+            } else if matches!(f, Feature::Size(w, h) if w * h >= 12_000_000) && !twelve_mp() {
+                (
+                    Cell::NoProducer("SKIP: 12 MP rows off".into()),
+                    String::new(),
+                )
             } else {
                 match produce(&dir, p, *f) {
                     Ok(None) => (Cell::NoProducer("no such option".into()), String::new()),
@@ -1207,6 +1226,9 @@ fn conformance_matrix_both_directions() {
     // ── writer direction
     let mut writer_rows: Vec<(String, Vec<(Reader, RCell)>)> = Vec::new();
     for (name, ext, frame, opts) in writer_shapes() {
+        if name.contains("12 MP") && !twelve_mp() {
+            continue;
+        }
         let bytes = encode_still(&frame, &opts).expect(&name);
         let tag = name.replace(['×', ' ', ':', '(', ')', '+'], "_");
         let path = dir.join(format!("w_{tag}.{ext}"));

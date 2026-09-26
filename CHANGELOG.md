@@ -25,7 +25,9 @@ All notable changes to this project will be documented in this file.
   `ssix`, every typed property, with a serialize → parse round-trip
   oracle); `heif_parse` covers tmap bodies, entity-group flags and the
   borrowed `HeifFile` view; `heif_sequence` covers sample groups and
-  auxiliary-track lookups.
+  auxiliary-track lookups. First finding fixed: a `csgp` pattern over
+  2³² samples walked every sample (`MAX_SAMPLES` bound up front, one
+  run per single-index pattern, `MAX_CSGP_RUNS` = 2¹⁶ on the expansion).
 
 - Alpha auxiliary tracks in image sequences (HEIF §7.5.3):
   `Movie::auxiliary_tracks_of` / `alpha_track_of`, `Track::aux_kind`
