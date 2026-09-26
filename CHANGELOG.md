@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-heif/compare/v0.0.3...v0.0.4) - 2026-09-26
+
+### Other
+
+- a producer that writes a non-ISOBMFF file under the .heic name is a refusal
+- absent black-box decoder is a "no reference" cell; single-reader hosts report instead of judging
+- bound the pattern expansion (fuzz finding); matrix: 12 MP rows opt-in
+- conformance matrix + performance baseline + record fuzzing
+- keep HeifFile owned and additive — zero-copy as HeifFile<D = Vec<u8>> / parse_borrowed; L-HEVC refusal under Unsupported
+- alpha auxiliary tracks composed into frames with alpha; proportional alpha depth matching
+- avc1 + lhv1 items: avcC / lhvC / oinf / tols typed, AVC through the h264 codec, L-HEVC base layer through h265
+- hdr boxes: ISO/IEC 14496-12 8th ed. §12.1.6–9 wire syntax (plain Boxes, interleaved primaries, typed on sample entries)
+- normative carriage per 23008-12:2025/Amd 1 §6.6.2.4 + §10.2.6 (reader, checker, writer)
+- zero-copy HeifFile, interleaved mdcv/cclv, 4:2:2 turns, mono overlays, writer brands/aliasing/raw metadata, sample groups
+
 - `tests/conformance_matrix.rs`: the both-direction conformance matrix
   generator — producers (Apple ImageIO `sips`, `heif-enc` x265 / aom,
   ImageMagick, ffmpeg + libsvtav1) × features (sizes 1×1 … 12 MP,
