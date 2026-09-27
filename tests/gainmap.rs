@@ -256,9 +256,43 @@ fn oracle_files_pass_the_tmap_clause_checks() {
         let a1: Vec<_> = rep
             .violations
             .iter()
-            .filter(|x| x.clause.starts_with("HEIF-A1") || x.clause == "HEIF 6.4.2")
+            .filter(|x| {
+                x.clause.starts_with("HEIF-A1")
+                    || x.clause.starts_with("MIAF-A1")
+                    || x.clause == "HEIF 6.4.2"
+            })
             .collect();
         assert!(a1.is_empty(), "{v}: {a1:#?}");
+        // MIAF Amd 1:2025 §7.3.11.5: strip the altr group and the
+        // mandatory grouping is reported; the should-level rules stay
+        // advisories.
+        let mut stripped = f.clone();
+        stripped
+            .meta
+            .as_mut()
+            .unwrap()
+            .entity_groups
+            .retain(|g| g.grouping_type != *b"altr");
+        let rep = check(&stripped, MiafProfile::Miaf).unwrap();
+        assert!(
+            rep.violations
+                .iter()
+                .any(|x| x.clause == "MIAF-A1 7.3.11.5" && x.message.contains("not in an 'altr'")),
+            "{v}: {:#?}",
+            rep.violations
+        );
+        let mut unhidden = f.clone();
+        for it in unhidden.meta.as_mut().unwrap().items.iter_mut() {
+            it.flags &= !1;
+        }
+        let rep = check(&unhidden, MiafProfile::Miaf).unwrap();
+        assert!(
+            rep.advisories
+                .iter()
+                .any(|x| x.clause == "HEIF-A1 6.6.2.4.1" && x.message.contains("hidden")),
+            "{v}: {:#?}",
+            rep.advisories
+        );
     }
 }
 

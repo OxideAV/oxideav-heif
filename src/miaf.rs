@@ -90,6 +90,11 @@ pub struct MiafViolation {
 pub struct MiafReport {
     /// The violations found, in discovery order.
     pub violations: Vec<MiafViolation>,
+    /// Departures from *should*-level recommendations (MIAF Amd 1:2025
+    /// §7.3.11.5 input orientation, HEIF Amd 1:2025 §6.6.2.4.1 hidden
+    /// gain map / `pixi` / `clli` hints, …), in discovery order. They
+    /// do not affect [`MiafReport::is_conformant`].
+    pub advisories: Vec<MiafViolation>,
 }
 
 impl MiafReport {
@@ -105,11 +110,23 @@ impl MiafReport {
             message: message.into(),
         });
     }
+
+    fn advise(&mut self, clause: &'static str, item_id: Option<u32>, message: impl Into<String>) {
+        self.advisories.push(MiafViolation {
+            clause,
+            item_id,
+            message: message.into(),
+        });
+    }
 }
 
-/// HEIF Amd 1 §6.6.2.4 / §10.2.6 (`tmap` derived image items): the
-/// input pair, the three `colr` placements, the `ToneMapImage`
-/// version and the `tmap` brand, reported under `"HEIF-A1 …"` clauses.
+/// HEIF Amd 1:2025 §6.6.2.4 / §10.2.6 (`tmap` derived image items):
+/// the input pair, the three `colr` placements, the `ToneMapImage`
+/// version and the `tmap` brand, reported under `"HEIF-A1 …"` clauses;
+/// MIAF Amd 1:2025 §7.3.11.5 (the mandatory `altr` grouping with a
+/// valid MIAF master image item) under `"MIAF-A1 7.3.11.5"`. The
+/// should-level rules (hidden gain map, `pixi` hint, matching input
+/// orientation) land in [`MiafReport::advisories`].
 fn check_tone_maps<D: AsRef<[u8]>>(
     file: &HeifFile<D>,
     meta: &crate::meta::Meta,
@@ -208,9 +225,79 @@ fn check_tone_maps<D: AsRef<[u8]>>(
             },
             Err(e) => rep.push("HEIF-A1 6.6.2.4.2", Some(id), e.to_string()),
         }
+        // HEIF Amd 1 §6.6.2.4.1 should-level rules.
+        if meta.item(gain).map(|i| !i.is_hidden()).unwrap_or(false) {
+            rep.advise(
+                "HEIF-A1 6.6.2.4.1",
+                Some(gain),
+                "gain map input image should be hidden (infe flags & 1)",
+            );
+        }
+        if let Some(p) = props_of(id) {
+            if p.pixi().is_none() {
+                rep.advise(
+                    "HEIF-A1 6.6.2.4.1",
+                    Some(id),
+                    "tmap derived image item should carry a pixi property (colour-resolution hint)",
+                );
+            }
+        }
+        // MIAF Amd 1 §7.3.11.5: "All input images of a tone-map image
+        // item should have the same rotation and mirroring
+        // transformative properties."
+        let orientation = |i: u32| {
+            props_of(i).map(|p| {
+                (
+                    p.irot().map(|r| r.angle).unwrap_or(0),
+                    p.imir().map(|m| m.axis),
+                )
+            })
+        };
+        if let (Some(a), Some(b)) = (orientation(base), orientation(gain)) {
+            if a != b {
+                rep.advise(
+                    "MIAF-A1 7.3.11.5",
+                    Some(id),
+                    format!(
+                        "tmap inputs {base} and {gain} differ in rotation / mirroring (irot angle {} vs {}, imir {:?} vs {:?})",
+                        a.0, b.0, a.1, b.1
+                    ),
+                );
+            }
+        }
+        // MIAF Amd 1 §7.3.11.5: "If a tone-map derived item is present
+        // in a MIAF file, it shall be contained in an alternative
+        // images group together with another image item that is a
+        // valid MIAF master image item."
+        let altr_groups = meta.groups_containing(id, b"altr");
+        let has_master_partner = altr_groups.iter().any(|g| {
+            g.entity_ids.iter().any(|e| {
+                *e != id
+                    && meta
+                        .item(*e)
+                        .map(|i| {
+                            i.is_image()
+                                && !i.is_hidden()
+                                && meta.references_from(*e, &reference::THMB).is_empty()
+                                && meta.references_from(*e, &reference::AUXL).is_empty()
+                        })
+                        .unwrap_or(false)
+            })
+        });
+        if !has_master_partner {
+            rep.push(
+                "MIAF-A1 7.3.11.5",
+                Some(id),
+                if altr_groups.is_empty() {
+                    "tone-map derived image item is not in an 'altr' entity group".to_string()
+                } else {
+                    "no 'altr' group of the tone-map derived image item holds another non-hidden master image item".to_string()
+                },
+            );
+        }
         // HEIF §6.4.2: an altr group holding the tmap holds only
         // non-hidden items (the tmap itself shall not be hidden).
-        for g in meta.groups_containing(id, b"altr") {
+        for g in altr_groups {
             let hidden: Vec<u32> = g
                 .entity_ids
                 .iter()
@@ -385,6 +472,19 @@ pub fn check<D: AsRef<[u8]>>(file: &HeifFile<D>, profile: MiafProfile) -> Result
         // §7.3.6.3 ispe mandatory.
         if props.ispe().is_none() {
             rep.push("7.3.6.3", Some(id), "no ispe property");
+        }
+        // HEIF Amd 2:2026 §6.5.6.3: bits_per_channel shall not be 0.
+        if let Some(px) = props.pixi() {
+            if px.bits_per_channel.contains(&0) {
+                rep.push(
+                    "HEIF-A2 6.5.6.3",
+                    Some(id),
+                    format!(
+                        "pixi bits_per_channel {:?} contains 0 (shall not be 0)",
+                        px.bits_per_channel
+                    ),
+                );
+            }
         }
         // §7.3.6.5 square pixels.
         if let Some(p) = props.pasp() {

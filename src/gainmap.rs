@@ -15,12 +15,18 @@
 //! application space; [`LinearRgbImage::encode`] re-encodes it with an
 //! H.273 transfer in a target set of primaries for display / tests.
 //!
-//! Carriage in HEIF (which `dimg` input is the baseline, that the
-//! `tmap` item body is the C.2 structure verbatim, and that the `tmap`
-//! item's own `colr` describes the alternate image) follows what every
-//! black-box producer measured in this crate's interop corpus writes;
-//! ISO 21496-1 C.3 delegates it to the file format and the staged
-//! HEIF / MIAF texts do not cover `tmap` (see the crate README).
+//! Carriage in HEIF is ISO/IEC 23008-12:2025/Amd 1:2025 §6.6.2.4 (the
+//! published text): the first `dimg` input is the base image item
+//! (3.1.55), the second the gain map image item (3.1.56), the `tmap`
+//! item body is a `ToneMapImage` (a `version` byte that shall be 0,
+//! then the ISO 21496-1 `GainMapMetadata`), the base carries the
+//! baseline colorimetry `colr`, the gain map an `nclx` with primaries =
+//! transfer = 2, and the `tmap` item's own `colr` describes the
+//! reconstructed image "if the gain map input item is fully applied
+//! (i.e. with a weight of 1.0 or -1.0 depending on the gain map
+//! metadata)" — [`GainMapMetadata::fully_applied_weight`]. MIAF Amd
+//! 1:2025 §7.3.11.5 adds that a `tmap` shall sit in an `altr` group
+//! with a valid MIAF master image item.
 
 use crate::error::{HeifError, Result};
 use crate::image::{Chroma, HeifFrame};
@@ -218,6 +224,22 @@ impl GainMapMetadata {
             return 0.0;
         }
         span.signum() * ((h_target - hb) / span).clamp(0.0, 1.0)
+    }
+
+    /// The weight of the "fully applied" gain map (HEIF Amd 1:2025
+    /// §6.6.2.4.1: "a weight of 1.0 or -1.0 depending on the gain map
+    /// metadata"): `+1` when the alternate headroom exceeds the base
+    /// headroom (an SDR base with an HDR alternate), `-1` when it is
+    /// below (an HDR base with an SDR alternate), `0` when the two
+    /// coincide (a map that cannot be applied). Equal to
+    /// [`GainMapMetadata::weight`] at `H_alternate`.
+    pub fn fully_applied_weight(&self) -> f64 {
+        let span = self.alternate_hdr_headroom.value() - self.base_hdr_headroom.value();
+        if span == 0.0 {
+            0.0
+        } else {
+            span.signum()
+        }
     }
 }
 
@@ -652,15 +674,22 @@ pub fn alternate_signal_scale(
 }
 
 /// The normative reconstruction of a `tmap` derived image item (HEIF
-/// Amd 1 §6.6.2.4.1: "Reconstruction is done by applying the gain map
-/// to the base image according to ISO 21496-1 section 6"): the map
-/// applied at the alternate headroom, re-encoded in the `tmap` item's
-/// own `colr` (`alternate_colr`: primaries + transfer + matrix +
-/// range) as a 4:4:4 (monochrome for a grey base) frame at
-/// `bit_depth`, with [`alternate_signal_scale`] placing the reference
-/// white (`reference_white_nits` for PQ). Only colour is tone-mapped;
-/// the base's alpha plane is carried over unchanged (4th-ed. WD
-/// §6.6.2.4.1).
+/// Amd 1:2025 §6.6.2.4.1: "Reconstruction is done by applying the gain
+/// map to the base image according to the algorithm described in ISO
+/// 21496-1"; the `tmap` item's `colr` "describes the colour properties
+/// of the reconstructed image if the gain map input item is fully
+/// applied (i.e. with a weight of 1.0 or -1.0 depending on the gain
+/// map metadata)"): the map applied with
+/// [`GainMapMetadata::fully_applied_weight`] — the weight Formula 3
+/// yields at `H_alternate` — re-encoded in the `tmap` item's own
+/// `colr` (`alternate_colr`: primaries + transfer + matrix + range) as
+/// a 4:4:4 (monochrome for a grey base) frame at `bit_depth`, with
+/// [`alternate_signal_scale`] placing the reference white
+/// (`reference_white_nits` for PQ). Only colour is tone-mapped; the
+/// base's alpha plane is carried over unchanged. The published Amd 1
+/// is silent on the other channels — the carry-over is this crate's
+/// reading of §6.9.1 (the alpha auxiliary describes the master image)
+/// and matches the 4th-edition working draft's proposed paragraph.
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_tone_map(
     base: &HeifFrame,
@@ -673,6 +702,7 @@ pub fn reconstruct_tone_map(
     reference_white_nits: f64,
 ) -> Result<HeifFrame> {
     let h = meta.alternate_hdr_headroom.value();
+    debug_assert_eq!(meta.weight(h), meta.fully_applied_weight());
     let mut lin = apply_gain_map(base, base_colr, gain, gain_colr, alternate_colr, meta, h)?;
     let alt = alternate_colr.or(base_colr);
     let (primaries, transfer) = cicp(alt);
@@ -760,9 +790,18 @@ mod tests {
         inverted.base_hdr_headroom = r(2, 1);
         inverted.alternate_hdr_headroom = r(0, 1);
         assert_eq!(inverted.weight(1.0), -0.5);
-        let mut same = m;
+        let mut same = m.clone();
         same.alternate_hdr_headroom = r(0, 1);
         assert_eq!(same.weight(1.0), 0.0);
+        // HEIF Amd 1:2025 §6.6.2.4.1: fully applied = weight ±1.0.
+        assert_eq!(m.fully_applied_weight(), 1.0);
+        assert_eq!(m.weight(m.alternate_hdr_headroom.value()), 1.0);
+        assert_eq!(inverted.fully_applied_weight(), -1.0);
+        assert_eq!(
+            inverted.weight(inverted.alternate_hdr_headroom.value()),
+            -1.0
+        );
+        assert_eq!(same.fully_applied_weight(), 0.0);
     }
 
     #[test]

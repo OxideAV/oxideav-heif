@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Finals reconcile (ISO/IEC 23008-12:2025/Amd 1:2025, ISO/IEC
+  23000-22:2025/Amd 1:2025, ISO/IEC 14496-12:2026 — the published
+  texts replace the MPEG drafts the `tmap` / HDR-box work was built
+  from). `tmap`: the reconstruction is the map "fully applied (i.e.
+  with a weight of 1.0 or -1.0 depending on the gain map metadata)"
+  (§6.6.2.4.1) — `GainMapMetadata::fully_applied_weight`, equal to
+  Formula 3 at `H_alternate`; doc citations follow the final (plain
+  "ISO 21496-1", terms 3.1.54–56); the alpha carry-over is documented
+  as this crate's reading (the final is silent; the 4th-ed. WD
+  paragraph is draft-only). `clli` / `mdcv` / `cclv` / `amve` and
+  `csgp` (flag bit 7) already matched the 2026 edition (editorial
+  differences only). `miaf::check`: MIAF Amd 1 §7.3.11.5 — a `tmap`
+  shall be in an `altr` group with a non-hidden master image item
+  (`"MIAF-A1 7.3.11.5"`), inputs should share rotation / mirroring;
+  HEIF Amd 2 §6.5.6.3 `pixi` depth 0 refused; new
+  `MiafReport::advisories` for the should-level rules (hidden gain
+  map, `tmap` `pixi` hint, input orientation).
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-heif/compare/v0.0.3...v0.0.4) - 2026-09-26
 
 ### Other
