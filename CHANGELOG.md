@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Identity-matrix items (`matrix_coefficients = 0`, e.g. black-box
+  lossless RGB) are planar RGB in the framework: the still stream and
+  the decoded frames carry `Gbrp8` / `Gbrp10Le` / `Gbrp12Le` /
+  `Gbrp14Le` / `Gbrp16Le` (`Gbrap*` with alpha; 9 / 11 / 13 / 15-bit
+  depths keep the YCbCr label) instead of being read as BT.601
+  YCbCr (`HeifPixelFormat::to_core_gbr` / `from_core_gbr`,
+  `HeifFrame::to_core_signalled` / `from_core_gbr`,
+  `demux::core_pixel_format_for`). The item's effective `nclx` (the
+  MIAF default when absent) rides as the oxideav-core 0.1.37
+  `ColorSignal` on the stream parameters (still, composed-alpha and raw
+  track streams) and on every emitted frame, so full-range and >8-bit
+  stills are no longer taken as limited range downstream. The encoder
+  accepts `Gbrp*` / `Gbrap*` input: AV1 codes the planes as an
+  identity-matrix 4:4:4 item (lossless stays exact), HEVC converts
+  through the configured matrix.
+- HEVC `rd` / `tiles` no longer need `ctb`: they run on the h265
+  quadtree coder, which the encoder enables through `ctb`, so the size
+  is now supplied automatically — `encode::auto_ctb`, the largest of
+  64 / 32 / 16 whose CTB grid holds the tile layout — unless the caller
+  sets `EncodeOptions::hevc_ctb` / the new framework option `ctb`
+  (16 / 32 / 64; 0 = automatic; other values refused).
+
 - Low-overhead image files (ISO/IEC 23008-12:2025/Amd 2:2026 Annex
   O): `mini::MinimizedImage` parses the bit-packed `MinimizedImageBox`
   (O.3: flags, 7/15-bit dimensions, chroma centring, integer / float

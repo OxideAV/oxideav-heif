@@ -526,3 +526,61 @@ fn amd1_entity_groups_and_properties_round_trip() {
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     assert_eq!(img.frame, picture(64, 48));
 }
+
+/// `rd` / `tiles` without an explicit `ctb` pick the quadtree coder's
+/// CTB size automatically (r462 matrix gap: the encoder refused them),
+/// directly and through the framework options; an explicit `ctb` is
+/// honoured and a size outside 16 / 32 / 64 is refused.
+#[test]
+fn hevc_rd_and_tiles_choose_the_ctb_automatically() {
+    use oxideav_heif::encode::auto_ctb;
+    assert_eq!(auto_ctb(4032, 3024, Some("4x4")), 64);
+    assert_eq!(auto_ctb(96, 80, Some("4x4")), 16);
+    assert_eq!(auto_ctb(96, 80, Some("2x2")), 64);
+    assert_eq!(auto_ctb(96, 80, Some("3x3")), 32);
+    assert_eq!(auto_ctb(96, 80, None), 64);
+    let src = picture(128, 96);
+    for (rd, tiles, ctb) in [
+        (Some(2), None, None),
+        (None, Some("2x2"), None),
+        (Some(1), Some("4x2"), None),
+        (Some(0), Some("2x2"), Some(16)),
+    ] {
+        let opts = EncodeOptions {
+            hevc_rd: rd,
+            hevc_tiles: tiles.map(str::to_string),
+            hevc_ctb: ctb,
+            ..EncodeOptions::default()
+        };
+        let bytes = encode_still(&src, &opts).unwrap_or_else(|e| panic!("{rd:?} {tiles:?}: {e}"));
+        let img = decode_primary(&HeifFile::parse(&bytes).unwrap(), ItemDecoder::direct()).unwrap();
+        assert_eq!((img.width(), img.height()), (128, 96));
+    }
+    let ctx = {
+        let mut c = RuntimeContext::new();
+        oxideav_h265::register(&mut c);
+        oxideav_heif::register(&mut c);
+        c
+    };
+    let mut params = CodecParameters::video(CodecId::new("heif"));
+    params.width = Some(128);
+    params.height = Some(96);
+    params.pixel_format = Some(PixelFormat::Yuv420P);
+    params.options = oxideav_core::CodecOptions::new()
+        .set("rd", "1")
+        .set("tiles", "2x2");
+    let mut enc = ctx.codecs.first_encoder(&params).unwrap();
+    let (vf, _) = src.to_core().unwrap();
+    enc.send_frame(&Frame::Video(vf)).unwrap();
+    enc.flush().unwrap();
+    let file = enc.receive_packet().unwrap().data;
+    assert!(decode_primary(&HeifFile::parse(&file).unwrap(), ItemDecoder::direct()).is_ok());
+    params.options = oxideav_core::CodecOptions::new().set("ctb", "48");
+    assert!(
+        ctx.codecs.first_encoder(&params).is_err() || {
+            let mut e = ctx.codecs.first_encoder(&params).unwrap();
+            e.send_frame(&Frame::Video(src.to_core().unwrap().0))
+                .is_err()
+        }
+    );
+}

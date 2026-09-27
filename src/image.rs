@@ -399,6 +399,7 @@ impl HeifFrame {
 #[cfg(feature = "registry")]
 pub mod core_bridge {
     use super::*;
+    use crate::props::Colr;
     use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 
     /// The full-range (`YuvJ*`) variant of an 8-bit YCbCr framework
@@ -412,7 +413,76 @@ pub mod core_bridge {
         }
     }
 
+    /// `true` when `colr` is an `nclx` with `matrix_coefficients = 0`
+    /// (H.273 identity: the coded planes are G, B, R).
+    pub fn identity_matrix(colr: &Colr) -> bool {
+        matches!(colr, Colr::Nclx { matrix: 0, .. })
+    }
+
+    /// The framework colour-signal record for an item's colour
+    /// information: the `nclx` code points and range; an ICC / absent
+    /// description maps to the MIAF §7.3.6.4 default (BT.709
+    /// primaries, sRGB transfer, BT.601 matrix, full range).
+    pub fn color_signal_of(colr: &Colr) -> oxideav_core::ColorSignal {
+        let (p, t, m, full) = match colr {
+            Colr::Nclx {
+                primaries,
+                transfer,
+                matrix,
+                full_range,
+            } => (*primaries, *transfer, *matrix, *full_range),
+            _ => (1, 13, 6, true),
+        };
+        let byte = |v: u16| v.min(255) as u8;
+        oxideav_core::ColorSignal::from_code_points(byte(p), byte(t), byte(m), full)
+    }
+
     impl HeifPixelFormat {
+        /// The planar-RGB framework format for a 4:4:4 layout whose
+        /// planes are G, B, R (an item with `matrix_coefficients = 0`),
+        /// when the depth has one (8 / 10 / 12 / 14 / 16 bits).
+        pub fn to_core_gbr(&self) -> Option<PixelFormat> {
+            if self.chroma != Chroma::Yuv444 {
+                return None;
+            }
+            Some(match (self.bit_depth, self.has_alpha) {
+                (8, false) => PixelFormat::Gbrp8,
+                (8, true) => PixelFormat::Gbrap8,
+                (10, false) => PixelFormat::Gbrp10Le,
+                (10, true) => PixelFormat::Gbrap10Le,
+                (12, false) => PixelFormat::Gbrp12Le,
+                (12, true) => PixelFormat::Gbrap12Le,
+                (14, false) => PixelFormat::Gbrp14Le,
+                (14, true) => PixelFormat::Gbrap14Le,
+                (16, false) => PixelFormat::Gbrp16Le,
+                (16, true) => PixelFormat::Gbrap16Le,
+                _ => return None,
+            })
+        }
+
+        /// The 4:4:4 layout of a planar-RGB framework format (inverse
+        /// of [`HeifPixelFormat::to_core_gbr`]).
+        pub fn from_core_gbr(f: PixelFormat) -> Option<Self> {
+            let (bit_depth, has_alpha) = match f {
+                PixelFormat::Gbrp8 => (8, false),
+                PixelFormat::Gbrap8 => (8, true),
+                PixelFormat::Gbrp10Le => (10, false),
+                PixelFormat::Gbrap10Le => (10, true),
+                PixelFormat::Gbrp12Le => (12, false),
+                PixelFormat::Gbrap12Le => (12, true),
+                PixelFormat::Gbrp14Le => (14, false),
+                PixelFormat::Gbrap14Le => (14, true),
+                PixelFormat::Gbrp16Le => (16, false),
+                PixelFormat::Gbrap16Le => (16, true),
+                _ => return None,
+            };
+            Some(Self {
+                chroma: Chroma::Yuv444,
+                bit_depth,
+                has_alpha,
+            })
+        }
+
         /// The framework pixel format for this layout, when one exists.
         ///
         /// Monochrome + alpha above 8 bits and 4:2:0 12-bit + alpha
@@ -544,6 +614,26 @@ pub mod core_bridge {
             ))
         }
 
+        /// As [`HeifFrame::to_core`], labelled the way the item's colour
+        /// information implies and carrying it as the frame's
+        /// [`oxideav_core::ColorSignal`]: a 4:4:4 layout whose `nclx`
+        /// has `matrix_coefficients = 0` (H.273 identity — the planes
+        /// hold G, B, R) is the planar-RGB `Gbrp*` / `Gbrap*` family
+        /// (plane order G, B, R [, A] is the coded Y, Cb, Cr [, A]
+        /// order, so no sample moves); otherwise the YCbCr layout, with
+        /// the `YuvJ*` label for 8-bit full range. Depths without a
+        /// planar-RGB framework layout (9 / 11 / 13 / 15 bits) keep the
+        /// YCbCr label; the signal still says identity.
+        pub fn to_core_signalled(&self, colr: &Colr) -> Result<(VideoFrame, PixelFormat)> {
+            let signal = color_signal_of(colr);
+            let full = signal.range == oxideav_core::ColorRange::Full;
+            let (vf, pf) = match (identity_matrix(colr), self.format.to_core_gbr()) {
+                (true, Some(gbr)) => (self.to_core()?.0, gbr),
+                _ => self.to_core_ranged(full)?,
+            };
+            Ok((vf.with_color_signal(signal), pf))
+        }
+
         /// Build from a framework frame of known geometry / format.
         pub fn from_core(
             frame: &VideoFrame,
@@ -556,6 +646,32 @@ pub mod core_bridge {
                     "framework pixel format {pf:?} is not planar YCbCr / gray"
                 ))
             })?;
+            Self::from_core_planes(frame, width, height, pf, format)
+        }
+
+        /// Build from a planar-RGB framework frame (`Gbrp*` /
+        /// `Gbrap*`): the G, B, R [, A] planes become a 4:4:4 frame in
+        /// that order — the layout an item with `matrix_coefficients =
+        /// 0` codes.
+        pub fn from_core_gbr(
+            frame: &VideoFrame,
+            width: u32,
+            height: u32,
+            pf: PixelFormat,
+        ) -> Result<Self> {
+            let format = HeifPixelFormat::from_core_gbr(pf).ok_or_else(|| {
+                HeifError::unsupported(format!("framework pixel format {pf:?} is not planar GBR"))
+            })?;
+            Self::from_core_planes(frame, width, height, pf, format)
+        }
+
+        fn from_core_planes(
+            frame: &VideoFrame,
+            width: u32,
+            height: u32,
+            pf: PixelFormat,
+            format: HeifPixelFormat,
+        ) -> Result<Self> {
             let image_planes = frame.image_planes();
             if image_planes.len() < format.plane_count() {
                 return Err(HeifError::invalid(format!(

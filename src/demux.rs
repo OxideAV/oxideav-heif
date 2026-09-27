@@ -171,13 +171,34 @@ pub fn core_pixel_format(fmt: HeifPixelFormat, full_range: bool) -> Option<Pixel
         })
 }
 
-/// The sample range an item's colour information declares (the MIAF
-/// default — full — when it carries no `nclx`).
-fn item_full_range(node: &ImageNode) -> bool {
-    match node.properties.nclx() {
-        Some(crate::props::Colr::Nclx { full_range, .. }) => *full_range,
-        _ => true,
+#[doc(hidden)]
+/// [`core_pixel_format`] for an item whose effective colour information
+/// is `colr`: a 4:4:4 layout with `matrix_coefficients = 0` (H.273
+/// identity) is labelled planar RGB (`Gbrp*` / `Gbrap*`), as
+/// [`crate::HeifFrame::to_core_signalled`] emits it.
+pub fn core_pixel_format_for(
+    fmt: HeifPixelFormat,
+    colr: &crate::props::Colr,
+) -> Option<PixelFormat> {
+    if crate::image::core_bridge::identity_matrix(colr) {
+        if let Some(gbr) = fmt.to_core_gbr() {
+            return Some(gbr);
+        }
     }
+    let full = match colr {
+        crate::props::Colr::Nclx { full_range, .. } => *full_range,
+        _ => true,
+    };
+    core_pixel_format(fmt, full)
+}
+
+/// The effective colour information of an item (its `nclx`, else the
+/// MIAF §7.3.6.4 default).
+fn item_colour(node: &ImageNode) -> crate::props::Colr {
+    node.properties
+        .nclx()
+        .cloned()
+        .unwrap_or(crate::props::Colr::MIAF_DEFAULT)
 }
 
 /// Codec id for a sample-entry type, through the resolver first and
@@ -373,11 +394,20 @@ impl HeifDemuxer {
         if has_pict_meta {
             if let Ok(node) = build_primary_graph(&file) {
                 let mut params = CodecParameters::video(CodecId::new(CODEC_ID));
+                // A tmap decodes to its base rendition by default, with
+                // the base's colour information (decode::ToneMapOutput).
+                let colour_node = match (&node.kind, node.inputs.first()) {
+                    (ImageKind::ToneMap(_), Some(base)) => base,
+                    _ => &node,
+                };
+                let colour = item_colour(colour_node);
+                params =
+                    params.with_color_signal(crate::image::core_bridge::color_signal_of(&colour));
                 match predict_output(&node) {
                     Ok((fmt, (w, h))) => {
                         params.width = Some(w);
                         params.height = Some(h);
-                        params.pixel_format = core_pixel_format(fmt, item_full_range(&node));
+                        params.pixel_format = core_pixel_format_for(fmt, &colour);
                     }
                     Err(_) => {
                         if let Ok((w, h)) = node.output_size() {
@@ -423,14 +453,17 @@ impl HeifDemuxer {
                 let Some(layout) = entry_item(entry).and_then(|(_, c, _)| config_layout(&c)) else {
                     continue;
                 };
-                let full = match entry.colr.first() {
-                    Some(crate::props::Colr::Nclx { full_range, .. }) => *full_range,
-                    _ => true,
-                };
-                let mut params = CodecParameters::video(CodecId::new(CODEC_ID));
+                let colour = entry
+                    .colr
+                    .iter()
+                    .find(|c| matches!(c, crate::props::Colr::Nclx { .. }))
+                    .cloned()
+                    .unwrap_or(crate::props::Colr::MIAF_DEFAULT);
+                let mut params = CodecParameters::video(CodecId::new(CODEC_ID))
+                    .with_color_signal(crate::image::core_bridge::color_signal_of(&colour));
                 params.width = Some(entry.width as u32);
                 params.height = Some(entry.height as u32);
-                params.pixel_format = core_pixel_format(layout.with_alpha(), full);
+                params.pixel_format = core_pixel_format_for(layout.with_alpha(), &colour);
                 let time_base = TimeBase::new(1, t.timescale.max(1) as i64);
                 let index = streams.len() as u32;
                 streams.push(StreamInfo {
@@ -482,6 +515,14 @@ impl HeifDemuxer {
                     params.pixel_format = a.layout().ok().and_then(|f| f.to_core());
                 } else if let Some(l) = &entry.lhvc {
                     params.extradata = l.raw.clone();
+                }
+                if let Some(c) = entry
+                    .colr
+                    .iter()
+                    .find(|c| matches!(c, crate::props::Colr::Nclx { .. }))
+                {
+                    params =
+                        params.with_color_signal(crate::image::core_bridge::color_signal_of(c));
                 }
                 params = params.with_tag(CodecTag::fourcc(&entry.entry_type));
                 let time_base = TimeBase::new(1, t.timescale.max(1) as i64);
@@ -718,6 +759,10 @@ impl HeifCodec {
     pub fn last_image(&self) -> Option<&decode::DecodedImage> {
         self.last.as_ref()
     }
+
+    fn item_decoder(&self) -> ItemDecoder<'static> {
+        ItemDecoder::direct()
+    }
 }
 
 impl Decoder for HeifCodec {
@@ -727,15 +772,11 @@ impl Decoder for HeifCodec {
 
     fn send_packet(&mut self, packet: &Packet) -> CoreResult<()> {
         let file = HeifFile::parse_borrowed(&packet.data)?;
-        let img = decode_primary(&file, ItemDecoder::direct())?;
-        let full = matches!(
-            img.nclx,
-            crate::props::Colr::Nclx {
-                full_range: true,
-                ..
-            }
-        );
-        let (mut vf, _pf) = img.frame.to_core_ranged(full)?;
+        let img = decode_primary(&file, self.item_decoder())?;
+        // The colour information rides on the frame (H.273 code points +
+        // range; identity-matrix items as planar RGB, see
+        // HeifFrame::to_core_signalled).
+        let (mut vf, _pf) = img.frame.to_core_signalled(&img.nclx)?;
         vf.pts = packet.pts;
         self.queue.push_back(Frame::Video(vf));
         self.last = Some(img);

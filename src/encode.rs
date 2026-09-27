@@ -73,6 +73,13 @@ pub struct EncodeOptions {
     pub hevc_rd: Option<u32>,
     /// HEVC tile layout (`"CxR"`, e.g. `"4x4"`) for parallel coding.
     pub hevc_tiles: Option<String>,
+    /// HEVC coding-tree block size (16 / 32 / 64) of the quadtree coder.
+    /// `rd` and `tiles` run on that coder only; when either is set and
+    /// this is `None` the size is chosen automatically ([`auto_ctb`]:
+    /// the largest of 64 / 32 / 16 whose CTB grid still holds the tile
+    /// layout). `None` without `rd` / `tiles` keeps the encoder's
+    /// historical coder (byte-stable streams).
+    pub hevc_ctb: Option<u32>,
     /// ISO 21496-1 gain map to carry as a `tmap` derived item over
     /// the primary (HEIF Amd 1 §6.6.2.4).
     pub gain_map: Option<GainMapSpec>,
@@ -128,9 +135,26 @@ impl Default for EncodeOptions {
             av1_speed: "fast".into(),
             hevc_rd: None,
             hevc_tiles: None,
+            hevc_ctb: None,
             gain_map: None,
         }
     }
+}
+
+/// The HEVC coding-tree block size `rd` / `tiles` need (they run on
+/// the quadtree coder, which the encoder selects through `ctb`): the
+/// largest of 64 / 32 / 16 whose CTB grid over a `width × height`
+/// picture has at least as many columns and rows as the `tiles`
+/// layout asks for (64 without a layout).
+pub fn auto_ctb(width: u32, height: u32, tiles: Option<&str>) -> u32 {
+    let (cols, rows) = tiles
+        .and_then(|t| t.split_once(['x', 'X']))
+        .and_then(|(c, r)| Some((c.trim().parse::<u32>().ok()?, r.trim().parse::<u32>().ok()?)))
+        .unwrap_or((1, 1));
+    [64u32, 32, 16]
+        .into_iter()
+        .find(|c| width.div_ceil(*c) >= cols && height.div_ceil(*c) >= rows)
+        .unwrap_or(16)
 }
 
 #[doc(hidden)]
@@ -629,7 +653,16 @@ fn encode_picture_for(
 ) -> Result<CodedPicture> {
     match opts.codec {
         StillCodec::Hevc => {
-            let signal = hevc_signal_options(colr, opts);
+            let mut signal = hevc_signal_options(colr, opts);
+            // `rd` / `tiles` ride the quadtree coder, which the encoder
+            // enables through `ctb`: supply it when the caller did not.
+            let quadtree = opts.hevc_rd.is_some() || opts.hevc_tiles.is_some();
+            if opts.hevc_ctb.is_some() || quadtree {
+                let ctb = opts.hevc_ctb.unwrap_or_else(|| {
+                    auto_ctb(frame.width, frame.height, opts.hevc_tiles.as_deref())
+                });
+                signal.push(("ctb".into(), ctb.to_string()));
+            }
             let mut all: Vec<(&str, &str)> = signal
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -1301,6 +1334,12 @@ pub const ENCODER_PIXEL_FORMATS: &[oxideav_core::PixelFormat] = &[
     oxideav_core::PixelFormat::Yuva444P,
     oxideav_core::PixelFormat::Yuv420P10Le,
     oxideav_core::PixelFormat::Yuv444P10Le,
+    oxideav_core::PixelFormat::Gbrp8,
+    oxideav_core::PixelFormat::Gbrap8,
+    oxideav_core::PixelFormat::Gbrp10Le,
+    oxideav_core::PixelFormat::Gbrap10Le,
+    oxideav_core::PixelFormat::Gbrp12Le,
+    oxideav_core::PixelFormat::Gbrap12Le,
 ];
 
 /// Convert a packed RGB / RGBA / BGR / BGRA (8 or 16-bit) or packed
@@ -1424,6 +1463,9 @@ pub struct HeifEncoderOptions {
     pub rd: u32,
     /// `tiles` (HEVC): `CxR` tile layout (empty = none).
     pub tiles: String,
+    /// `ctb` (HEVC): coding-tree block size 16 / 32 / 64 of the
+    /// quadtree coder (0 = automatic when `rd` / `tiles` need it).
+    pub ctb: u32,
 }
 
 impl Default for HeifEncoderOptions {
@@ -1439,6 +1481,7 @@ impl Default for HeifEncoderOptions {
             speed: "fast".into(),
             rd: 255,
             tiles: String::new(),
+            ctb: 0,
         }
     }
 }
@@ -1505,6 +1548,12 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             default: oxideav_core::OptionValue::String(String::new()),
             help: "HEVC tile layout CxR (e.g. 4x4) for parallel coding; empty = none",
         },
+        oxideav_core::OptionField {
+            name: "ctb",
+            kind: oxideav_core::OptionKind::U32,
+            default: oxideav_core::OptionValue::U32(0),
+            help: "HEVC coding-tree block size 16 / 32 / 64 (0 = automatic: chosen when rd / tiles need the quadtree coder)",
+        },
     ];
 
     fn apply(&mut self, key: &str, value: &oxideav_core::OptionValue) -> CoreResult<()> {
@@ -1519,6 +1568,7 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             "speed" => self.speed = value.as_str()?.to_string(),
             "rd" => self.rd = value.as_u32()?,
             "tiles" => self.tiles = value.as_str()?.to_string(),
+            "ctb" => self.ctb = value.as_u32()?,
             other => {
                 return Err(CoreError::invalid(format!(
                     "heif: unknown option '{other}'"
@@ -1551,6 +1601,15 @@ impl HeifEncoderOptions {
             av1_speed: self.speed.clone(),
             hevc_rd: (self.rd <= 2).then_some(self.rd),
             hevc_tiles: (!self.tiles.is_empty()).then_some(self.tiles.clone()),
+            hevc_ctb: match self.ctb {
+                0 => None,
+                16 | 32 | 64 => Some(self.ctb),
+                other => {
+                    return Err(CoreError::invalid(format!(
+                        "heif: ctb {other} (16, 32 or 64; 0 = automatic)"
+                    )))
+                }
+            },
             ..EncodeOptions::default()
         };
         if let Colr::Nclx { full_range, .. } = &mut opts.colr {
@@ -1606,6 +1665,43 @@ impl Encoder for HeifEncoder {
             .params
             .pixel_format
             .ok_or_else(|| CoreError::invalid("heif: pixel_format must be set"))?;
+        if HeifPixelFormat::from_core_gbr(pf).is_some() {
+            // Planar RGB in: AV1 codes the G, B, R planes as a 4:4:4
+            // item with `matrix_coefficients = 0` (H.273 identity, no
+            // conversion — lossless stays lossless); the HEVC path, which
+            // codes 4:2:0, converts through the configured matrix first.
+            let planar = HeifFrame::from_core_gbr(vf, w, h, pf)?;
+            let (p, t) = match &self.opts.colr {
+                Colr::Nclx {
+                    primaries,
+                    transfer,
+                    ..
+                } => (*primaries, *transfer),
+                _ => (1, 13),
+            };
+            let identity = Colr::Nclx {
+                primaries: p,
+                transfer: t,
+                matrix: 0,
+                full_range: true,
+            };
+            let bytes = if self.opts.codec == StillCodec::Av1 && planar.format.bit_depth <= 12 {
+                let opts = EncodeOptions {
+                    colr: identity,
+                    ..self.opts.clone()
+                };
+                encode_still(&planar, &opts)?
+            } else {
+                let rgb = crate::rgb::to_rgb(&planar, Some(&identity))?;
+                let ycc = crate::rgb::from_rgb(&rgb, Some(&self.opts.colr), Chroma::Yuv444)?;
+                encode_still(&ycc, &self.opts)?
+            };
+            let pkt = Packet::new(0, TimeBase::new(1, 1), bytes)
+                .with_pts(vf.pts.unwrap_or(0))
+                .with_keyframe(true);
+            self.queue.push_back(pkt);
+            return Ok(());
+        }
         let hf = match HeifFrame::from_core(vf, w, h, pf) {
             Ok(f) => f,
             Err(_) => packed_to_planar(vf, w, h, pf, &self.opts.colr)?,

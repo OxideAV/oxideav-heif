@@ -216,7 +216,7 @@ fn apple_alpha_sequence_composes_alpha_through_the_demuxer() {
     let Frame::Video(vf) = codec.receive_frame().unwrap() else {
         panic!("video frame");
     };
-    assert_eq!(vf.planes.len(), 4, "Y Cb Cr A");
+    assert_eq!(vf.image_plane_count(), 4, "Y Cb Cr A");
     let img = codec.last_image().unwrap();
     assert_eq!((img.width(), img.height()), (96, 80));
     assert!(img.frame.format.has_alpha);

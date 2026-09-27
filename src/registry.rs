@@ -121,7 +121,8 @@ mod tests {
                 "quality",
                 "speed",
                 "rd",
-                "tiles"
+                "tiles",
+                "ctb"
             ]
         );
         assert_eq!(

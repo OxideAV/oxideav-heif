@@ -255,7 +255,11 @@ fn framework_path_agrees_with_the_direct_path() {
         let Frame::Video(v) = dec.receive_frame().unwrap() else {
             panic!("{}: not a video frame", row.file);
         };
-        let via_framework = HeifFrame::from_core(&v, row.width, row.height, pf).unwrap();
+        // Identity-matrix items are announced as planar RGB (Gbrp*):
+        // the planes are the coded G, B, R in the same order.
+        let via_framework = HeifFrame::from_core(&v, row.width, row.height, pf)
+            .or_else(|_| HeifFrame::from_core_gbr(&v, row.width, row.height, pf))
+            .unwrap();
         let direct = decode_primary(&HeifFile::parse(&bytes).unwrap(), ItemDecoder::direct())
             .unwrap()
             .frame;
