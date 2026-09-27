@@ -715,8 +715,25 @@ pub fn decode_item<D: AsRef<[u8]>>(
     for m in &node.metadata {
         if m.item_type == crate::meta::ITEM_TYPE_EXIF && exif.is_none() {
             exif = Some(exif_payload(&file.item_data(m.id)?)?);
+        } else if m.item_type == crate::meta::ITEM_TYPE_DEXF && exif.is_none() {
+            // Amd 2:2026 A.2.1: a deflate()-compressed ExifDataBlock.
+            if let Some(block) = inflate_metadata(&file.item_data(m.id)?)? {
+                exif = Some(exif_payload(&block)?);
+            }
         } else if m.is_xmp() && xmp.is_none() {
-            xmp = Some(String::from_utf8_lossy(&file.item_data(m.id)?).into_owned());
+            let body = file.item_data(m.id)?;
+            let deflated = m
+                .content_encoding
+                .as_deref()
+                .map(|e| e.eq_ignore_ascii_case("deflate"))
+                .unwrap_or(false);
+            if deflated {
+                if let Some(packet) = inflate_metadata(&body)? {
+                    xmp = Some(String::from_utf8_lossy(&packet).into_owned());
+                }
+            } else {
+                xmp = Some(String::from_utf8_lossy(&body).into_owned());
+            }
         }
     }
     Ok(DecodedImage {
@@ -792,6 +809,27 @@ pub fn decode_primary<D: AsRef<[u8]>>(
 ) -> Result<DecodedImage> {
     let id = file.primary_item()?.id;
     decode_item(file, id, decoder)
+}
+
+/// Inflate a `deflate`-encoded metadata item (RFC 1951; `dExf` items
+/// and `content_encoding = "deflate"` XMP, HEIF Amd 2:2026 A.2.1 /
+/// O.4.3), capped at [`crate::file::MAX_ITEM_BYTES`]. `None` when the
+/// crate is built without the `deflate` feature.
+pub fn inflate_metadata(body: &[u8]) -> Result<Option<Vec<u8>>> {
+    #[cfg(feature = "deflate")]
+    {
+        compcol::vec::decompress_to_vec_capped::<compcol::deflate::Deflate>(
+            body,
+            crate::file::MAX_ITEM_BYTES,
+        )
+        .map(Some)
+        .map_err(|e| HeifError::invalid(format!("deflate metadata item: {e}")))
+    }
+    #[cfg(not(feature = "deflate"))]
+    {
+        let _ = body;
+        Ok(None)
+    }
 }
 
 /// Strip the `exif_tiff_header_offset` word of an `Exif` item body

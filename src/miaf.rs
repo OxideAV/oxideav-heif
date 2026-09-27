@@ -336,6 +336,22 @@ pub fn check<D: AsRef<[u8]>>(file: &HeifFile<D>, profile: MiafProfile) -> Result
             return Ok(rep);
         }
     };
+    // HEIF Amd 2:2026 O.2.1.1 / Table O.1: a low-overhead file holds
+    // `ftyp` + `mini` (version 0) and no other file-level box.
+    if file.minimized.is_some() {
+        let others: Vec<String> = crate::boxes::iter_boxes(file.original_bytes())
+            .filter_map(|h| h.ok())
+            .filter(|h| !matches!(&h.box_type, b"ftyp" | b"mini"))
+            .map(|h| fourcc_str(&h.box_type))
+            .collect();
+        if !others.is_empty() {
+            rep.push(
+                "HEIF-A2 O.2.1.1",
+                None,
+                format!("low-overhead file carries other file-level boxes: {others:?}"),
+            );
+        }
+    }
     // §7.2.1.1: mif1 shall be present; msf1 when a sequence track exists.
     if !file.file_type.has_brand(&BRAND_MIF1) {
         rep.push("7.2.1.1", None, "compatible brands lack 'mif1'");

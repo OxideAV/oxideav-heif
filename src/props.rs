@@ -1542,7 +1542,7 @@ fn parse_mdcv(b: &[u8]) -> Result<Mdcv> {
 
 /// Body length of a `cclv` (§12.1.8) from its flag byte: 1 + 24 with
 /// the primaries + 4 per present luminance value.
-fn cclv_body_len(flags: u8) -> usize {
+pub(crate) fn cclv_body_len(flags: u8) -> usize {
     1 + if flags & 0x20 != 0 { 24 } else { 0 }
         + 4 * ((flags >> 4) & 1) as usize
         + 4 * ((flags >> 3) & 1) as usize

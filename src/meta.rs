@@ -63,6 +63,8 @@ pub const ITEM_TYPE_IDEN: FourCc = *b"iden";
 pub const ITEM_TYPE_TMAP: FourCc = *b"tmap";
 /// Exif metadata item (Annex A.2).
 pub const ITEM_TYPE_EXIF: FourCc = *b"Exif";
+/// Deflate-compressed Exif metadata item (HEIF Amd 2:2026 A.2.1).
+pub const ITEM_TYPE_DEXF: FourCc = *b"dExf";
 /// MIME-typed item (XMP = `application/rdf+xml`, Annex A.3).
 pub const ITEM_TYPE_MIME: FourCc = *b"mime";
 /// URI-typed item (IPTC, Annex A.5).

@@ -81,6 +81,10 @@ pub const BRAND_AVCS: FourCc = *b"avcs";
 /// 23008-12:2025/Amd 1 §10.2.6; a compatible brand, never the major).
 pub const BRAND_TMAP: FourCc = *b"tmap";
 
+/// `mif3` — low-overhead image file structural brand (ISO/IEC
+/// 23008-12:2025/Amd 2:2026 Annex O.2.1: `ftyp` + `mini`).
+pub const BRAND_MIF3: FourCc = *b"mif3";
+
 /// Brands that identify a file as one this crate owns (HEIF structural,
 /// HEVC-specific, MIAF, AV1/AVIF). Presence of any of them as the major
 /// brand or among the compatible brands makes the container probe fire.
@@ -88,7 +92,7 @@ pub const HEIF_FAMILY_BRANDS: &[FourCc] = &[
     BRAND_MIF1, BRAND_MIF2, BRAND_MSF1, BRAND_HEIC, BRAND_HEIX, BRAND_HEVC, BRAND_HEVX, BRAND_HEIM,
     BRAND_HEIS, BRAND_HEVM, BRAND_HEVS, BRAND_MIAF, BRAND_MIHB, BRAND_MIHA, BRAND_MIHE, BRAND_MIAB,
     BRAND_AVIF, BRAND_AVIS, BRAND_AVIO, BRAND_MA1B, BRAND_MA1A, BRAND_JPEG, BRAND_JPGS, BRAND_AVCI,
-    BRAND_AVCS, BRAND_1PIC, BRAND_PRED, BRAND_TMAP,
+    BRAND_AVCS, BRAND_1PIC, BRAND_PRED, BRAND_TMAP, BRAND_MIF3,
 ];
 
 /// Parsed `ftyp` / `styp` box.
@@ -159,6 +163,7 @@ impl FileType {
         BrandClass {
             image_collection: has(&BRAND_MIF1)
                 || has(&BRAND_MIF2)
+                || has(&BRAND_MIF3)
                 || has(&BRAND_HEIC)
                 || has(&BRAND_HEIX)
                 || has(&BRAND_HEIM)

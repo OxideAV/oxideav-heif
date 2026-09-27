@@ -31,12 +31,22 @@ pub const MAX_WALK_BOXES: usize = 1 << 20;
 #[derive(Clone, Debug)]
 pub struct HeifFile<D = Vec<u8>> {
     data: D,
-    /// The `ftyp` (or `styp`) box.
+    /// The equivalent file of a low-overhead (`mini`) input.
+    equivalent: Option<Vec<u8>>,
+    /// The `ftyp` (or `styp`) box. For a low-overhead (`mif3`) file,
+    /// the equivalent `ftyp` of Amd 2:2026 O.2.1.2 (`mif1` and, with a
+    /// gain map, `tmap` added).
     pub file_type: FileType,
-    /// The file-level `meta` box, when present.
+    /// The file-level `meta` box, when present. For a low-overhead
+    /// file, the equivalent `MetaBox` of Amd 2:2026 O.4.
     pub meta: Option<Meta>,
-    /// Headers of every top-level box, in file order.
+    /// Headers of every top-level box, in file order (for a
+    /// low-overhead file: of the equivalent `ftyp` / `meta` / `mdat`,
+    /// which is what [`HeifFile::bytes`] returns).
     pub top_level: Vec<BoxHeader>,
+    /// The parsed `MinimizedImageBox` of a low-overhead file (ISO/IEC
+    /// 23008-12:2025/Amd 2:2026 Annex O), which this view expanded.
+    pub minimized: Option<crate::mini::MinimizedImage>,
 }
 
 /// The zero-copy form of [`HeifFile`]: a view over borrowed bytes.
@@ -54,7 +64,8 @@ impl HeifFile<Vec<u8>> {
         Self::from_data(data)
     }
 
-    /// Consume the view and return the file bytes.
+    /// Consume the view and return the file bytes (the original input,
+    /// also for a low-overhead file).
     pub fn into_bytes(self) -> Vec<u8> {
         self.data
     }
@@ -70,9 +81,11 @@ impl<'a> HeifFile<&'a [u8]> {
     pub fn into_owned(self) -> HeifFile<Vec<u8>> {
         HeifFile {
             data: self.data.to_vec(),
+            equivalent: self.equivalent,
             file_type: self.file_type,
             meta: self.meta,
             top_level: self.top_level,
+            minimized: self.minimized,
         }
     }
 }
@@ -108,16 +121,47 @@ impl<D: AsRef<[u8]>> HeifFile<D> {
                 )));
             }
         }
+        // Amd 2:2026 O.1: "When a parser encounters a MinimizedImageBox,
+        // it shall expand it to a MetaBox and a MediaDataBox".
+        if meta.is_none() {
+            if let Some(h) = top_level.iter().find(|h| &h.box_type == b"mini") {
+                let mini = crate::mini::MinimizedImage::parse(payload(bytes, h))?;
+                let eq = mini.equivalent_file(&file_type)?;
+                let inner = HeifFile::from_data(eq.as_slice())?;
+                let (file_type, meta, top_level) = (inner.file_type, inner.meta, inner.top_level);
+                return Ok(Self {
+                    data,
+                    equivalent: Some(eq),
+                    file_type,
+                    meta,
+                    top_level,
+                    minimized: Some(mini),
+                });
+            }
+        }
         Ok(Self {
             data,
+            equivalent: None,
             file_type,
             meta,
             top_level,
+            minimized: None,
         })
     }
 
-    /// The file bytes.
+    /// The file bytes every reader works on: the input, or for a
+    /// low-overhead (`mini`) file the equivalent file of Amd 2:2026
+    /// O.4 (see [`HeifFile::original_bytes`] for the input).
     pub fn bytes(&self) -> &[u8] {
+        match &self.equivalent {
+            Some(e) => e,
+            None => self.data.as_ref(),
+        }
+    }
+
+    /// The input bytes as given (differs from [`HeifFile::bytes`] only
+    /// for a low-overhead file).
+    pub fn original_bytes(&self) -> &[u8] {
         self.data.as_ref()
     }
 

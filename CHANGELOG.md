@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Low-overhead image files (ISO/IEC 23008-12:2025/Amd 2:2026 Annex
+  O): `mini::MinimizedImage` parses the bit-packed `MinimizedImageBox`
+  (O.3: flags, 7/15-bit dimensions, chroma centring, integer / float
+  depths, CICP defaults of Table O.3, explicit codec types, the HDR
+  block with gain map + `tmap` CICP / ICC + main / tone-mapped
+  `clli` / `mdcv` / `cclv` / `amve` / `reve` / `ndwt` bodies, the
+  10/20-bit / 3/12-bit / 15/28-bit chunk sizes, `trailing_bits`, the
+  chunk order) and rebuilds the normative O.4 equivalent — `ftyp` with
+  the O.2.1.2 implied `mif1` / `tmap` and equivalent major brand, the
+  fixed item ids 1–7, `auxl` / `prem` / `dimg` / `cdsc` references,
+  the `altr` [3, 1] group, the 32-slot `ipco` with `free` placeholders,
+  the O.4.6 association order, the O.4.7 per-channel `pixi`, the O.4.8
+  `ToneMapImage`, `iloc` over the O.4.10 `mdat` order. `HeifFile`
+  expands a `mini` file on parse (`HeifFile::minimized`,
+  `original_bytes`), so decode / MIAF check / demux take the regular
+  paths. Writer direction: `MinimizedImage::to_box` / `to_file` /
+  `to_file_with_minor` and `encode::encode_still_minimized` (HEVC or
+  AV1, alpha, ICC, Exif, XMP, gain map, Exif orientation from
+  `irot` / `imir`; minor version = the equivalent `heic` / `avif`
+  brand, which libheif keys on) — decodes byte-identically to the
+  regular writer's file of the same picture, and `heif-convert`
+  renders both identically. `mif3` brand (`BRAND_MIF3`, probe +
+  `BrandClass`), `.hmg` extension, `image/hif2` (`mini::MIME_TYPE`);
+  `check` enforces Table O.1 (`ftyp` + `mini` only). Refused with a
+  typed `Unsupported`: codec-native alpha (O.4.6 slot 30, the
+  `AlphaInformationProperty` Amd 2 names but does not define) and
+  implicit codec types under an unknown codec brand (`vvi3` → `vvc1`
+  / `vvcC` is expanded; this crate has no VVC decoder).
+- `dExf` items and `content_encoding = "deflate"` XMP (Amd 2 A.2.1 /
+  O.4.3) inflate on decode (`decode::inflate_metadata`, bounded) under
+  the new default-on `deflate` feature (optional `compcol`
+  dependency).
+
 - HEIF Amd 1:2025 / Amd 2:2026 properties and groups, typed with
   writers: `reve` (§6.5.44), `ndwt` (§6.5.45), `cexg` (§6.5.41,
   16/32-bit tile fields, optional extent configuration), `dadj`

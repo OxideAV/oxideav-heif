@@ -23,9 +23,12 @@ use crate::mux::open_muxer;
 /// Resolution priority of the container probe (lower wins ties).
 pub const PROBE_PRIORITY: i32 = oxideav_core::DEFAULT_PRIORITY - 50;
 
-/// File extensions claimed for the container (MIAF §10.1 Table 5 plus
-/// the AVIF family, which this container walks too).
-pub const EXTENSIONS: &[&str] = &["heic", "heif", "heics", "heifs", "hif", "avif", "avifs"];
+/// File extensions claimed for the container (MIAF §10.1 Table 5, the
+/// low-overhead `.hmg` of HEIF Amd 2:2026 Annex P, plus the AVIF
+/// family, which this container walks too).
+pub const EXTENSIONS: &[&str] = &[
+    "heic", "heif", "heics", "heifs", "hif", "hmg", "avif", "avifs",
+];
 
 /// Register the container (demuxer + sequence muxer + probe +
 /// extensions) and the `"heif"` still-image codec.

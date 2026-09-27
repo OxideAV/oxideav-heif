@@ -33,7 +33,24 @@ fn round_trip(p: &Property) {
         box_size: bytes.len(),
     };
     if let Ok(back) = Property::parse(&raw) {
-        assert_eq!(&back, p, "re-serialized property must re-parse equal");
+        match p {
+            // Decoder configuration records keep their input bytes in
+            // `raw` (trailing bytes included) while the writer emits the
+            // canonical record: the contract is a serialization fixed
+            // point, not field equality with the non-canonical input.
+            Property::HvcC(_)
+            | Property::AvcC(_)
+            | Property::LhvC(_)
+            | Property::Av1C(_)
+            | Property::Oinf(_) => {
+                assert_eq!(
+                    property_box(&back),
+                    bytes,
+                    "re-serialized record must be a fixed point"
+                );
+            }
+            _ => assert_eq!(&back, p, "re-serialized property must re-parse equal"),
+        }
     }
 }
 
@@ -53,6 +70,29 @@ fuzz_target!(|data: &[u8]| {
     };
     if let Ok(p) = Property::parse(&raw) {
         round_trip(&p);
+    }
+    // Low-overhead `mini` box (Amd 2 Annex O): parse → serialize →
+    // parse is a fixed point; the O.4 expansion parses as a HEIF file.
+    if let Ok(m) = oxideav_heif::mini::MinimizedImage::parse(body) {
+        if let Ok(b) = m.to_box() {
+            let again = oxideav_heif::mini::MinimizedImage::parse(&b[8..]).unwrap();
+            assert_eq!(again, m, "mini must round-trip");
+        }
+        let ft = oxideav_heif::FileType {
+            box_type: *b"ftyp",
+            major_brand: *b"mif3",
+            minor_version: if sel & 1 == 1 {
+                u32::from_be_bytes(*b"vvi3")
+            } else {
+                0
+            },
+            compatible_brands: vec![],
+        };
+        if let Ok(eq) = m.equivalent_file(&ft) {
+            let f = oxideav_heif::HeifFile::parse(&eq).expect("equivalent file parses");
+            let _ = oxideav_heif::miaf::check(&f, oxideav_heif::MiafProfile::Miaf);
+            let _ = oxideav_heif::derived::build_primary_graph(&f);
+        }
     }
     // Records on their own.
     if let Ok(m) = GainMapMetadata::parse_tmap_body(body) {

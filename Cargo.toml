@@ -26,6 +26,9 @@ oxideav-core = { version = "0.1", optional = true }
 oxideav-h265 = { version = "0.0.11", optional = true }
 oxideav-h264 = { version = "0.1", optional = true }
 oxideav-av1 = { version = "0.1.19", optional = true }
+# Inflate for deflate-compressed metadata items (`dExf`, deflated XMP;
+# HEIF Amd 2:2026 A.2.1 / O.4.3). Optional: `deflate` feature.
+compcol = { version = "0.6", default-features = false, features = ["deflate"], optional = true }
 
 [dev-dependencies]
 # Test-only: inflate for the PNG oracle reader (`tests/common/png.rs`)
@@ -33,7 +36,8 @@ oxideav-av1 = { version = "0.1.19", optional = true }
 compcol = { version = "0.6", default-features = false, features = ["zlib"] }
 
 [features]
-default = ["registry"]
+default = ["registry", "deflate"]
+deflate = ["dep:compcol"]
 registry = ["dep:oxideav-core", "dep:oxideav-h265", "dep:oxideav-h264", "dep:oxideav-av1"]
 
 [[example]]

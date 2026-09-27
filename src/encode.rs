@@ -1003,6 +1003,276 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
     w.write_to_vec()
 }
 
+/// Encode a still as a low-overhead image file (ISO/IEC
+/// 23008-12:2025/Amd 2:2026 Annex O: `ftyp` major brand `mif3` with
+/// the equivalent file's brand — `heic` / `avif` — as minor version
+/// (O.2.1.1), then one `MinimizedImageBox` with explicit codec types —
+/// `hvc1` / `hvcC` or `av01` / `av1C`). Readers expand it to
+/// the O.4 equivalent `meta` + `mdat` ([`crate::HeifFile`] does so on
+/// parse).
+///
+/// The box has no `clap`, grid or thumbnail slot, so the picture (and
+/// the alpha / gain map) must be a multiple of the codec block size
+/// (16 for HEVC, 8 for AV1), `grid_tile` / `thumbnail_max_dim` must be
+/// unset, and `transforms` must be one of the eight Exif orientations
+/// as `irot` then `imir` (O.4.6 slots 9 / 10). Colour, ICC, alpha
+/// (auxiliary item), Exif, XMP and the gain map (`tmap` with its
+/// alternate colour and `clli`) are carried.
+pub fn encode_still_minimized(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> {
+    use crate::mini::{MiniChroma, MiniGainMap, MiniHdrBoxes, MinimizedImage, SampleFormat};
+    frame.validate()?;
+    if opts.grid_tile.is_some() || opts.thumbnail_max_dim.is_some() {
+        return Err(HeifError::unsupported(
+            "low-overhead file: the MinimizedImageBox has no grid or thumbnail item",
+        ));
+    }
+    let orientation = exif_orientation(&opts.transforms)?;
+    let native_av1 = opts.codec == StillCodec::Av1 && frame.format.bit_depth <= 12;
+    let colour = if native_av1 {
+        frame.without_alpha().tight()
+    } else {
+        to_yuv420_8(&frame.without_alpha())?
+    };
+    let a = alignment(opts);
+    let exact = |f: &HeifFrame, what: &str| -> Result<()> {
+        if f.width % a != 0 || f.height % a != 0 {
+            return Err(HeifError::unsupported(format!(
+                "low-overhead file: the {what} is {}x{}, not a multiple of the {a}-pixel coding block (the MinimizedImageBox carries no clap)",
+                f.width, f.height
+            )));
+        }
+        Ok(())
+    };
+    exact(&colour, "picture")?;
+    let config_body = |p: &Property| crate::props::write::property_box(p)[8..].to_vec();
+    let codec_types = match opts.codec {
+        StillCodec::Hevc => (ITEM_TYPE_HVC1, *b"hvcC"),
+        StillCodec::Av1 => (crate::meta::ITEM_TYPE_AV01, *b"av1C"),
+    };
+    let chroma_of = |c: Chroma| MiniChroma {
+        subsampling: c.idc(),
+        horizontally_centered: false,
+        vertically_centered: c == Chroma::Yuv420,
+    };
+    let pic = encode_picture(&colour, opts)?;
+    let (cw, ch) = (pic.coded_width, pic.coded_height);
+    if (cw, ch) != (colour.width, colour.height) {
+        return Err(HeifError::unsupported(format!(
+            "low-overhead file: coded picture {cw}x{ch} differs from the {}x{} image",
+            colour.width, colour.height
+        )));
+    }
+    let signalled = nclx_for_icc(&opts.colr, opts.icc_profile.is_some());
+    let (full_range, explicit_cicp, icc) = match (&signalled, &opts.icc_profile) {
+        (
+            Colr::Nclx {
+                primaries,
+                transfer,
+                matrix,
+                full_range,
+            },
+            icc,
+        ) => {
+            let cicp = (*primaries as u8, *transfer as u8, *matrix as u8);
+            let default = {
+                let (p, t) = if icc.is_some() { (2, 2) } else { (1, 13) };
+                (
+                    p,
+                    t,
+                    if pic.layout.chroma == Chroma::Mono {
+                        2
+                    } else {
+                        6
+                    },
+                )
+            };
+            (*full_range, (cicp != default).then_some(cicp), icc.clone())
+        }
+        (Colr::Icc { profile, .. }, _) => (true, None, Some(profile.clone())),
+        (_, icc) => (true, None, icc.clone()),
+    };
+    let mut m = MinimizedImage {
+        explicit_codec_types: Some(codec_types),
+        format: SampleFormat::Integer {
+            bits: pic.layout.bit_depth,
+        },
+        full_range,
+        chroma: chroma_of(pic.layout.chroma),
+        orientation,
+        width: cw,
+        height: ch,
+        explicit_cicp,
+        icc,
+        alpha: false,
+        alpha_premultiplied: false,
+        hdr: false,
+        hdr_boxes: MiniHdrBoxes::default(),
+        gain_map: None,
+        main_codec_config: config_body(&pic.config),
+        main_data: pic.data,
+        alpha_codec_config: None,
+        alpha_data: Vec::new(),
+        exif_xmp_compressed: false,
+        exif: opts.exif.as_ref().map(|t| {
+            let mut b = 0u32.to_be_bytes().to_vec();
+            b.extend_from_slice(t);
+            b
+        }),
+        xmp: opts.xmp.as_ref().map(|x| x.as_bytes().to_vec()),
+    };
+    if let Some(alpha) = frame.alpha_as_frame() {
+        let a_src = if native_av1 {
+            alpha.tight()
+        } else {
+            to_yuv420_8(&alpha)?
+        };
+        let extra: &[(&str, &str)] = if opts.codec == StillCodec::Hevc {
+            ALPHA_HEVC_OPTIONS
+        } else {
+            &[]
+        };
+        let alpha_colr = Colr::Nclx {
+            primaries: 2,
+            transfer: 2,
+            matrix: 2,
+            full_range: true,
+        };
+        let apic = encode_picture_for(&a_src, opts, &alpha_colr, extra)?;
+        m.alpha = true;
+        let cfg = config_body(&apic.config);
+        if cfg != m.main_codec_config {
+            m.alpha_codec_config = Some(cfg);
+        }
+        m.alpha_data = apic.data;
+    }
+    if let Some(gm) = &opts.gain_map {
+        gm.frame.validate()?;
+        let g_src = if native_av1 {
+            gm.frame.without_alpha().tight()
+        } else {
+            to_yuv420_8(&gm.frame.without_alpha())?
+        };
+        exact(&g_src, "gain map")?;
+        let gain_colr = Colr::Nclx {
+            primaries: 2,
+            transfer: 2,
+            matrix: if gm.frame.format.chroma == Chroma::Mono {
+                2
+            } else {
+                gm.gain_map_matrix
+            },
+            full_range: gm.gain_map_full_range,
+        };
+        let extra: &[(&str, &str)] = if opts.codec == StillCodec::Hevc {
+            GAIN_MAP_HEVC_OPTIONS
+        } else {
+            &[]
+        };
+        let gpic = encode_picture_for(&g_src, opts, &gain_colr, extra)?;
+        if gm.frame.format.chroma == Chroma::Mono && gpic.layout.chroma != Chroma::Mono {
+            // The box derives the gain map's pixi from its coded chroma
+            // layout (O.4.7.4), so a luma-only map coded 4:2:0 would read
+            // back as a three-channel map.
+            return Err(HeifError::unsupported(
+                "low-overhead file: a single-channel gain map needs a 4:0:0 coding (AV1)",
+            ));
+        }
+        let Colr::Nclx {
+            matrix: gmatrix,
+            full_range: gfull,
+            ..
+        } = gain_colr
+        else {
+            unreachable!("built as nclx above")
+        };
+        let (tmap_cicp, tmap_icc) = match &gm.alternate_colr {
+            Colr::Nclx {
+                primaries,
+                transfer,
+                matrix,
+                full_range,
+            } => (
+                Some((
+                    *primaries as u8,
+                    *transfer as u8,
+                    *matrix as u8,
+                    *full_range,
+                )),
+                None,
+            ),
+            Colr::Icc { profile, .. } => (None, Some(profile.clone())),
+            Colr::Other { .. } => (None, None),
+        };
+        let gcfg = config_body(&gpic.config);
+        let mut tmap_hdr = MiniHdrBoxes::default();
+        if let Some(c) = gm.alternate_clli {
+            let mut b = c.max_content_light_level.to_be_bytes().to_vec();
+            b.extend_from_slice(&c.max_pic_average_light_level.to_be_bytes());
+            tmap_hdr.clli = Some(b);
+        }
+        m.hdr = true;
+        m.gain_map = Some(MiniGainMap {
+            width: gpic.coded_width,
+            height: gpic.coded_height,
+            matrix_coefficients: gmatrix as u8,
+            full_range: gfull,
+            chroma: chroma_of(gpic.layout.chroma),
+            format: SampleFormat::Integer {
+                bits: gpic.layout.bit_depth,
+            },
+            tmap_cicp,
+            tmap_icc,
+            tmap_hdr,
+            metadata: gm.metadata.serialize(),
+            codec_config: (gcfg != m.main_codec_config).then_some(gcfg),
+            data: gpic.data,
+        });
+    }
+    // The minor version names the brand of the equivalent file (O.2.1.1)
+    // — the form black-box readers key their codec choice on.
+    let minor = match opts.codec {
+        StillCodec::Hevc => crate::ftyp::BRAND_HEIC,
+        StillCodec::Av1 => crate::ftyp::BRAND_AVIF,
+    };
+    m.to_file_with_minor(u32::from_be_bytes(minor))
+}
+
+/// The Exif orientation (1..=8) an `irot` / `imir` chain expresses, in
+/// the order the low-overhead expansion associates them (O.4.6:
+/// `irot` then `imir`).
+fn exif_orientation(transforms: &[Property]) -> Result<u8> {
+    let mut angle = None;
+    let mut axis = None;
+    for t in transforms {
+        match t {
+            Property::Irot(r) if angle.is_none() && axis.is_none() => angle = Some(r.angle & 3),
+            Property::Imir(m) if axis.is_none() => axis = Some(m.axis & 1),
+            other => {
+                return Err(HeifError::unsupported(format!(
+                    "low-overhead file: transform '{}' (or its order) has no Exif orientation",
+                    crate::boxes::fourcc_str(&other.box_type())
+                )))
+            }
+        }
+    }
+    let o = match (angle.unwrap_or(0), axis) {
+        (0, None) => 1,
+        (0, Some(1)) => 2,
+        (2, None) => 3,
+        (0, Some(0)) => 4,
+        (1, Some(0)) => 5,
+        (3, None) => 6,
+        (1, Some(1)) => 7,
+        (1, None) => 8,
+        (a, m) => {
+            return Err(HeifError::unsupported(format!(
+                "low-overhead file: irot {a} + imir {m:?} is not one of the O.4.6 orientations"
+            )))
+        }
+    };
+    Ok(o)
+}
+
 /// Codec options giving the gain-map item's HEVC parameter sets their
 /// own ids (VPS / SPS / PPS 2), for the same reason as the alpha's.
 const GAIN_MAP_HEVC_OPTIONS: &[(&str, &str)] = &[("vpsid", "2"), ("spsid", "2"), ("ppsid", "2")];

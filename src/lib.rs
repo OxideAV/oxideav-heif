@@ -69,6 +69,7 @@ pub mod image;
 pub mod lhvc;
 pub mod meta;
 pub mod miaf;
+pub mod mini;
 pub mod props;
 pub mod rgb;
 pub mod sequence;
@@ -109,7 +110,8 @@ pub use decode::{decode_item, decode_primary, DecodedImage, ItemDecoder};
 pub use demux::{make_decoder, HeifCodec, HeifDemuxer};
 #[cfg(feature = "registry")]
 pub use encode::{
-    encode_still, make_encoder, EncodeOptions, HeifEncoder, HeifEncoderOptions, StillCodec,
+    encode_still, encode_still_minimized, make_encoder, EncodeOptions, HeifEncoder,
+    HeifEncoderOptions, StillCodec,
 };
 #[cfg(feature = "registry")]
 pub use mux::{open_muxer, HeifSequenceMuxer};
