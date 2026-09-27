@@ -433,10 +433,8 @@ pub fn hevc_item_from_annex_b(
 /// and Main 10 (H.265 A.3.2 / A.3.3 compatibility rules).
 fn profile_compat_flags(profile_idc: u8) -> u32 {
     let mut f = 0u32;
-    for p in [profile_idc] {
-        if p < 32 {
-            f |= 1u32 << (31 - p);
-        }
+    if profile_idc < 32 {
+        f |= 1u32 << (31 - profile_idc);
     }
     if profile_idc == 3 || profile_idc == 2 {
         f |= 1u32 << 30; // Main-compatible

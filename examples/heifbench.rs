@@ -2,17 +2,22 @@
 //! wall-clock at default settings for a set of files.
 //!
 //! ```text
-//! heifbench [--runs N] [--no-encode] file.heic [file.avif ...]
+//! heifbench [--runs N] [--threads N|auto] [--no-encode] file.heic [file.avif ...]
 //! ```
 //!
-//! * decode: `HeifFile::parse` + `decode_primary` (direct factories),
-//!   median of N runs (default 3) in this process, plus the peak
+//! * decode: `HeifFile::parse` + `decode_primary` (direct factories,
+//!   under an `ExecutionContext` of `--threads` workers — default 1,
+//!   the serial contract), median of N runs (default 3) in this
+//!   process, plus the peak
 //!   resident set size of a child process that decodes the file once
 //!   (`/usr/bin/time -l` on macOS, `-v` on Linux; `n/a` without it).
 //! * encode: the decoded picture re-encoded with `EncodeOptions`
 //!   defaults for HEVC (`intra` at QP 26) and for AV1 (quality 60,
 //!   `fast`), median of N runs; the AV1 run is skipped for pictures
 //!   above 4 MP unless `--all-encodes` is given (it is slow).
+//!
+//! * hash: FNV-1a 64 over the decoded output planes (the byte-identity
+//!   gate for the optimisation rounds: the value must not move).
 //!
 //! Prints a Markdown table; the README's "Performance baseline"
 //! section carries the last run on the reference machine.
@@ -24,6 +29,17 @@ use std::time::{Duration, Instant};
 use oxideav_heif::decode::{decode_primary, ItemDecoder};
 use oxideav_heif::encode::{encode_still, EncodeOptions, StillCodec};
 use oxideav_heif::HeifFile;
+
+fn fnv1a64(planes: &[oxideav_heif::HeifPlane]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for p in planes {
+        for b in &p.data {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    h
+}
 
 fn median(mut v: Vec<Duration>) -> Duration {
     v.sort();
@@ -39,12 +55,16 @@ fn main() {
     // Child mode: decode once (peak RSS measured by the parent).
     if args[0] == "--child" {
         let bytes = std::fs::read(&args[1]).expect("read");
+        let threads: usize = args.get(2).and_then(|t| t.parse().ok()).unwrap_or(1);
         let f = HeifFile::parse(&bytes).expect("parse");
-        let img = decode_primary(&f, ItemDecoder::direct()).expect("decode");
+        let dec = ItemDecoder::direct()
+            .with_execution_context(&oxideav_core::ExecutionContext::with_threads(threads));
+        let img = decode_primary(&f, dec).expect("decode");
         println!("{}x{}", img.width(), img.height());
         return;
     }
     let mut runs = 3usize;
+    let mut threads = 1usize;
     let mut encode = true;
     let mut all_encodes = false;
     let mut files: Vec<PathBuf> = Vec::new();
@@ -55,14 +75,22 @@ fn main() {
                 runs = args[i + 1].parse().expect("--runs N");
                 i += 1;
             }
+            "--threads" => {
+                threads = match args[i + 1].as_str() {
+                    "auto" => oxideav_core::ExecutionContext::auto().threads,
+                    n => n.parse().expect("--threads N|auto"),
+                };
+                i += 1;
+            }
             "--no-encode" => encode = false,
             "--all-encodes" => all_encodes = true,
             a => files.push(PathBuf::from(a)),
         }
         i += 1;
     }
-    println!("| File | Size | Layout | Items | Decode (median of {runs}) | Peak RSS (decode) | Encode HEVC default | Encode AV1 default |");
-    println!("|---|---|---|---|---|---|---|---|");
+    println!("threads: {threads}");
+    println!("| File | Size | Layout | Items | Decode (median of {runs}) | Peak RSS (decode) | Encode HEVC default | Encode AV1 default | Output FNV-1a |");
+    println!("|---|---|---|---|---|---|---|---|---|");
     for path in files {
         let bytes = std::fs::read(&path).expect("read");
         let mut times = Vec::with_capacity(runs);
@@ -71,7 +99,9 @@ fn main() {
         for _ in 0..runs {
             let t = Instant::now();
             let f = HeifFile::parse(&bytes).expect("parse");
-            let d = decode_primary(&f, ItemDecoder::direct()).expect("decode");
+            let dec = ItemDecoder::direct()
+                .with_execution_context(&oxideav_core::ExecutionContext::with_threads(threads));
+            let d = decode_primary(&f, dec).expect("decode");
             times.push(t.elapsed());
             items = f.meta().map(|m| m.items.len()).unwrap_or(0);
             img = Some(d);
@@ -103,6 +133,7 @@ fn main() {
                 .arg(&exe)
                 .arg("--child")
                 .arg(&path)
+                .arg(threads.to_string())
                 .output()
             {
                 Ok(o) => {
@@ -167,7 +198,7 @@ fn main() {
             }
         }
         println!(
-            "| {} | {} KiB | {} | {} | {:.3} s | {} | {} | {} |",
+            "| {} | {} KiB | {} | {} | {:.3} s | {} | {} | {} | {:016x} |",
             path.file_name().unwrap().to_string_lossy(),
             bytes.len() / 1024,
             layout,
@@ -175,7 +206,8 @@ fn main() {
             decode.as_secs_f64(),
             rss,
             enc_hevc,
-            enc_av1
+            enc_av1,
+            fnv1a64(&img.frame.tight().planes)
         );
     }
 }

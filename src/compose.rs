@@ -77,6 +77,11 @@ fn blit(
         let ph = ph
             .min(dph.saturating_sub(dy >> shy))
             .min(sph.saturating_sub(sy >> shy));
+        if pw == 0 || ph == 0 {
+            // Entirely outside the destination (a grid tile past the
+            // output canvas).
+            continue;
+        }
         let row_bytes = pw as usize * bps;
         for r in 0..ph as usize {
             let s_off =
@@ -215,6 +220,30 @@ pub fn apply_transforms<'a>(
         cur = Some(next);
     }
     Ok(cur.unwrap_or_else(|| f.clone()))
+}
+
+/// [`apply_transforms`] taking the reconstructed image by value: an
+/// item without a (selected) transform hands its image back without a
+/// copy.
+pub fn apply_transforms_owned<'a>(
+    f: HeifFrame,
+    chain: impl IntoIterator<Item = &'a PropertyEntry>,
+    essential_only: bool,
+) -> Result<HeifFrame> {
+    let mut cur = f;
+    for e in chain {
+        if essential_only && !e.essential {
+            continue;
+        }
+        cur = match &e.property {
+            Property::Clap(c) => apply_clap(&cur, c)?,
+            Property::Irot(r) => apply_irot(&cur, r)?,
+            Property::Imir(m) => apply_imir(&cur, m)?,
+            Property::Iscl(s) => apply_iscl(&cur, s)?,
+            _ => continue,
+        };
+    }
+    Ok(cur)
 }
 
 /// Apply an `iscl` property (§6.5.13): the output is
@@ -376,72 +405,143 @@ pub fn composite_grid(desc: &GridDescriptor, tiles: &[HeifFrame]) -> Result<Heif
             desc.columns
         )));
     }
-    let first = &tiles[0];
-    let (tw, th) = (first.width, first.height);
+    let mut canvas = GridCanvas::new(desc);
     for (i, t) in tiles.iter().enumerate() {
+        canvas.place(i, t)?;
+    }
+    canvas.finish()
+}
+
+/// Incremental §6.6.2.3 grid composition: tiles are written straight
+/// into the output canvas as they become available (in any order), so
+/// a caller decoding tiles one by one — or several at once — never
+/// holds more than the canvas plus the tiles in flight. The result is
+/// byte-identical to [`composite_grid`] over the same tiles: the first
+/// tile placed fixes the tile size and layout, odd tile / canvas sizes
+/// in a subsampled layout promote to 4:4:4, tiles are clipped to the
+/// `output_width × output_height` canvas, and an alpha plane (opaque
+/// where a tile has none) appears as soon as one tile carries alpha.
+#[derive(Debug)]
+pub struct GridCanvas {
+    desc: GridDescriptor,
+    /// `(tile width, tile height, layout, promote to 4:4:4)` once the
+    /// first tile is placed.
+    tile: Option<(u32, u32, HeifPixelFormat, bool)>,
+    canvas: Option<HeifFrame>,
+    placed: Vec<bool>,
+}
+
+impl GridCanvas {
+    /// An empty canvas for `desc`.
+    pub fn new(desc: &GridDescriptor) -> Self {
+        Self {
+            desc: *desc,
+            tile: None,
+            canvas: None,
+            placed: vec![false; desc.tile_count()],
+        }
+    }
+
+    /// Place tile `index` (row-major).
+    pub fn place(&mut self, index: usize, t: &HeifFrame) -> Result<()> {
+        if index >= self.placed.len() {
+            return Err(HeifError::invalid(format!(
+                "grid: tile {index} outside the {}x{} layout",
+                self.desc.rows, self.desc.columns
+            )));
+        }
+        let (tw, th, first_fmt, promote) = match self.tile {
+            Some(v) => v,
+            None => {
+                let (tw, th) = (t.width, t.height);
+                let cols = self.desc.columns as u64;
+                let rows = self.desc.rows as u64;
+                if tw as u64 * cols < self.desc.output_width as u64
+                    || th as u64 * rows < self.desc.output_height as u64
+                {
+                    return Err(HeifError::invalid(format!(
+                        "grid: {cols}x{rows} tiles of {tw}x{th} do not cover the {}x{} canvas",
+                        self.desc.output_width, self.desc.output_height
+                    )));
+                }
+                // Odd tile sizes in a subsampled layout put tile origins
+                // on odd chroma positions: promote.
+                let promote = needs_444(t.format.chroma, tw % 2 == 1, th % 2 == 1)
+                    || needs_444(
+                        t.format.chroma,
+                        self.desc.output_width % 2 == 1,
+                        self.desc.output_height % 2 == 1,
+                    );
+                let v = (tw, th, t.format, promote);
+                self.tile = Some(v);
+                v
+            }
+        };
         if t.width != tw || t.height != th {
             return Err(HeifError::invalid(format!(
-                "grid: tile {i} is {}x{}, tile 0 is {tw}x{th}",
+                "grid: tile {index} is {}x{}, the first tile is {tw}x{th}",
                 t.width, t.height
             )));
         }
-        if !same_layout(t, first) {
+        if t.format.chroma != first_fmt.chroma || t.format.bit_depth != first_fmt.bit_depth {
             return Err(HeifError::unsupported(format!(
-                "grid: tile {i} layout {:?} differs from tile 0 {:?}",
-                t.format, first.format
+                "grid: tile {index} layout {:?} differs from the first tile's {:?}",
+                t.format, first_fmt
             )));
         }
-    }
-    let cols = desc.columns as u64;
-    let rows = desc.rows as u64;
-    if tw as u64 * cols < desc.output_width as u64 || th as u64 * rows < desc.output_height as u64 {
-        return Err(HeifError::invalid(format!(
-            "grid: {cols}x{rows} tiles of {tw}x{th} do not cover the {}x{} canvas",
-            desc.output_width, desc.output_height
-        )));
-    }
-    let any_alpha = tiles.iter().any(|t| t.format.has_alpha);
-    // Odd tile sizes in a subsampled layout put tile origins on odd
-    // chroma positions: promote.
-    let promote = needs_444(first.format.chroma, tw % 2 == 1, th % 2 == 1)
-        || needs_444(
-            first.format.chroma,
-            desc.output_width % 2 == 1,
-            desc.output_height % 2 == 1,
-        );
-    let chroma = if promote {
-        Chroma::Yuv444
-    } else {
-        first.format.chroma
-    };
-    let fmt = HeifPixelFormat::new(chroma, first.format.bit_depth, any_alpha)?;
-    let full_w = (tw as u64 * cols) as u32;
-    let full_h = (th as u64 * rows) as u32;
-    let mut canvas = HeifFrame::filled(full_w, full_h, fmt, 0)?;
-    if let Some(a) = fmt.alpha_plane() {
-        let max = fmt.max_value();
-        let plane = &mut canvas.planes[a];
-        if fmt.bytes_per_sample() == 1 {
-            plane.data.fill(max as u8);
-        } else {
-            for px in plane.data.chunks_exact_mut(2) {
-                px.copy_from_slice(&max.to_le_bytes());
-            }
+        if self.canvas.is_none() {
+            let chroma = if promote {
+                Chroma::Yuv444
+            } else {
+                first_fmt.chroma
+            };
+            let fmt = HeifPixelFormat::new(chroma, first_fmt.bit_depth, false)?;
+            self.canvas = Some(HeifFrame::filled(
+                self.desc.output_width,
+                self.desc.output_height,
+                fmt,
+                0,
+            )?);
         }
-    }
-    for (i, t) in tiles.iter().enumerate() {
-        let (r, c) = ((i as u64 / cols) as u32, (i as u64 % cols) as u32);
+        let canvas = self.canvas.as_mut().expect("canvas allocated above");
+        if t.format.has_alpha && !canvas.format.has_alpha {
+            // Tiles without alpha count as opaque.
+            let fmt = canvas.format.with_alpha();
+            let mut alpha = HeifFrame::filled(
+                canvas.width,
+                canvas.height,
+                HeifPixelFormat::new(Chroma::Mono, fmt.bit_depth, false)?,
+                fmt.max_value(),
+            )?;
+            canvas.format = fmt;
+            canvas.planes.push(alpha.planes.remove(0));
+        }
+        let cols = self.desc.columns as usize;
+        let (r, c) = ((index / cols) as u32, (index % cols) as u32);
         let src = if promote {
             std::borrow::Cow::Owned(t.promote_to_444()?)
         } else {
             std::borrow::Cow::Borrowed(t)
         };
-        blit(&mut canvas, (c * tw, r * th), &src, (0, 0), (tw, th));
+        blit(canvas, (c * tw, r * th), &src, (0, 0), (tw, th));
+        self.placed[index] = true;
+        Ok(())
     }
-    if full_w == desc.output_width && full_h == desc.output_height {
-        return Ok(canvas);
+
+    /// The composed image; every tile must have been placed.
+    pub fn finish(self) -> Result<HeifFrame> {
+        if let Some(missing) = self.placed.iter().position(|p| !p) {
+            return Err(HeifError::invalid(format!(
+                "grid: tile {missing} of the {}x{} layout was never placed",
+                self.desc.rows, self.desc.columns
+            )));
+        }
+        let canvas = self
+            .canvas
+            .ok_or_else(|| HeifError::invalid("grid: no tiles"))?;
+        canvas.validate()?;
+        Ok(canvas)
     }
-    crop(&canvas, 0, 0, desc.output_width, desc.output_height)
 }
 
 /// One overlay input: its decoded output image (alpha plane attached

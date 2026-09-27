@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Decode optimisation, phase 1 (byte-identical output; the r462
+  fixture pins and a serial-vs-parallel test over every grid in the
+  corpora are the gate). `ItemDecoder::with_execution_context`: the
+  tiles of a `grid` decode as independent jobs on up to
+  `effective_workers` threads (codec instances made on the workers,
+  each serial) and are written straight into the canvas as they
+  complete; the framework `"heif"` decoder takes the budget from
+  `Decoder::set_execution_context` (serial by default, per the
+  oxideav-core contract). `compose::GridCanvas` composes a grid
+  incrementally at the output size (no full-size canvas + crop, no
+  vector of decoded tiles; `composite_grid` now runs on it);
+  `compose::apply_transforms_owned` returns an untransformed image
+  without a copy; coded reconstructions are moved out of the codec's
+  planes when tight and cached only while another use in the graph
+  follows. 12 MP on an M4 Max (medians of 5): Apple 48-tile grid
+  0.330 s → 0.326 s serial / 0.100 s at 4 / 0.058 s at 8 threads, peak
+  RSS 89 → 52 MiB serial; single-item HEVC 0.294 s / AVIF 0.778 s →
+  0.298 / 0.709 s, RSS 290 / 229 MiB → 290 / 226 MiB (the codecs' own
+  buffers dominate both). `examples/heifbench`: `--threads N|auto` and
+  an output FNV-1a column.
+
 - Identity-matrix items (`matrix_coefficients = 0`, e.g. black-box
   lossless RGB) are planar RGB in the framework: the still stream and
   the decoded frames carry `Gbrp8` / `Gbrp10Le` / `Gbrp12Le` /

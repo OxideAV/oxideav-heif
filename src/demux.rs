@@ -742,6 +742,8 @@ pub struct HeifCodec {
     /// The most recently decoded image's descriptive side (colour,
     /// metadata) for callers holding the concrete type.
     last: Option<decode::DecodedImage>,
+    /// Thread budget from `set_execution_context` (serial by default).
+    exec: oxideav_core::ExecutionContext,
 }
 
 impl HeifCodec {
@@ -752,6 +754,7 @@ impl HeifCodec {
             queue: VecDeque::new(),
             flushed: false,
             last: None,
+            exec: oxideav_core::ExecutionContext::serial(),
         }
     }
 
@@ -761,7 +764,7 @@ impl HeifCodec {
     }
 
     fn item_decoder(&self) -> ItemDecoder<'static> {
-        ItemDecoder::direct()
+        ItemDecoder::direct().with_execution_context(&self.exec)
     }
 }
 
@@ -801,6 +804,12 @@ impl Decoder for HeifCodec {
         self.flushed = false;
         self.last = None;
         Ok(())
+    }
+
+    fn set_execution_context(&mut self, ctx: &oxideav_core::ExecutionContext) {
+        // Grid tiles decode in parallel under this budget (byte-identical
+        // output for every budget).
+        self.exec = ctx.clone();
     }
 }
 

@@ -148,3 +148,62 @@ fn registry_path_decodes_through_a_codec_registry() {
         .decode_coded(&f, &node)
         .is_err());
 }
+
+/// Parallel grid-tile decode is byte-identical to the serial decode for
+/// every thread budget, on every grid of the vendored corpora (Apple's
+/// 512-px tiling included) and through the framework decoder's
+/// `set_execution_context`.
+#[test]
+fn parallel_grid_decode_is_byte_identical_to_serial() {
+    use oxideav_core::{Decoder, ExecutionContext, Frame, Packet, TimeBase};
+    use oxideav_heif::decode::decode_primary;
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for (root, bundle) in all_bundles() {
+        files.push((bundle.to_string(), fixture_bytes(&root, bundle)));
+    }
+    for e in std::fs::read_dir(common::interop_root()).unwrap() {
+        let p = e.unwrap().path();
+        if matches!(
+            p.extension().and_then(|x| x.to_str()),
+            Some("heic") | Some("avif")
+        ) {
+            files.push((p.display().to_string(), std::fs::read(&p).unwrap()));
+        }
+    }
+    let mut grids = 0;
+    for (name, bytes) in &files {
+        let f = HeifFile::parse(bytes).unwrap();
+        let Ok(primary) = f.primary_item() else {
+            continue;
+        };
+        if primary.item_type != *b"grid" {
+            continue;
+        }
+        grids += 1;
+        let serial = decode_primary(&f, ItemDecoder::direct()).unwrap();
+        for threads in [2, 3, 8] {
+            let dec = ItemDecoder::direct()
+                .with_execution_context(&ExecutionContext::with_threads(threads));
+            let par = decode_primary(&f, dec).unwrap();
+            assert_eq!(par.frame, serial.frame, "{name}: {threads} threads");
+        }
+        let mut codec = oxideav_heif::HeifCodec::new(oxideav_core::CodecId::new("heif"));
+        codec.set_execution_context(&ExecutionContext::with_threads(4));
+        codec
+            .send_packet(&Packet::new(0, TimeBase::new(1, 1), bytes.clone()))
+            .unwrap();
+        let Frame::Video(v) = codec.receive_frame().unwrap() else {
+            panic!("{name}: video frame");
+        };
+        let (want, _) = serial.frame.to_core_signalled(&serial.nclx).unwrap();
+        assert_eq!(v.planes.len(), want.planes.len(), "{name}");
+        for (a, b) in v.planes.iter().zip(&want.planes) {
+            assert_eq!(
+                (a.stride, &a.data),
+                (b.stride, &b.data),
+                "{name}: framework decoder"
+            );
+        }
+    }
+    assert!(grids >= 2, "grid fixtures present ({grids})");
+}

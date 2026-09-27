@@ -14,14 +14,15 @@
 //! implementations registered under the same ids are honoured.
 
 use oxideav_core::{
-    CodecId, CodecParameters, CodecRegistry, Decoder, Error as CoreError, Frame, Packet, TimeBase,
+    CodecId, CodecParameters, CodecRegistry, Decoder, Error as CoreError, ExecutionContext, Frame,
+    Packet, TimeBase,
 };
 
 use std::collections::HashMap;
 
 use crate::av1c::Av1Config;
 use crate::compose::{
-    apply_transforms, attach_alpha, composite_grid, composite_overlay, OverlayInput,
+    apply_transforms_owned, attach_alpha, composite_overlay, GridCanvas, OverlayInput,
 };
 use crate::derived::{build_graph, ImageKind, ImageNode};
 use crate::error::{HeifError, Result};
@@ -65,6 +66,7 @@ pub struct ItemDecoder<'r> {
     tone_map: ToneMapOutput,
     reference_white_nits: Option<f64>,
     base_layer_fallback: bool,
+    threads: usize,
 }
 
 impl<'r> ItemDecoder<'r> {
@@ -75,6 +77,7 @@ impl<'r> ItemDecoder<'r> {
             tone_map: ToneMapOutput::Base,
             reference_white_nits: None,
             base_layer_fallback: false,
+            threads: 1,
         }
     }
 
@@ -85,7 +88,23 @@ impl<'r> ItemDecoder<'r> {
             tone_map: ToneMapOutput::Base,
             reference_white_nits: None,
             base_layer_fallback: false,
+            threads: 1,
         }
+    }
+
+    /// Grant a thread budget (oxideav-core's threading contract: serial
+    /// until told otherwise). The independent coded items of a `grid`
+    /// decode on up to [`ExecutionContext::effective_workers`] workers
+    /// at once, each codec instance serial. The output is byte-identical
+    /// to the serial decode for every budget.
+    pub fn with_execution_context(mut self, ctx: &ExecutionContext) -> Self {
+        self.threads = ctx.threads.max(1);
+        self
+    }
+
+    /// The thread budget ([`ItemDecoder::with_execution_context`]).
+    pub fn threads(&self) -> usize {
+        self.threads
     }
 
     /// Select what a decoded `tmap` item yields (see [`ToneMapOutput`]).
@@ -172,6 +191,18 @@ impl<'r> ItemDecoder<'r> {
         file: &HeifFile<D>,
         node: &ImageNode,
     ) -> Result<HeifFrame> {
+        // The codec instance stays serial: handing a single still's
+        // codec the budget measured slower (r463, 12 MP HEVC 0.30 s →
+        // 0.34 s), so the budget is spent on independent items.
+        let job = self.prepare(file, node)?;
+        let dec = self.make(&job.params)?;
+        job.run(dec)
+    }
+
+    /// Everything a coded item's decode needs, gathered from the file
+    /// (the codec instance is made separately, so jobs can run on
+    /// worker threads without touching the file).
+    fn prepare<D: AsRef<[u8]>>(&self, file: &HeifFile<D>, node: &ImageNode) -> Result<CodedJob> {
         let ItemKind::Coded(kind) = classify(node)? else {
             return Err(HeifError::invalid(format!(
                 "item {} is not a coded image",
@@ -209,18 +240,36 @@ impl<'r> ItemDecoder<'r> {
                 node.item.id
             )));
         }
-        let mut dec = self.make(&params)?;
-        let pkt = Packet::new(0, TimeBase::new(1, 1), data)
+        Ok(CodedJob {
+            item_id: node.item.id,
+            params,
+            data,
+            layout,
+            ispe: node.ispe(),
+        })
+    }
+}
+
+/// One coded item's decode, detached from the file.
+struct CodedJob {
+    item_id: u32,
+    params: CodecParameters,
+    data: Vec<u8>,
+    layout: HeifPixelFormat,
+    ispe: Option<(u32, u32)>,
+}
+
+impl CodedJob {
+    fn run(self, mut dec: Box<dyn Decoder>) -> Result<HeifFrame> {
+        let id = self.item_id;
+        let pkt = Packet::new(0, TimeBase::new(1, 1), self.data)
             .with_pts(0)
             .with_keyframe(true);
         dec.send_packet(&pkt).map_err(|e| {
-            HeifError::invalid(format!(
-                "item {}: decoder rejected the payload: {e}",
-                node.item.id
-            ))
+            HeifError::invalid(format!("item {id}: decoder rejected the payload: {e}"))
         })?;
         dec.flush()
-            .map_err(|e| HeifError::invalid(format!("item {}: flush: {e}", node.item.id)))?;
+            .map_err(|e| HeifError::invalid(format!("item {id}: flush: {e}")))?;
         let mut first: Option<oxideav_core::VideoFrame> = None;
         loop {
             match dec.receive_frame() {
@@ -231,21 +280,12 @@ impl<'r> ItemDecoder<'r> {
                 }
                 Ok(_) => {}
                 Err(CoreError::NeedMore) | Err(CoreError::Eof) => break,
-                Err(e) => {
-                    return Err(HeifError::invalid(format!(
-                        "item {}: decode failed: {e}",
-                        node.item.id
-                    )))
-                }
+                Err(e) => return Err(HeifError::invalid(format!("item {id}: decode failed: {e}"))),
             }
         }
-        let vf = first.ok_or_else(|| {
-            HeifError::invalid(format!(
-                "item {}: decoder produced no picture",
-                node.item.id
-            ))
-        })?;
-        frame_from_planes(&vf, layout, node.ispe(), node.item.id)
+        let vf = first
+            .ok_or_else(|| HeifError::invalid(format!("item {id}: decoder produced no picture")))?;
+        frame_from_planes(vf, self.layout, self.ispe, id)
     }
 }
 
@@ -400,32 +440,33 @@ pub fn layout_of(props: &ItemProperties) -> Option<HeifPixelFormat> {
 
 /// Interpret the planes a codec emitted as a tightly packed
 /// [`HeifFrame`] of the announced layout, cropped to `ispe` when the
-/// decoded picture is larger (codecs may emit the coded size).
+/// decoded picture is larger (codecs may emit the coded size). A plane
+/// the codec already emitted tight at the output size is moved, not
+/// copied.
 fn frame_from_planes(
-    vf: &oxideav_core::VideoFrame,
+    vf: oxideav_core::VideoFrame,
     layout: HeifPixelFormat,
     ispe: Option<(u32, u32)>,
     item_id: u32,
 ) -> Result<HeifFrame> {
-    let planes = vf.image_planes();
     let bps = layout.bytes_per_sample();
     let need = layout.plane_count();
-    if planes.len() < need {
+    let image_planes = vf.image_plane_count();
+    if image_planes < need {
         return Err(HeifError::invalid(format!(
-            "item {item_id}: decoder emitted {} planes, layout {:?} needs {need}",
-            planes.len(),
-            layout
+            "item {item_id}: decoder emitted {image_planes} planes, layout {layout:?} needs {need}"
         )));
     }
-    let y = &planes[0];
-    if y.stride == 0 || y.stride % bps != 0 || y.data.is_empty() {
-        return Err(HeifError::invalid(format!(
-            "item {item_id}: luma plane stride {} incompatible with {}-byte samples",
-            y.stride, bps
-        )));
-    }
-    let dec_w = (y.stride / bps) as u32;
-    let dec_h = (y.data.len() / y.stride) as u32;
+    let (dec_w, dec_h) = {
+        let y = &vf.planes[0];
+        if y.stride == 0 || y.stride % bps != 0 || y.data.is_empty() {
+            return Err(HeifError::invalid(format!(
+                "item {item_id}: luma plane stride {} incompatible with {}-byte samples",
+                y.stride, bps
+            )));
+        }
+        ((y.stride / bps) as u32, (y.data.len() / y.stride) as u32)
+    };
     let (w, h) = match ispe {
         Some((iw, ih)) => {
             if iw > dec_w || ih > dec_h {
@@ -438,7 +479,7 @@ fn frame_from_planes(
         None => (dec_w, dec_h),
     };
     let mut out = Vec::with_capacity(need);
-    for (p, src) in planes.iter().take(need).enumerate() {
+    for (p, src) in vf.planes.into_iter().take(need).enumerate() {
         let (pw, ph) = layout.plane_dims(p, w, h);
         let row_bytes = pw as usize * bps;
         if src.stride < row_bytes || src.data.len() < src.stride * (ph as usize - 1) + row_bytes {
@@ -448,10 +489,20 @@ fn frame_from_planes(
                 src.stride
             )));
         }
-        let mut data = Vec::with_capacity(row_bytes * ph as usize);
-        for r in 0..ph as usize {
-            data.extend_from_slice(&src.data[r * src.stride..r * src.stride + row_bytes]);
-        }
+        let tight = row_bytes * ph as usize;
+        let data = if src.stride == row_bytes && src.data.len() == tight {
+            src.data
+        } else if src.stride == row_bytes {
+            let mut d = src.data;
+            d.truncate(tight);
+            d
+        } else {
+            let mut data = Vec::with_capacity(tight);
+            for r in 0..ph as usize {
+                data.extend_from_slice(&src.data[r * src.stride..r * src.stride + row_bytes]);
+            }
+            data
+        };
         out.push(HeifPlane {
             stride: row_bytes,
             data,
@@ -557,41 +608,81 @@ impl DecodedImage {
     }
 }
 
-/// Decodes an item and everything it derives from, caching coded
-/// reconstructions so shared inputs decode once.
+/// Decodes an item and everything it derives from. Coded items used
+/// more than once in the graph (a shared input, an alpha shared by
+/// several masters) are decoded once and kept only until their last
+/// use; single-use reconstructions move through without copies.
 struct Session<'a, 'r, D> {
     file: &'a HeifFile<D>,
     decoder: ItemDecoder<'r>,
     cache: HashMap<u32, HeifFrame>,
+    /// Remaining uses of every coded item of the graph(s) being decoded.
+    uses: HashMap<u32, usize>,
     decodes: usize,
 }
 
+/// Count the coded items `node` reaches through `dimg` inputs and
+/// alpha / depth auxiliaries (the edges [`Session::output`] follows).
+fn count_coded_uses(node: &ImageNode, uses: &mut HashMap<u32, usize>) {
+    if let ImageKind::Coded(_) = node.kind {
+        *uses.entry(node.item.id).or_insert(0) += 1;
+    }
+    for i in &node.inputs {
+        count_coded_uses(i, uses);
+    }
+    if let Some(a) = &node.alpha {
+        count_coded_uses(a, uses);
+    }
+}
+
 impl<D: AsRef<[u8]>> Session<'_, '_, D> {
+    fn count_decode(&mut self, n: usize) -> Result<()> {
+        if self.decodes + n > MAX_ITEM_DECODES {
+            return Err(HeifError::exhausted(format!(
+                "more than {MAX_ITEM_DECODES} coded items in one image"
+            )));
+        }
+        self.decodes += n;
+        Ok(())
+    }
+
+    /// A decoded coded item: from the cache (the last use takes it
+    /// out), or freshly decoded (cached when another use follows).
+    fn coded(&mut self, node: &ImageNode) -> Result<HeifFrame> {
+        let id = node.item.id;
+        let left = self.uses.get(&id).copied().unwrap_or(1).saturating_sub(1);
+        self.uses.insert(id, left);
+        if let Some(f) = self.cache.remove(&id) {
+            if left > 0 {
+                self.cache.insert(id, f.clone());
+            }
+            return Ok(f);
+        }
+        self.count_decode(1)?;
+        let f = self.decoder.decode_coded(self.file, node)?;
+        if left > 0 {
+            self.cache.insert(id, f.clone());
+        }
+        Ok(f)
+    }
+
     /// Reconstructed image of a node (§6.3, first bullet): decoded
     /// picture or derivation result, *before* the node's own
     /// transformative properties.
     fn reconstruct(&mut self, node: &ImageNode) -> Result<HeifFrame> {
         match &node.kind {
-            ImageKind::Coded(_) => {
-                if let Some(f) = self.cache.get(&node.item.id) {
-                    return Ok(f.clone());
-                }
-                if self.decodes >= MAX_ITEM_DECODES {
-                    return Err(HeifError::exhausted(format!(
-                        "more than {MAX_ITEM_DECODES} coded items in one image"
-                    )));
-                }
-                self.decodes += 1;
-                let f = self.decoder.decode_coded(self.file, node)?;
-                self.cache.insert(node.item.id, f.clone());
-                Ok(f)
-            }
+            ImageKind::Coded(_) => self.coded(node),
             ImageKind::Grid(g) => {
-                let mut tiles = Vec::with_capacity(node.inputs.len());
-                for t in &node.inputs {
-                    tiles.push(self.output(t)?);
+                let mut canvas = GridCanvas::new(g);
+                if self.decoder.threads > 1 && self.parallel_tiles(node) {
+                    self.decode_tiles_parallel(&node.inputs, &mut canvas)?;
+                } else {
+                    for (i, t) in node.inputs.iter().enumerate() {
+                        let tile = self.output(t)?;
+                        canvas.place(i, &tile)?;
+                    }
                 }
-                composite_grid(g, &tiles)
+                canvas.finish()
             }
             ImageKind::Overlay(o) => {
                 let mut frames = Vec::with_capacity(node.inputs.len());
@@ -653,6 +744,81 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         }
     }
 
+    /// `true` when every tile of a grid is a plain coded item — no
+    /// transform, auxiliary or unrecognised essential property, used
+    /// once — so the tiles can decode as independent jobs.
+    fn parallel_tiles(&self, grid: &ImageNode) -> bool {
+        grid.inputs.len() > 1
+            && grid.inputs.iter().all(|t| {
+                matches!(t.kind, ImageKind::Coded(_))
+                    && t.alpha.is_none()
+                    && t.properties.transformative().next().is_none()
+                    && t.properties.unsupported_essential().is_empty()
+                    && self.uses.get(&t.item.id).copied().unwrap_or(1) == 1
+                    && !self.cache.contains_key(&t.item.id)
+            })
+    }
+
+    /// Decode the tiles of a grid on up to `threads` workers, placing
+    /// each into `canvas` as it completes (the canvas plus the tiles in
+    /// flight is all that is held). Codec instances are made on the
+    /// workers and run serial; the placement is order-independent, so
+    /// the canvas is byte-identical to the serial decode.
+    fn decode_tiles_parallel(
+        &mut self,
+        tiles: &[ImageNode],
+        canvas: &mut GridCanvas,
+    ) -> Result<()> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Mutex};
+        self.count_decode(tiles.len())?;
+        let mut jobs = Vec::with_capacity(tiles.len());
+        for (i, t) in tiles.iter().enumerate() {
+            self.uses.insert(t.item.id, 0);
+            jobs.push((i, self.decoder.prepare(self.file, t)?));
+        }
+        let workers =
+            ExecutionContext::with_threads(self.decoder.threads).effective_workers(jobs.len());
+        let queue = Mutex::new(jobs.into_iter());
+        let abort = AtomicBool::new(false);
+        let decoder = self.decoder;
+        let (tx, rx) = mpsc::sync_channel::<(usize, Result<HeifFrame>)>(workers);
+        std::thread::scope(|scope| -> Result<()> {
+            for _ in 0..workers {
+                let tx = tx.clone();
+                let (queue, abort) = (&queue, &abort);
+                scope.spawn(move || loop {
+                    if abort.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let next = queue.lock().map(|mut q| q.next()).unwrap_or(None);
+                    let Some((i, job)) = next else {
+                        break;
+                    };
+                    let r = decoder.make(&job.params).and_then(|d| job.run(d));
+                    if tx.send((i, r)).is_err() {
+                        break;
+                    }
+                });
+            }
+            drop(tx);
+            let mut result = Ok(());
+            for (i, r) in rx.iter() {
+                if result.is_err() {
+                    continue;
+                }
+                match r.and_then(|f| canvas.place(i, &f)) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        abort.store(true, Ordering::Relaxed);
+                        result = Err(e);
+                    }
+                }
+            }
+            result
+        })
+    }
+
     /// Output image of a node (§6.3, second bullet): reconstruction
     /// with the transformative chain applied, then the alpha
     /// auxiliary attached (its own output image, §6.9.1).
@@ -670,7 +836,7 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
             )));
         }
         let rec = self.reconstruct(node)?;
-        let mut out = apply_transforms(&rec, node.properties.transformative(), false)?;
+        let mut out = apply_transforms_owned(rec, node.properties.transformative(), false)?;
         if let Some(a) = &node.alpha {
             let alpha = self.output(a)?;
             out = attach_alpha(&out, &alpha)?;
@@ -687,10 +853,23 @@ pub fn decode_item<D: AsRef<[u8]>>(
     decoder: ItemDecoder<'_>,
 ) -> Result<DecodedImage> {
     let node = build_graph(file, item_id)?;
+    let mut uses = HashMap::new();
+    count_coded_uses(&node, &mut uses);
+    if let Some(d) = &node.depth {
+        count_coded_uses(d, &mut uses);
+    }
+    if let Some((_, _, inputs)) = gain_map_target(file, &node)? {
+        if let Some(g) = inputs.get(1) {
+            if let Ok(gain_node) = build_graph(file, *g) {
+                count_coded_uses(&gain_node, &mut uses);
+            }
+        }
+    }
     let mut session = Session {
         file,
         decoder,
         cache: HashMap::new(),
+        uses,
         decodes: 0,
     };
     let frame = session.output(&node)?;
@@ -763,6 +942,37 @@ fn find_gain_map<D: AsRef<[u8]>>(
     session: &mut Session<'_, '_, D>,
 ) -> Result<Option<GainMapAttachment>> {
     let meta = file.meta()?;
+    let Some((tmap_id, body, inputs)) = gain_map_target(file, node)? else {
+        return Ok(None);
+    };
+    if inputs.len() != 2 {
+        return Ok(None);
+    }
+    let Ok(metadata) = crate::gainmap::GainMapMetadata::parse_tmap_body(&body) else {
+        return Ok(None);
+    };
+    let gain_node = build_graph(file, inputs[1])?;
+    let frame = session.output(&gain_node)?;
+    let tmap_props = ItemProperties::resolve(meta, tmap_id)?;
+    Ok(Some(GainMapAttachment {
+        tmap_item_id: tmap_id,
+        gain_map_item_id: inputs[1],
+        metadata,
+        frame,
+        colr: gain_node.properties.nclx().cloned(),
+        alternate_colr: tmap_props.nclx().cloned(),
+    }))
+}
+
+/// The `tmap` item (id, body, `dimg` inputs) whose gain map belongs to
+/// `node`: the node itself when it is a `tmap`, else a `tmap` whose
+/// first input is the node.
+#[allow(clippy::type_complexity)]
+fn gain_map_target<D: AsRef<[u8]>>(
+    file: &HeifFile<D>,
+    node: &ImageNode,
+) -> Result<Option<(u32, Vec<u8>, Vec<u32>)>> {
+    let meta = file.meta()?;
     let (tmap_id, body, inputs): (u32, Vec<u8>, Vec<u32>) = match &node.kind {
         ImageKind::ToneMap(body) => (
             node.item.id,
@@ -783,23 +993,7 @@ fn find_gain_map<D: AsRef<[u8]>>(
             )
         }
     };
-    if inputs.len() != 2 {
-        return Ok(None);
-    }
-    let Ok(metadata) = crate::gainmap::GainMapMetadata::parse_tmap_body(&body) else {
-        return Ok(None);
-    };
-    let gain_node = build_graph(file, inputs[1])?;
-    let frame = session.output(&gain_node)?;
-    let tmap_props = ItemProperties::resolve(meta, tmap_id)?;
-    Ok(Some(GainMapAttachment {
-        tmap_item_id: tmap_id,
-        gain_map_item_id: inputs[1],
-        metadata,
-        frame,
-        colr: gain_node.properties.nclx().cloned(),
-        alternate_colr: tmap_props.nclx().cloned(),
-    }))
+    Ok(Some((tmap_id, body, inputs)))
 }
 
 /// Decode the primary item (`pitm`).
@@ -873,16 +1067,16 @@ mod tests {
                 },
             ],
         };
-        let f = frame_from_planes(&vf, layout, Some((6, 4)), 1).unwrap();
+        let f = frame_from_planes(vf.clone(), layout, Some((6, 4)), 1).unwrap();
         assert_eq!((f.width, f.height), (6, 4));
         assert_eq!(f.planes[0].stride, 6);
         assert_eq!(f.sample(0, 5, 3), 3 * 8 + 5);
         assert_eq!(f.plane_dims(1), (3, 2));
-        assert!(frame_from_planes(&vf, layout, Some((9, 4)), 1).is_err());
-        let g = frame_from_planes(&vf, layout, None, 1).unwrap();
+        assert!(frame_from_planes(vf.clone(), layout, Some((9, 4)), 1).is_err());
+        let g = frame_from_planes(vf.clone(), layout, None, 1).unwrap();
         assert_eq!((g.width, g.height), (8, 8));
         let mono = HeifPixelFormat::new(Chroma::Mono, 8, false).unwrap();
-        let m = frame_from_planes(&vf, mono, Some((8, 8)), 1).unwrap();
+        let m = frame_from_planes(vf, mono, Some((8, 8)), 1).unwrap();
         assert_eq!(m.planes.len(), 1);
     }
 }
