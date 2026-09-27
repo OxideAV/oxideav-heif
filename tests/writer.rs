@@ -390,3 +390,139 @@ fn av1_native_layouts_and_quality() {
     let img = decode_primary(&HeifFile::parse(&q100).unwrap(), ItemDecoder::direct()).unwrap();
     assert_eq!(img.frame, src.without_alpha());
 }
+
+/// HEIF Amd 1:2025 §6.8.11 / §6.8.12 / §6.8.13 entity groups
+/// (`stem`, `pymd`, `rgpa`) and the Amd 1 descriptive properties
+/// (`reve`, `ndwt`, `dadj`, `stag`, `cexg`) write and read back typed;
+/// MIAF Amd 1:2025 Annex A.3 / A.4 display order collapses `altr`
+/// groups.
+#[test]
+fn amd1_entity_groups_and_properties_round_trip() {
+    use oxideav_heif::meta::{PyramidInfo, StereoFallbackPosition};
+    use oxideav_heif::props::{Cexg, Dadj, Ndwt, Reve, Stag, StereoAggressor};
+    let mut w = HeifWriter::new();
+    let mut ids = Vec::new();
+    for i in 0..4u32 {
+        let pic = oxideav_heif::encode::encode_hevc_picture(&picture(64, 48), "pcm", 0).unwrap();
+        let mut props = vec![
+            (pic.config.clone(), true),
+            (
+                Property::Ispe(oxideav_heif::props::Ispe {
+                    width: 64,
+                    height: 48,
+                }),
+                false,
+            ),
+        ];
+        if i == 0 {
+            props.push((
+                Property::Reve(Reve {
+                    surround_luminance: 50_000,
+                    surround_light_x: 3127,
+                    surround_light_y: 3290,
+                    periphery_luminance: 10_000,
+                    periphery_light_x: 3127,
+                    periphery_light_y: 3290,
+                }),
+                false,
+            ));
+            props.push((
+                Property::Ndwt(Ndwt {
+                    diffuse_white_luminance: 2_030_000,
+                }),
+                false,
+            ));
+            props.push((
+                Property::Dadj(Dadj {
+                    disparity_adjustment: -25,
+                }),
+                false,
+            ));
+            props.push((
+                Property::Stag(Stag {
+                    aggressors: vec![StereoAggressor {
+                        aggressor_type: 4,
+                        severity: 90,
+                        sub_type_uri: None,
+                    }],
+                }),
+                false,
+            ));
+            props.push((
+                Property::Cexg(Cexg {
+                    rows: 1,
+                    columns: 1,
+                    tile_width: 64,
+                    tile_height: 48,
+                    large_fields: false,
+                    extent_config: None,
+                }),
+                false,
+            ));
+        }
+        ids.push(w.add_coded_item(*b"hvc1", pic.data.clone(), props));
+    }
+    w.set_primary(ids[0]);
+    w.add_stereo_with_fallback(100, ids[0], ids[1], ids[2], StereoFallbackPosition::Centre);
+    w.add_pyramid(101, vec![ids[3], ids[0]], &[(64, 48)]);
+    w.add_pyramid(102, vec![ids[3], ids[1]], &[(32, 24), (64, 48)]);
+    w.add_entity_group_with_payload(*b"rgpa", 103, 0x2000, vec![], {
+        let mut b = Vec::new();
+        for v in [64u16, 48, 8, 4, 32, 16] {
+            b.extend_from_slice(&v.to_be_bytes());
+        }
+        b
+    });
+    w.add_entity_group(*b"altr", 104, vec![ids[2], ids[1]]);
+    let bytes = w.write_to_vec().unwrap();
+    let f = HeifFile::parse(&bytes).unwrap();
+    let meta = f.meta().unwrap();
+    let g = |id: u32| {
+        meta.entity_groups
+            .iter()
+            .find(|g| g.group_id == id)
+            .unwrap()
+    };
+    assert_eq!(
+        g(100).stereo_with_fallback(),
+        Some((ids[0], ids[1], ids[2], StereoFallbackPosition::Centre))
+    );
+    assert_eq!(g(100).stereo_pair(), Some((ids[0], ids[1])));
+    let p = g(101).pyramid().unwrap().unwrap();
+    assert_eq!(p.tile_sizes, vec![(64, 48)]);
+    assert_eq!(p.tile_size(1), Some((64, 48)));
+    assert_eq!(
+        g(101).flags,
+        PyramidInfo::FLAG_TILE_INFO_PRESENT | PyramidInfo::FLAG_TILE_INFO_CONSTANT
+    );
+    let p2 = g(102).pyramid().unwrap().unwrap();
+    assert_eq!(p2.tile_size(0), Some((32, 24)));
+    assert_eq!(p2.tile_size(1), Some((64, 48)));
+    let area = g(103).region_partition_area().unwrap().unwrap();
+    assert_eq!(
+        (area.top, area.left, area.width, area.height),
+        (8, 4, 32, 16)
+    );
+    assert!(g(104).pyramid().unwrap().is_none());
+    // Display order: item 0, then the altr group at item 1's slot
+    // (its entities in group order), item 3.
+    assert_eq!(
+        meta.display_order(),
+        vec![vec![ids[0]], vec![ids[2], ids[1]], vec![ids[3]]]
+    );
+    let props = oxideav_heif::props::ItemProperties::resolve(meta, ids[0]).unwrap();
+    assert_eq!(props.reve().map(|r| r.surround_luminance), Some(50_000));
+    assert_eq!(
+        props.ndwt().map(|n| n.diffuse_white_luminance),
+        Some(2_030_000)
+    );
+    assert_eq!(props.dadj().map(|d| d.disparity_adjustment), Some(-25));
+    assert_eq!(props.stags().len(), 1);
+    assert_eq!(props.stags()[0].aggressors[0].severity, 90);
+    assert_eq!(props.cexg().map(|c| c.tile_count()), Some(1));
+    // Unknown-to-MIAF descriptive properties do not break conformance.
+    let rep = check(&f, MiafProfile::Miaf).unwrap();
+    assert!(rep.is_conformant(), "{:#?}", rep.violations);
+    let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+    assert_eq!(img.frame, picture(64, 48));
+}

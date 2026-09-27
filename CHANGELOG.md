@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- HEIF Amd 1:2025 / Amd 2:2026 properties and groups, typed with
+  writers: `reve` (§6.5.44), `ndwt` (§6.5.45), `cexg` (§6.5.41,
+  16/32-bit tile fields, optional extent configuration), `dadj`
+  (§6.5.42), `stag` (§6.5.43, aggressor list with URIs), the Amd 2
+  per-channel `pixi` (`px_flags & 1`: `channel_idc`,
+  `component_format`, Table 14 subsampling, labels —
+  `Property::PixiExtended`, `ItemProperties::pixi_channels`; `pixi()`
+  still answers the depths) and `tilC` + `tipa` (§6.11.3). Entity
+  groups keep their post-`entity_id` bytes (`EntityGroup::payload`)
+  with typed readers for `pymd` (§6.8.12 tile sizes), `rgpa`
+  (§6.8.13 area), `stem` (§6.8.11 left / right / monoscopic fallback
+  and its position); `HeifWriter::add_pyramid`,
+  `add_stereo_with_fallback`, `add_entity_group_with_payload`.
+- MIAF Amd 1:2025 Annex A (implementation practices):
+  `Meta::display_order` (A.3 / A.4: displayable masters in `iinf`
+  order with `altr` groups collapsed) and `Track::loop_behaviour`
+  (A.2 Table C.1 from the `elst` `RepeatEdits` flag and the `tkhd`
+  duration, now kept as `Track::repeat_edits` / `track_duration`);
+  `SequenceWriter::looping` / `with_looping` writes the matching
+  `edts` / `tkhd` / `mvhd` durations.
+- Fuzz: `heif_records` covers the new property types, `heif_parse`
+  the group payload readers and the display order, `heif_sequence`
+  the loop behaviour.
+
 - Finals reconcile (ISO/IEC 23008-12:2025/Amd 1:2025, ISO/IEC
   23000-22:2025/Amd 1:2025, ISO/IEC 14496-12:2026 — the published
   texts replace the MPEG drafts the `tmap` / HDR-box work was built

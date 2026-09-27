@@ -18,6 +18,7 @@ fuzz_target!(|data: &[u8]| {
     };
     for t in movie.tracks.iter().take(64) {
         let _ = t.orientation();
+        let _ = t.loop_behaviour();
         let _ = t.is_visual();
         let _ = t.primary_entry();
         let _ = t.sample_duration_total();

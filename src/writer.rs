@@ -85,12 +85,16 @@ pub struct WriterItem {
     pub properties: Vec<(Property, bool)>,
 }
 
+/// A queued entity group: `(grouping_type, group_id, flags, entity ids,
+/// payload after the ids)`.
+type QueuedGroup = (FourCc, u32, u32, Vec<u32>, Vec<u8>);
+
 /// Builder for a still-image / image-collection file.
 #[derive(Clone, Debug, Default)]
 pub struct HeifWriter {
     items: Vec<WriterItem>,
     references: Vec<(FourCc, u32, Vec<u32>)>,
-    entity_groups: Vec<(FourCc, u32, u32, Vec<u32>)>,
+    entity_groups: Vec<QueuedGroup>,
     primary: Option<u32>,
     next_id: u32,
     major_brand: Option<FourCc>,
@@ -435,8 +439,79 @@ impl HeifWriter {
         flags: u32,
         entities: Vec<u32>,
     ) {
-        self.entity_groups
-            .push((grouping_type, group_id, flags & 0x00ff_ffff, entities));
+        self.entity_groups.push((
+            grouping_type,
+            group_id,
+            flags & 0x00ff_ffff,
+            entities,
+            Vec::new(),
+        ));
+    }
+
+    /// Add an entity group whose `EntityToGroupBox` carries a
+    /// grouping-type-specific extension after `entity_id[]` (`payload`;
+    /// e.g. the `pymd` tile sizes or the `rgpa` area).
+    pub fn add_entity_group_with_payload(
+        &mut self,
+        grouping_type: FourCc,
+        group_id: u32,
+        flags: u32,
+        entities: Vec<u32>,
+        payload: Vec<u8>,
+    ) {
+        self.entity_groups.push((
+            grouping_type,
+            group_id,
+            flags & 0x00ff_ffff,
+            entities,
+            payload,
+        ));
+    }
+
+    /// Add an image pyramid group (HEIF Amd 1:2025 §6.8.12): `layers`
+    /// from the lowest-resolution overview to the base image; the tile
+    /// sizes are written per layer, as one constant entry when they
+    /// all agree, or left to derivation when `tile_sizes` is empty.
+    pub fn add_pyramid(&mut self, group_id: u32, layers: Vec<u32>, tile_sizes: &[(u32, u32)]) {
+        let mut flags = 0;
+        let mut payload = Vec::new();
+        if !tile_sizes.is_empty() {
+            flags |= crate::meta::PyramidInfo::FLAG_TILE_INFO_PRESENT;
+            let constant = tile_sizes.iter().all(|t| *t == tile_sizes[0]);
+            let n = if constant {
+                flags |= crate::meta::PyramidInfo::FLAG_TILE_INFO_CONSTANT;
+                1
+            } else {
+                layers.len()
+            };
+            for i in 0..n {
+                let (x, y) = tile_sizes.get(i).copied().unwrap_or(tile_sizes[0]);
+                payload.extend_from_slice(&x.to_be_bytes());
+                payload.extend_from_slice(&y.to_be_bytes());
+            }
+        }
+        self.add_entity_group_with_payload(*b"pymd", group_id, flags, layers, payload);
+    }
+
+    /// Add a stereo pair with monoscopic fallback (HEIF Amd 1:2025
+    /// §6.8.11): `[left, right, fallback]` with the fallback position
+    /// in `flags & 3`.
+    pub fn add_stereo_with_fallback(
+        &mut self,
+        group_id: u32,
+        left: u32,
+        right: u32,
+        fallback: u32,
+        position: crate::meta::StereoFallbackPosition,
+    ) {
+        use crate::meta::StereoFallbackPosition as P;
+        let flags = match position {
+            P::Unspecified => 0,
+            P::Left => 1,
+            P::Right => 2,
+            P::Centre => 3,
+        };
+        self.add_entity_group_with_flags(*b"stem", group_id, flags, vec![left, right, fallback]);
     }
 
     /// Mark an item hidden (`infe` flags bit 0).
@@ -639,12 +714,13 @@ impl HeifWriter {
             Vec::new()
         } else {
             let mut body = Vec::new();
-            for (t, gid, flags, ents) in &self.entity_groups {
+            for (t, gid, flags, ents, payload) in &self.entity_groups {
                 let mut b = gid.to_be_bytes().to_vec();
                 b.extend_from_slice(&(ents.len() as u32).to_be_bytes());
                 for e in ents {
                     b.extend_from_slice(&e.to_be_bytes());
                 }
+                b.extend_from_slice(payload);
                 body.extend(full_boxed(t, 0, *flags, &b));
             }
             boxed(b"grpl", &body)
@@ -932,6 +1008,15 @@ pub struct SequenceWriter {
     pub cover_sample: Option<usize>,
     /// Alpha auxiliary track (track 2).
     pub alpha: Option<SequenceAlphaTrack>,
+    /// Looping signalled through an edit list (MIAF Amd 1:2025 Annex
+    /// A.2 / ISO/IEC 14496-12 §8.6.6.1 `RepeatEdits`): `None` writes
+    /// no `edts` (viewers play such a sequence indefinitely);
+    /// [`crate::sequence::LoopBehaviour::Times`] writes an `elst`
+    /// covering the media once with `RepeatEdits` set and the track
+    /// duration multiplied (clear, and the single pass, for `Times(1)`);
+    /// [`crate::sequence::LoopBehaviour::Forever`] sets `RepeatEdits`
+    /// with the all-ones (indefinite) track duration.
+    pub looping: Option<crate::sequence::LoopBehaviour>,
 }
 
 impl SequenceWriter {
@@ -956,7 +1041,14 @@ impl SequenceWriter {
             brands: None,
             cover_sample: None,
             alpha: None,
+            looping: None,
         }
+    }
+
+    /// Set the looping behaviour (see [`SequenceWriter::looping`]).
+    pub fn with_looping(mut self, looping: crate::sequence::LoopBehaviour) -> Self {
+        self.looping = Some(looping);
+        self
     }
 
     /// Override the brands (see [`SequenceWriter::brands`]).
@@ -1099,7 +1191,7 @@ impl SequenceWriter {
         let mvhd = {
             let mut b = vec![0u8; 8];
             b.extend_from_slice(&ts.to_be_bytes());
-            b.extend_from_slice(&(total.min(u32::MAX as u64) as u32).to_be_bytes());
+            b.extend_from_slice(&looping_boxes(self.looping, total).0.to_be_bytes());
             b.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // rate
             b.extend_from_slice(&0x0100u16.to_be_bytes()); // volume
             b.extend_from_slice(&[0u8; 10]);
@@ -1123,6 +1215,7 @@ impl SequenceWriter {
             coding_constraints: self.coding_constraints,
             samples: &self.samples,
             tref_auxl: None,
+            looping: self.looping,
         };
         let alpha = self.alpha.as_ref().map(|a| TrackSpec {
             track_id: 2,
@@ -1138,6 +1231,7 @@ impl SequenceWriter {
             coding_constraints: self.coding_constraints,
             samples: &a.samples,
             tref_auxl: Some(1),
+            looping: self.looping,
         });
         let master_len: u64 = self.samples.iter().map(|s| s.data.len() as u64).sum();
         let moov_for = |base: u64| -> Vec<u8> {
@@ -1203,16 +1297,38 @@ struct TrackSpec<'a> {
     coding_constraints: (bool, bool, u8),
     samples: &'a [SequenceSample],
     tref_auxl: Option<u32>,
+    looping: Option<crate::sequence::LoopBehaviour>,
+}
+
+/// `(tkhd duration, edts box)` for a looping setting over a media
+/// duration `total` (movie timescale == media timescale here).
+fn looping_boxes(looping: Option<crate::sequence::LoopBehaviour>, total: u64) -> (u32, Vec<u8>) {
+    use crate::sequence::LoopBehaviour as L;
+    let clamp = |d: u64| d.min(u32::MAX as u64 - 1) as u32;
+    let elst = |repeat: bool| {
+        let mut b = 1u32.to_be_bytes().to_vec();
+        b.extend_from_slice(&clamp(total).to_be_bytes()); // segment_duration
+        b.extend_from_slice(&0u32.to_be_bytes()); // media_time
+        b.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // media_rate 1.0
+        boxed(b"edts", &full_boxed(b"elst", 0, repeat as u32, &b))
+    };
+    match looping {
+        None => (clamp(total), Vec::new()),
+        Some(L::Times(1)) => (clamp(total), elst(false)),
+        Some(L::Times(n)) => (clamp(total.saturating_mul(n)), elst(true)),
+        Some(L::Forever) => (u32::MAX, elst(true)),
+    }
 }
 
 /// Serialize a `trak` whose single chunk starts at `chunk_offset`.
 fn trak_box(t: &TrackSpec<'_>, ts: u32, chunk_offset: u64) -> Vec<u8> {
     let total: u64 = t.samples.iter().map(|s| s.duration as u64).sum();
+    let (tkhd_duration, edts) = looping_boxes(t.looping, total);
     let tkhd = {
         let mut b = vec![0u8; 8];
         b.extend_from_slice(&t.track_id.to_be_bytes());
         b.extend_from_slice(&[0u8; 4]);
-        b.extend_from_slice(&(total.min(u32::MAX as u64) as u32).to_be_bytes());
+        b.extend_from_slice(&tkhd_duration.to_be_bytes());
         b.extend_from_slice(&[0u8; 8]);
         b.extend_from_slice(&[0u8; 8]); // layer, alternate_group, volume, reserved
         for m in [0x10000u32, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000] {
@@ -1355,6 +1471,7 @@ fn trak_box(t: &TrackSpec<'_>, ts: u32, chunk_offset: u64) -> Vec<u8> {
     let mut trak = Vec::new();
     trak.extend_from_slice(&tkhd);
     trak.extend_from_slice(&tref);
+    trak.extend_from_slice(&edts);
     trak.extend(boxed(b"mdia", &mdia));
     boxed(b"trak", &trak)
 }

@@ -472,6 +472,159 @@ pub struct Altt {
     pub alt_lang: String,
 }
 
+/// `reve` — reference viewing environment (HEIF Amd 1:2025 §6.5.44):
+/// luminance (0.0001 cd/m²) and CIE 1931 chromaticity (0.0001 steps,
+/// 0..=10000) of the display's surround and periphery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reve {
+    /// `surround_luminance`.
+    pub surround_luminance: u32,
+    /// `surround_light_x`.
+    pub surround_light_x: u16,
+    /// `surround_light_y`.
+    pub surround_light_y: u16,
+    /// `periphery_luminance`.
+    pub periphery_luminance: u32,
+    /// `periphery_light_x`.
+    pub periphery_light_x: u16,
+    /// `periphery_light_y`.
+    pub periphery_light_y: u16,
+}
+
+/// `ndwt` — nominal diffuse white (HEIF Amd 1:2025 §6.5.45).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ndwt {
+    /// `diffuse_white_luminance` in 0.0001 cd/m²; 0 = the ISO/TS
+    /// 22028-5 default.
+    pub diffuse_white_luminance: u32,
+}
+
+/// `cexg` — constrained extents grid (HEIF Amd 1:2025 §6.5.41): every
+/// `iloc` extent of the item is one independently decodable tile of a
+/// `rows × columns` grid in row-major order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cexg {
+    /// `rows_minus_one + 1`.
+    pub rows: u32,
+    /// `columns_minus_one + 1`.
+    pub columns: u32,
+    /// `image_tile_width`.
+    pub tile_width: u32,
+    /// `image_tile_height`.
+    pub tile_height: u32,
+    /// `field_length_flag` (32-bit tile dimensions on the wire).
+    pub large_fields: bool,
+    /// `ExtentDecoderConfigurationRecord` when
+    /// `tile_config_info_present_flag` is set (codec-specific, raw).
+    pub extent_config: Option<Vec<u8>>,
+}
+
+impl Cexg {
+    /// The number of extents / tiles the property announces.
+    pub fn tile_count(&self) -> usize {
+        self.rows as usize * self.columns as usize
+    }
+}
+
+/// `dadj` — disparity adjustment for a stereo pair (HEIF Amd 1:2025
+/// §6.5.42), in units of 1/10 000 image widths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Dadj {
+    /// `disparity_adjustment`.
+    pub disparity_adjustment: i32,
+}
+
+/// One stereo aggressor (HEIF Amd 1:2025 §6.5.43).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StereoAggressor {
+    /// `aggressor_type` (Table 1: 0 unspecified, 1 lens occlusion, 2
+    /// image condition mismatch, 3 stereo window violation, 4 objects
+    /// too close, 5 calibration error, 6 temporal alignment mismatch,
+    /// 7 poor image quality; 8..=255 reserved).
+    pub aggressor_type: u8,
+    /// `aggressor_severity` (0 unknown, 1..=42 mild, 43..=84 medium,
+    /// 85..=127 high).
+    pub severity: u8,
+    /// `sub_type_uri` when `sub_type_present`.
+    pub sub_type_uri: Option<String>,
+}
+
+/// `stag` — stereo aggressors (HEIF Amd 1:2025 §6.5.43).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stag {
+    /// The aggressors (one or more).
+    pub aggressors: Vec<StereoAggressor>,
+}
+
+/// Per-channel description of a `pixi` with `px_flags & 1` (HEIF Amd
+/// 2:2026 §6.5.6).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PixiChannel {
+    /// `channel_idc` (Table 13: 0 unused, 1 unspecified, 2 / 3 / 4
+    /// first / second / third colour channel, 5 alpha, 6 depth, 7
+    /// fourth colour channel).
+    pub channel_idc: u8,
+    /// `component_format` (ISO/IEC 23001-17 values: 0 unsigned
+    /// integer, 1 floating point, …).
+    pub component_format: u8,
+    /// `(subsampling_type, subsampling_location)` when
+    /// `subsampling_flag` is set (Table 14).
+    pub subsampling: Option<(u8, u8)>,
+    /// `channel_label` when `channel_label_flag` is set.
+    pub label: Option<String>,
+}
+
+/// `pixi` with the Amd 2:2026 per-channel extension (`px_flags & 1`):
+/// the depths plus content / format / subsampling per channel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PixiExtended {
+    /// The depths (`num_channels` × `bits_per_channel`).
+    pub pixi: Pixi,
+    /// One entry per channel, in `bits_per_channel` order.
+    pub channels: Vec<PixiChannel>,
+}
+
+/// `tilC` — tiled image configuration (HEIF Amd 2:2026 §6.11.3), the
+/// mandatory property of a `tili` item.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TilC {
+    /// `tile_width`.
+    pub tile_width: u32,
+    /// `tile_height`.
+    pub tile_height: u32,
+    /// `dimension_size[]` of the extra (non-spatial) dimensions.
+    pub extra_dimensions: Vec<u32>,
+    /// `tile_item_type` + `TileItemPropertyAssociationBox` entries
+    /// `(essential, property_index)`, present when the tiles are stored
+    /// in this file (`external_tiles_urls == 0`).
+    pub in_file_tiles: Option<(FourCc, Vec<(bool, u16)>)>,
+}
+
+impl TilC {
+    /// Tiles per row / column for an `ispe` of `width × height`
+    /// (§6.11.5.3: `ceil(image_width / tile_width)` ×
+    /// `ceil(image_height / tile_height)`, times the extra dimensions).
+    pub fn tile_grid(&self, width: u32, height: u32) -> Option<(u32, u32)> {
+        if self.tile_width == 0 || self.tile_height == 0 {
+            return None;
+        }
+        Some((
+            width.div_ceil(self.tile_width),
+            height.div_ceil(self.tile_height),
+        ))
+    }
+
+    /// `NumTiles` for an `ispe` of `width × height`.
+    pub fn tile_count(&self, width: u32, height: u32) -> Option<u64> {
+        let (c, r) = self.tile_grid(width, height)?;
+        let mut n = c as u64 * r as u64;
+        for d in &self.extra_dimensions {
+            n = n.checked_mul(*d as u64)?;
+        }
+        Some(n)
+    }
+}
+
 /// One typed property.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Property {
@@ -531,6 +684,21 @@ pub enum Property {
     Udes(Udes),
     /// `altt`.
     Altt(Altt),
+    /// `reve` (HEIF Amd 1:2025 §6.5.44).
+    Reve(Reve),
+    /// `ndwt` (HEIF Amd 1:2025 §6.5.45).
+    Ndwt(Ndwt),
+    /// `cexg` (HEIF Amd 1:2025 §6.5.41).
+    Cexg(Cexg),
+    /// `dadj` (HEIF Amd 1:2025 §6.5.42).
+    Dadj(Dadj),
+    /// `stag` (HEIF Amd 1:2025 §6.5.43).
+    Stag(Stag),
+    /// `pixi` with `px_flags & 1` (HEIF Amd 2:2026 §6.5.6); the plain
+    /// form stays [`Property::Pixi`].
+    PixiExtended(PixiExtended),
+    /// `tilC` (HEIF Amd 2:2026 §6.11.3).
+    TilC(TilC),
     /// A property type this crate does not model (raw box kept).
     Unknown(RawProperty),
 }
@@ -567,6 +735,13 @@ impl Property {
             Property::Mdft(_) => *b"mdft",
             Property::Udes(_) => *b"udes",
             Property::Altt(_) => *b"altt",
+            Property::Reve(_) => *b"reve",
+            Property::Ndwt(_) => *b"ndwt",
+            Property::Cexg(_) => *b"cexg",
+            Property::Dadj(_) => *b"dadj",
+            Property::Stag(_) => *b"stag",
+            Property::PixiExtended(_) => *b"pixi",
+            Property::TilC(_) => *b"tilC",
             Property::Unknown(r) => r.box_type,
         }
     }
@@ -590,7 +765,7 @@ impl Property {
         let b = raw.body.as_slice();
         let p = match &raw.box_type {
             b"ispe" => Property::Ispe(parse_ispe(b)?),
-            b"pixi" => Property::Pixi(parse_pixi(b)?),
+            b"pixi" => parse_pixi(b)?,
             b"colr" => Property::Colr(parse_colr(b)?),
             b"pasp" => Property::Pasp(parse_pasp(b)?),
             b"clap" => Property::Clap(parse_clap(b)?),
@@ -635,6 +810,12 @@ impl Property {
             b"mdft" => Property::Mdft(parse_time(b, "mdft")?),
             b"udes" => Property::Udes(parse_udes(b)?),
             b"altt" => Property::Altt(parse_altt(b)?),
+            b"reve" => Property::Reve(parse_reve(b)?),
+            b"ndwt" => Property::Ndwt(parse_ndwt(b)?),
+            b"cexg" => Property::Cexg(parse_cexg(b)?),
+            b"dadj" => Property::Dadj(parse_dadj(b)?),
+            b"stag" => Property::Stag(parse_stag(b)?),
+            b"tilC" => Property::TilC(parse_tilc(b)?),
             _ => Property::Unknown(raw.clone()),
         };
         Ok(p)
@@ -734,6 +915,66 @@ impl ItemProperties {
     pub fn pixi(&self) -> Option<&Pixi> {
         self.descriptive().find_map(|e| match &e.property {
             Property::Pixi(v) => Some(v),
+            Property::PixiExtended(v) => Some(&v.pixi),
+            _ => None,
+        })
+    }
+
+    /// The per-channel `pixi` description (HEIF Amd 2:2026 §6.5.6,
+    /// `px_flags & 1`), when the item's `pixi` carries one.
+    pub fn pixi_channels(&self) -> Option<&[PixiChannel]> {
+        self.descriptive().find_map(|e| match &e.property {
+            Property::PixiExtended(v) => Some(v.channels.as_slice()),
+            _ => None,
+        })
+    }
+
+    /// `reve` (HEIF Amd 1:2025 §6.5.44).
+    pub fn reve(&self) -> Option<Reve> {
+        self.descriptive().find_map(|e| match &e.property {
+            Property::Reve(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    /// `ndwt` (HEIF Amd 1:2025 §6.5.45).
+    pub fn ndwt(&self) -> Option<Ndwt> {
+        self.descriptive().find_map(|e| match &e.property {
+            Property::Ndwt(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    /// `cexg` (HEIF Amd 1:2025 §6.5.41).
+    pub fn cexg(&self) -> Option<&Cexg> {
+        self.descriptive().find_map(|e| match &e.property {
+            Property::Cexg(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// `dadj` (HEIF Amd 1:2025 §6.5.42).
+    pub fn dadj(&self) -> Option<Dadj> {
+        self.descriptive().find_map(|e| match &e.property {
+            Property::Dadj(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    /// Every `stag` (HEIF Amd 1:2025 §6.5.43; zero or more per item).
+    pub fn stags(&self) -> Vec<&Stag> {
+        self.descriptive()
+            .filter_map(|e| match &e.property {
+                Property::Stag(v) => Some(v),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `tilC` (HEIF Amd 2:2026 §6.11.3).
+    pub fn tilc(&self) -> Option<&TilC> {
+        self.descriptive().find_map(|e| match &e.property {
+            Property::TilC(v) => Some(v),
             _ => None,
         })
     }
@@ -971,15 +1212,207 @@ fn parse_ispe(b: &[u8]) -> Result<Ispe> {
     })
 }
 
-fn parse_pixi(b: &[u8]) -> Result<Pixi> {
-    let (v, _f, body) = parse_full_box(b)?;
+fn parse_pixi(b: &[u8]) -> Result<Property> {
+    let (v, flags, body) = parse_full_box(b)?;
     if v != 0 {
         return Err(HeifError::invalid(format!("pixi version {v}")));
     }
     let mut r = Reader::new(body);
     let n = r.u8("pixi num_channels")? as usize;
-    Ok(Pixi {
+    let pixi = Pixi {
         bits_per_channel: r.bytes(n, "pixi bits_per_channel")?.to_vec(),
+    };
+    if flags & 1 == 0 {
+        return Ok(Property::Pixi(pixi));
+    }
+    // Amd 2:2026 §6.5.6.2: one bit-packed record per channel, each
+    // byte-aligned by construction (3+1+2+1+1 bits, then an optional
+    // 4+4 subsampling byte and an optional utf8string).
+    let mut channels = Vec::with_capacity(n);
+    for _ in 0..n {
+        let head = r.u8("pixi channel record")?;
+        let channel_idc = head >> 5;
+        let component_format = (head >> 2) & 0x03;
+        let subsampling_flag = head & 0x02 != 0;
+        let label_flag = head & 0x01 != 0;
+        let subsampling = if subsampling_flag {
+            let ss = r.u8("pixi subsampling")?;
+            Some((ss >> 4, ss & 0x0f))
+        } else {
+            None
+        };
+        let label = if label_flag {
+            Some(r.cstr("pixi channel_label")?)
+        } else {
+            None
+        };
+        channels.push(PixiChannel {
+            channel_idc,
+            component_format,
+            subsampling,
+            label,
+        });
+    }
+    Ok(Property::PixiExtended(PixiExtended { pixi, channels }))
+}
+
+fn parse_reve(b: &[u8]) -> Result<Reve> {
+    let (v, _f, body) = parse_full_box(b)?;
+    if v != 0 {
+        return Err(HeifError::invalid(format!("reve version {v}")));
+    }
+    let mut r = Reader::new(body);
+    Ok(Reve {
+        surround_luminance: r.u32("reve surround_luminance")?,
+        surround_light_x: r.u16("reve surround_light_x")?,
+        surround_light_y: r.u16("reve surround_light_y")?,
+        periphery_luminance: r.u32("reve periphery_luminance")?,
+        periphery_light_x: r.u16("reve periphery_light_x")?,
+        periphery_light_y: r.u16("reve periphery_light_y")?,
+    })
+}
+
+fn parse_ndwt(b: &[u8]) -> Result<Ndwt> {
+    let (v, _f, body) = parse_full_box(b)?;
+    if v != 0 {
+        return Err(HeifError::invalid(format!("ndwt version {v}")));
+    }
+    Ok(Ndwt {
+        diffuse_white_luminance: Reader::new(body).u32("ndwt diffuse_white_luminance")?,
+    })
+}
+
+fn parse_cexg(b: &[u8]) -> Result<Cexg> {
+    let (v, flags, body) = parse_full_box(b)?;
+    if v != 0 {
+        return Err(HeifError::invalid(format!("cexg version {v}")));
+    }
+    let large_fields = flags & 1 != 0;
+    let mut r = Reader::new(body);
+    let rows = r.u16("cexg rows_minus_one")? as u32 + 1;
+    let columns = r.u16("cexg columns_minus_one")? as u32 + 1;
+    let (tile_width, tile_height) = if large_fields {
+        (
+            r.u32("cexg image_tile_width")?,
+            r.u32("cexg image_tile_height")?,
+        )
+    } else {
+        (
+            r.u16("cexg image_tile_width")? as u32,
+            r.u16("cexg image_tile_height")? as u32,
+        )
+    };
+    let extent_config = if flags & 2 != 0 {
+        Some(r.rest().to_vec())
+    } else {
+        None
+    };
+    Ok(Cexg {
+        rows,
+        columns,
+        tile_width,
+        tile_height,
+        large_fields,
+        extent_config,
+    })
+}
+
+fn parse_dadj(b: &[u8]) -> Result<Dadj> {
+    let (v, _f, body) = parse_full_box(b)?;
+    if v != 0 {
+        return Err(HeifError::invalid(format!("dadj version {v}")));
+    }
+    Ok(Dadj {
+        disparity_adjustment: Reader::new(body).i32("dadj disparity_adjustment")?,
+    })
+}
+
+fn parse_stag(b: &[u8]) -> Result<Stag> {
+    let (v, _f, body) = parse_full_box(b)?;
+    if v != 0 {
+        return Err(HeifError::invalid(format!("stag version {v}")));
+    }
+    let mut r = Reader::new(body);
+    let n = r.u8("stag aggressor_count_minus_one")? as usize + 1;
+    let mut aggressors = Vec::with_capacity(n);
+    for _ in 0..n {
+        let aggressor_type = r.u8("stag aggressor_type")?;
+        let sev = r.u8("stag aggressor_severity")?;
+        let sub_type_uri = if sev & 0x80 != 0 {
+            Some(r.cstr("stag sub_type_uri")?)
+        } else {
+            None
+        };
+        aggressors.push(StereoAggressor {
+            aggressor_type,
+            severity: sev & 0x7f,
+            sub_type_uri,
+        });
+    }
+    Ok(Stag { aggressors })
+}
+
+/// Upper bound on `number_of_extra_dimensions` accepted in `tilC`.
+pub const MAX_TILC_DIMENSIONS: usize = 16;
+
+fn parse_tilc(b: &[u8]) -> Result<TilC> {
+    let (v, _f, body) = parse_full_box(b)?;
+    if v != 0 {
+        return Err(HeifError::invalid(format!("tilC version {v}")));
+    }
+    let mut r = Reader::new(body);
+    let tile_width = r.u32("tilC tile_width")?;
+    let tile_height = r.u32("tilC tile_height")?;
+    let nd = r.u8("tilC number_of_extra_dimensions")? as usize;
+    if nd > MAX_TILC_DIMENSIONS {
+        return Err(HeifError::exhausted(format!(
+            "tilC declares {nd} extra dimensions (cap {MAX_TILC_DIMENSIONS})"
+        )));
+    }
+    let mut extra_dimensions = Vec::with_capacity(nd);
+    for _ in 0..nd {
+        extra_dimensions.push(r.u32("tilC dimension_size")?);
+    }
+    // §6.11.3.2: tile_item_type + tipa follow only for in-file tiles
+    // (a property cannot see the dref entry, so their presence is
+    // read from the remaining bytes).
+    let in_file_tiles = if r.is_empty() {
+        None
+    } else {
+        let tile_item_type = r.fourcc("tilC tile_item_type")?;
+        let (tv, tflags, tbody) = {
+            let h = crate::boxes::parse_box_header(r.rest(), 0)?;
+            if &h.box_type != b"tipa" {
+                return Err(HeifError::invalid(format!(
+                    "tilC: expected a tipa box, found '{}'",
+                    fourcc_str(&h.box_type)
+                )));
+            }
+            let p = crate::boxes::payload(r.rest(), &h);
+            parse_full_box(p)?
+        };
+        if tv != 0 {
+            return Err(HeifError::invalid(format!("tipa version {tv}")));
+        }
+        let mut t = Reader::new(tbody);
+        let count = t.u8("tipa association_count")? as usize;
+        let mut assoc = Vec::with_capacity(count);
+        for _ in 0..count {
+            if tflags & 1 != 0 {
+                let w = t.u16("tipa property_index")?;
+                assoc.push((w & 0x8000 != 0, w & 0x7fff));
+            } else {
+                let w = t.u8("tipa property_index")?;
+                assoc.push((w & 0x80 != 0, (w & 0x7f) as u16));
+            }
+        }
+        Some((tile_item_type, assoc))
+    };
+    Ok(TilC {
+        tile_width,
+        tile_height,
+        extra_dimensions,
+        in_file_tiles,
     })
 }
 
@@ -1424,6 +1857,99 @@ pub mod write {
                 b.push(0);
                 full_boxed(b"altt", 0, 0, &b)
             }
+            Property::Reve(r) => {
+                let mut b = r.surround_luminance.to_be_bytes().to_vec();
+                b.extend_from_slice(&r.surround_light_x.to_be_bytes());
+                b.extend_from_slice(&r.surround_light_y.to_be_bytes());
+                b.extend_from_slice(&r.periphery_luminance.to_be_bytes());
+                b.extend_from_slice(&r.periphery_light_x.to_be_bytes());
+                b.extend_from_slice(&r.periphery_light_y.to_be_bytes());
+                full_boxed(b"reve", 0, 0, &b)
+            }
+            Property::Ndwt(n) => {
+                full_boxed(b"ndwt", 0, 0, &n.diffuse_white_luminance.to_be_bytes())
+            }
+            Property::Cexg(c) => {
+                let mut b = ((c.rows.max(1) - 1) as u16).to_be_bytes().to_vec();
+                b.extend_from_slice(&((c.columns.max(1) - 1) as u16).to_be_bytes());
+                if c.large_fields {
+                    b.extend_from_slice(&c.tile_width.to_be_bytes());
+                    b.extend_from_slice(&c.tile_height.to_be_bytes());
+                } else {
+                    b.extend_from_slice(&(c.tile_width as u16).to_be_bytes());
+                    b.extend_from_slice(&(c.tile_height as u16).to_be_bytes());
+                }
+                let mut flags = c.large_fields as u32;
+                if let Some(cfg) = &c.extent_config {
+                    flags |= 2;
+                    b.extend_from_slice(cfg);
+                }
+                full_boxed(b"cexg", 0, flags, &b)
+            }
+            Property::Dadj(d) => full_boxed(b"dadj", 0, 0, &d.disparity_adjustment.to_be_bytes()),
+            Property::Stag(s) => {
+                let n = s.aggressors.len().clamp(1, 256);
+                let mut b = vec![(n - 1) as u8];
+                for a in s.aggressors.iter().take(n) {
+                    b.push(a.aggressor_type);
+                    let mut sev = a.severity & 0x7f;
+                    if a.sub_type_uri.is_some() {
+                        sev |= 0x80;
+                    }
+                    b.push(sev);
+                    if let Some(u) = &a.sub_type_uri {
+                        b.extend_from_slice(u.as_bytes());
+                        b.push(0);
+                    }
+                }
+                full_boxed(b"stag", 0, 0, &b)
+            }
+            Property::PixiExtended(p) => {
+                let mut b = vec![p.pixi.bits_per_channel.len() as u8];
+                b.extend_from_slice(&p.pixi.bits_per_channel);
+                for c in p.channels.iter().take(p.pixi.bits_per_channel.len()) {
+                    let mut head = (c.channel_idc & 0x07) << 5 | (c.component_format & 0x03) << 2;
+                    if c.subsampling.is_some() {
+                        head |= 0x02;
+                    }
+                    if c.label.is_some() {
+                        head |= 0x01;
+                    }
+                    b.push(head);
+                    if let Some((t, l)) = c.subsampling {
+                        b.push((t & 0x0f) << 4 | (l & 0x0f));
+                    }
+                    if let Some(l) = &c.label {
+                        b.extend_from_slice(l.as_bytes());
+                        b.push(0);
+                    }
+                }
+                full_boxed(b"pixi", 0, 1, &b)
+            }
+            Property::TilC(t) => {
+                let mut b = t.tile_width.to_be_bytes().to_vec();
+                b.extend_from_slice(&t.tile_height.to_be_bytes());
+                b.push(t.extra_dimensions.len() as u8);
+                for d in &t.extra_dimensions {
+                    b.extend_from_slice(&d.to_be_bytes());
+                }
+                if let Some((ty, assoc)) = &t.in_file_tiles {
+                    b.extend_from_slice(ty);
+                    let wide = assoc.iter().any(|(_, i)| *i > 127);
+                    let mut tb = vec![assoc.len() as u8];
+                    for (ess, idx) in assoc {
+                        if wide {
+                            tb.extend_from_slice(
+                                &((*ess as u16) << 15 | (idx & 0x7fff)).to_be_bytes(),
+                            );
+                        } else {
+                            tb.push((*ess as u8) << 7 | (*idx as u8 & 0x7f));
+                        }
+                    }
+                    b.extend_from_slice(&full_boxed(b"tipa", 0, wide as u32, &tb));
+                }
+                full_boxed(b"tilC", 0, 0, &b)
+            }
             Property::Unknown(raw) => {
                 if let Some(ut) = raw.user_type {
                     let mut b = ut.to_vec();
@@ -1675,6 +2201,99 @@ mod tests {
         round_trip(Property::Altt(Altt {
             alt_text: "text".into(),
             alt_lang: "en".into(),
+        }));
+        round_trip(Property::Reve(Reve {
+            surround_luminance: 50_000,
+            surround_light_x: 3127,
+            surround_light_y: 3290,
+            periphery_luminance: 100_000,
+            periphery_light_x: 3140,
+            periphery_light_y: 3300,
+        }));
+        round_trip(Property::Ndwt(Ndwt {
+            diffuse_white_luminance: 2_030_000,
+        }));
+        round_trip(Property::Cexg(Cexg {
+            rows: 3,
+            columns: 4,
+            tile_width: 512,
+            tile_height: 256,
+            large_fields: false,
+            extent_config: None,
+        }));
+        round_trip(Property::Cexg(Cexg {
+            rows: 1,
+            columns: 2,
+            tile_width: 70_000,
+            tile_height: 65_536,
+            large_fields: true,
+            extent_config: Some(vec![1, 2, 3]),
+        }));
+        round_trip(Property::Dadj(Dadj {
+            disparity_adjustment: -1234,
+        }));
+        round_trip(Property::Stag(Stag {
+            aggressors: vec![
+                StereoAggressor {
+                    aggressor_type: 1,
+                    severity: 40,
+                    sub_type_uri: None,
+                },
+                StereoAggressor {
+                    aggressor_type: 3,
+                    severity: 100,
+                    sub_type_uri: Some("urn:example:window".into()),
+                },
+            ],
+        }));
+        round_trip(Property::PixiExtended(PixiExtended {
+            pixi: Pixi {
+                bits_per_channel: vec![8, 8, 8, 8],
+            },
+            channels: vec![
+                PixiChannel {
+                    channel_idc: 5,
+                    component_format: 0,
+                    subsampling: Some((0, 0)),
+                    label: None,
+                },
+                PixiChannel {
+                    channel_idc: 2,
+                    component_format: 0,
+                    subsampling: Some((0, 0)),
+                    label: Some("Y".into()),
+                },
+                PixiChannel {
+                    channel_idc: 3,
+                    component_format: 0,
+                    subsampling: Some((2, 1)),
+                    label: None,
+                },
+                PixiChannel {
+                    channel_idc: 4,
+                    component_format: 0,
+                    subsampling: None,
+                    label: None,
+                },
+            ],
+        }));
+        round_trip(Property::TilC(TilC {
+            tile_width: 256,
+            tile_height: 256,
+            extra_dimensions: vec![],
+            in_file_tiles: None,
+        }));
+        round_trip(Property::TilC(TilC {
+            tile_width: 512,
+            tile_height: 384,
+            extra_dimensions: vec![3],
+            in_file_tiles: Some((*b"hvc1", vec![(true, 1), (false, 2)])),
+        }));
+        round_trip(Property::TilC(TilC {
+            tile_width: 512,
+            tile_height: 384,
+            extra_dimensions: vec![],
+            in_file_tiles: Some((*b"av01", vec![(true, 200)])),
         }));
         round_trip(Property::Unknown(RawProperty {
             box_type: *b"zzzz",

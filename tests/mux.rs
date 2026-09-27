@@ -466,3 +466,52 @@ fn sequence_writer_alpha_track_round_trips_and_opens_in_readers() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+/// MIAF Amd 1:2025 Annex A.2 looping: the writer's `looping` setting
+/// round-trips through `Track::loop_behaviour` for every case of
+/// Table C.1.
+#[test]
+fn sequence_looping_round_trips_through_the_edit_list() {
+    use oxideav_heif::encode::encode_hevc_picture;
+    use oxideav_heif::sequence::LoopBehaviour;
+    use oxideav_heif::writer::SequenceWriter;
+    let pic = encode_hevc_picture(&frame(0), "pcm", 0).unwrap();
+    for looping in [
+        None,
+        Some(LoopBehaviour::Times(1)),
+        Some(LoopBehaviour::Times(3)),
+        Some(LoopBehaviour::Forever),
+    ] {
+        let mut sw = SequenceWriter::new(*b"hvc1", pic.config.clone(), 32, 32, 10);
+        sw.looping = looping;
+        for _ in 0..2 {
+            sw.push_sample(pic.data.clone(), 5, true);
+        }
+        let bytes = sw.write_to_vec().unwrap();
+        let f = oxideav_heif::HeifFile::parse(&bytes).unwrap();
+        let mv = oxideav_heif::sequence::parse_movie(&f).unwrap().unwrap();
+        let t = &mv.tracks[0];
+        let expected = match looping {
+            None | Some(LoopBehaviour::Forever) => LoopBehaviour::Forever,
+            Some(l) => l,
+        };
+        assert_eq!(t.loop_behaviour(), expected, "{looping:?}");
+        match looping {
+            None => assert!(t.edits.is_empty() && t.track_duration == 10),
+            Some(LoopBehaviour::Times(1)) => {
+                assert_eq!(t.edits.len(), 1);
+                assert!(!t.repeat_edits);
+                assert_eq!(t.track_duration, 10);
+            }
+            Some(LoopBehaviour::Times(n)) => {
+                assert!(t.repeat_edits);
+                assert_eq!(t.track_duration, 10 * n);
+                assert_eq!(t.edits[0].segment_duration, 10);
+            }
+            Some(LoopBehaviour::Forever) => {
+                assert!(t.repeat_edits);
+                assert_eq!(t.track_duration, u64::MAX);
+            }
+        }
+    }
+}

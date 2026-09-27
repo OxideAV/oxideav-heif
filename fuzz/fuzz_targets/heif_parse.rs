@@ -47,8 +47,16 @@ fuzz_target!(|data: &[u8]| {
         let _ = meta.metadata_of(it.id);
     }
     let _ = file.primary_item();
+    let _ = meta.display_order();
     for g in meta.entity_groups.iter().take(64) {
-        let _ = (g.version, g.flags, meta.groups_containing(g.group_id, &g.grouping_type).len());
+        let _ = (
+            g.version,
+            g.flags,
+            meta.groups_containing(g.group_id, &g.grouping_type).len(),
+        );
+        let _ = g.pyramid();
+        let _ = g.region_partition_area();
+        let _ = g.stereo_with_fallback();
     }
     let _ = check(&file, MiafProfile::Miaf);
     let _ = check(&file, MiafProfile::HevcExtended);

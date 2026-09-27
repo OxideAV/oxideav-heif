@@ -274,6 +274,158 @@ pub struct EntityGroup {
     pub group_id: u32,
     /// `entity_id[]` (item ids or track ids).
     pub entity_ids: Vec<u32>,
+    /// The bytes after `entity_id[]` — the grouping-type-specific
+    /// extension (`pymd` tile sizes, `rgpa` area, …); empty for the
+    /// plain groups.
+    pub payload: Vec<u8>,
+}
+
+/// `pymd` image pyramid tile information (HEIF Amd 1:2025 §6.8.12).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PyramidInfo {
+    /// `(tile_size_x, tile_size_y)`: one entry for every layer (lowest
+    /// resolution first, the base image last) when
+    /// `tile_info_constant_flag` is clear, a single entry when set,
+    /// empty when `tile_info_present_flag` is clear (derive from
+    /// `cexg` / `grid` / `uncC` / `tilC`, Tables 3–5 + 15).
+    pub tile_sizes: Vec<(u32, u32)>,
+}
+
+impl PyramidInfo {
+    /// `tile_info_present_flag`.
+    pub const FLAG_TILE_INFO_PRESENT: u32 = 1;
+    /// `tile_info_constant_flag`.
+    pub const FLAG_TILE_INFO_CONSTANT: u32 = 2;
+
+    /// The tile size of layer `i` (0 = lowest-resolution overview),
+    /// when signalled.
+    pub fn tile_size(&self, layer: usize) -> Option<(u32, u32)> {
+        match self.tile_sizes.len() {
+            0 => None,
+            1 => Some(self.tile_sizes[0]),
+            _ => self.tile_sizes.get(layer).copied(),
+        }
+    }
+}
+
+/// `rgpa` region partition group area (HEIF Amd 1:2025 §6.8.13), when
+/// `area_info_present`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionPartitionArea {
+    /// `reference_width`.
+    pub reference_width: u32,
+    /// `reference_height`.
+    pub reference_height: u32,
+    /// `top`.
+    pub top: u32,
+    /// `left`.
+    pub left: u32,
+    /// `width`.
+    pub width: u32,
+    /// `height`.
+    pub height: u32,
+}
+
+/// How the monoscopic fallback of a `stem` group relates to the pair
+/// (HEIF Amd 1:2025 §6.8.11, `flags & 3`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StereoFallbackPosition {
+    /// 0.
+    Unspecified,
+    /// 1: co-located with the left view.
+    Left,
+    /// 2: co-located with the right view.
+    Right,
+    /// 3: centred between the views.
+    Centre,
+}
+
+impl EntityGroup {
+    /// `grouping_type == 'altr'`.
+    pub fn is_alternatives(&self) -> bool {
+        &self.grouping_type == b"altr"
+    }
+
+    /// `pymd` (HEIF Amd 1:2025 §6.8.12): the entities are the pyramid
+    /// layers, lowest-resolution overview first and the base image
+    /// last; the tile information per the flags.
+    pub fn pyramid(&self) -> Result<Option<PyramidInfo>> {
+        if &self.grouping_type != b"pymd" {
+            return Ok(None);
+        }
+        let mut tile_sizes = Vec::new();
+        if self.flags & PyramidInfo::FLAG_TILE_INFO_PRESENT != 0 {
+            let n = if self.flags & PyramidInfo::FLAG_TILE_INFO_CONSTANT != 0 {
+                1
+            } else {
+                self.entity_ids.len()
+            };
+            let mut r = Reader::new(&self.payload);
+            for _ in 0..n {
+                tile_sizes.push((r.u32("pymd tile_size_x")?, r.u32("pymd tile_size_y")?));
+            }
+        }
+        Ok(Some(PyramidInfo { tile_sizes }))
+    }
+
+    /// `rgpa` (HEIF Amd 1:2025 §6.8.13): the region items of a
+    /// partition; the area when `area_info_present` (else the area of
+    /// the image the group is associated with through `rpds`).
+    pub fn region_partition_area(&self) -> Result<Option<RegionPartitionArea>> {
+        if &self.grouping_type != b"rgpa" || self.flags & 0x2000 == 0 {
+            return Ok(None);
+        }
+        let large = self.flags & 0x1000 != 0;
+        let mut r = Reader::new(&self.payload);
+        let mut f = |what: &str| -> Result<u32> {
+            if large {
+                r.u32(what)
+            } else {
+                r.u16(what).map(u32::from)
+            }
+        };
+        Ok(Some(RegionPartitionArea {
+            reference_width: f("rgpa reference_width")?,
+            reference_height: f("rgpa reference_height")?,
+            top: f("rgpa top")?,
+            left: f("rgpa left")?,
+            width: f("rgpa width")?,
+            height: f("rgpa height")?,
+        }))
+    }
+
+    /// `stem` (HEIF Amd 1:2025 §6.8.11): `(left, right, monoscopic
+    /// fallback, fallback position)`; `None` for other groups or a
+    /// `stem` without exactly three entities.
+    pub fn stereo_with_fallback(&self) -> Option<(u32, u32, u32, StereoFallbackPosition)> {
+        if &self.grouping_type != b"stem" || self.entity_ids.len() != 3 {
+            return None;
+        }
+        let pos = match self.flags & 3 {
+            1 => StereoFallbackPosition::Left,
+            2 => StereoFallbackPosition::Right,
+            3 => StereoFallbackPosition::Centre,
+            _ => StereoFallbackPosition::Unspecified,
+        };
+        Some((
+            self.entity_ids[0],
+            self.entity_ids[1],
+            self.entity_ids[2],
+            pos,
+        ))
+    }
+
+    /// `ster` / `stem`: `(left, right)` of a stereo pair (HEIF §6.8.5 /
+    /// Amd 1 §6.8.11).
+    pub fn stereo_pair(&self) -> Option<(u32, u32)> {
+        if (&self.grouping_type == b"ster" || &self.grouping_type == b"stem")
+            && self.entity_ids.len() >= 2
+        {
+            Some((self.entity_ids[0], self.entity_ids[1]))
+        } else {
+            None
+        }
+    }
 }
 
 /// One `dref` entry.
@@ -489,6 +641,42 @@ impl Meta {
     pub fn is_premultiplied(&self, master: u32, aux: u32) -> bool {
         self.references_from(master, &reference::PREM)
             .contains(&aux)
+    }
+
+    /// The image collection as a viewer lists it (MIAF Amd 1:2025
+    /// Annex A.3 / A.4, informative): every displayable master image
+    /// item (non-hidden, not a thumbnail / auxiliary) in `iinf` order,
+    /// with the members of each `altr` group collapsed into one entry
+    /// at the position of the group's earliest member. Each entry is
+    /// the `altr` group's entities in group order (its first
+    /// processable one is the one to show, ISO/IEC 14496-12 §8.18.3)
+    /// or a single item.
+    pub fn display_order(&self) -> Vec<Vec<u32>> {
+        let mut out: Vec<Vec<u32>> = Vec::new();
+        let mut seen_groups: Vec<u32> = Vec::new();
+        for it in &self.items {
+            if !it.is_image()
+                || it.is_hidden()
+                || !self.references_from(it.id, &reference::THMB).is_empty()
+                || !self.references_from(it.id, &reference::AUXL).is_empty()
+            {
+                continue;
+            }
+            match self
+                .entity_groups
+                .iter()
+                .find(|g| g.is_alternatives() && g.entity_ids.contains(&it.id))
+            {
+                Some(g) => {
+                    if !seen_groups.contains(&g.group_id) {
+                        seen_groups.push(g.group_id);
+                        out.push(g.entity_ids.clone());
+                    }
+                }
+                None => out.push(vec![it.id]),
+            }
+        }
+        out
     }
 
     /// Entity groups of `grouping_type` containing `entity_id`.
@@ -876,6 +1064,7 @@ fn parse_grpl(p: &[u8]) -> Result<Vec<EntityGroup>> {
             flags,
             group_id,
             entity_ids,
+            payload: r.rest().to_vec(),
         });
     }
     Ok(out)

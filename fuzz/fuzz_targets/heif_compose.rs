@@ -63,7 +63,14 @@ fuzz_target!(|data: &[u8]| {
         g.output_height = 1 + (g.output_height - 1) % (MAX_DIM * 3);
         let mut tiles = Vec::new();
         for i in 0..g.tile_count() {
-            let Some(t) = frame(&body[i.min(body.len().saturating_sub(1))..], tw, th, chroma, depth, alpha && i % 2 == 0) else {
+            let Some(t) = frame(
+                &body[i.min(body.len().saturating_sub(1))..],
+                tw,
+                th,
+                chroma,
+                depth,
+                alpha && i % 2 == 0,
+            ) else {
                 return;
             };
             tiles.push(t);
@@ -85,7 +92,14 @@ fuzz_target!(|data: &[u8]| {
         }
         let mut frames = Vec::new();
         for i in 0..n {
-            let Some(f) = frame(&body[i.min(body.len().saturating_sub(1))..], tw, th, chroma, depth, alpha && i % 2 == 1) else {
+            let Some(f) = frame(
+                &body[i.min(body.len().saturating_sub(1))..],
+                tw,
+                th,
+                chroma,
+                depth,
+                alpha && i % 2 == 1,
+            ) else {
                 return;
             };
             frames.push((f, i % 2 == 0));
@@ -119,7 +133,13 @@ fn transforms(f: &HeifFrame, steer: &[u8]) {
     let cur = apply_clap(f, &clap).unwrap_or_else(|_| f.clone());
     let cur = apply_irot(&cur, &Irot { angle: s(12) & 3 }).unwrap_or(cur);
     let cur = apply_imir(&cur, &Imir { axis: s(13) & 1 }).unwrap_or(cur);
-    let _ = crop(&cur, s(14) as u32 % cur.width, s(15) as u32 % cur.height, 1, 1);
+    let _ = crop(
+        &cur,
+        s(14) as u32 % cur.width,
+        s(15) as u32 % cur.height,
+        1,
+        1,
+    );
     if let Some(a) = cur.alpha_as_frame() {
         let _ = attach_alpha(&cur.without_alpha(), &a);
     }

@@ -221,13 +221,58 @@ pub struct Track {
     pub references: Vec<(FourCc, Vec<u32>)>,
     /// `elst` entries.
     pub edits: Vec<Edit>,
+    /// `elst` `RepeatEdits` flag (ISO/IEC 14496-12 §8.6.6.1, flags &
+    /// 1): the edit list repeats until the `tkhd` duration.
+    pub repeat_edits: bool,
+    /// `tkhd` `duration` in the movie timescale (`u64::MAX` = all
+    /// ones = indefinite).
+    pub track_duration: u64,
     /// `sbgp` / `csgp` sample-to-group mappings of the `stbl`, in file order.
     pub sample_groups: Vec<SampleGroup>,
     /// `sgpd` group descriptions of the `stbl`, in file order.
     pub sample_group_descriptions: Vec<SampleGroupDescription>,
 }
 
+/// How many times an image sequence plays (MIAF Amd 1:2025 Annex A.2,
+/// the behaviour browsers converged on).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoopBehaviour {
+    /// Play indefinitely (no `elst`, or `RepeatEdits` with an
+    /// indefinite `tkhd` duration).
+    Forever,
+    /// Play the edit list this many times (`1` without `RepeatEdits`;
+    /// `ceil(tkhd duration / edit-list duration)` otherwise).
+    Times(u64),
+}
+
 impl Track {
+    /// MIAF Amd 1:2025 Annex A.2 (Table C.1): no `elst` → play
+    /// indefinitely; `elst` without `RepeatEdits` → once; `RepeatEdits`
+    /// with an all-ones `tkhd` duration → indefinitely; otherwise
+    /// `ceil(R)` times with `R = tkhd duration / edit list duration`
+    /// (both in the movie timescale). An edit list of zero duration
+    /// with `RepeatEdits` set cannot be repeated meaningfully and
+    /// counts as indefinite.
+    pub fn loop_behaviour(&self) -> LoopBehaviour {
+        if self.edits.is_empty() {
+            return LoopBehaviour::Forever;
+        }
+        if !self.repeat_edits {
+            return LoopBehaviour::Times(1);
+        }
+        if self.track_duration == u64::MAX {
+            return LoopBehaviour::Forever;
+        }
+        let list: u64 = self
+            .edits
+            .iter()
+            .fold(0u64, |a, e| a.saturating_add(e.segment_duration));
+        if list == 0 {
+            return LoopBehaviour::Forever;
+        }
+        LoopBehaviour::Times(self.track_duration.div_ceil(list).max(1))
+    }
+
     /// The 1-based `sgpd` entry index that applies to sample `index`
     /// for `grouping_type` (and `parameter`, when the mapping carries
     /// one): the `sbgp` / `csgp` mapping, else the `sgpd` default;
@@ -704,6 +749,7 @@ fn parse_mvhd(p: &[u8]) -> Result<(u32, u64)> {
 
 struct Tkhd {
     track_id: u32,
+    duration: u64,
     flags: u32,
     width: u32,
     height: u32,
@@ -713,18 +759,18 @@ struct Tkhd {
 fn parse_tkhd(p: &[u8]) -> Result<Tkhd> {
     let (v, flags, body) = parse_full_box(p)?;
     let mut r = Reader::new(body);
-    let track_id = if v == 1 {
+    let (track_id, duration) = if v == 1 {
         r.skip(16, "tkhd times")?;
         let id = r.u32("tkhd track_ID")?;
         r.skip(4, "tkhd reserved")?;
-        r.skip(8, "tkhd duration")?;
-        id
+        (id, r.u64("tkhd duration")?)
     } else {
         r.skip(8, "tkhd times")?;
         let id = r.u32("tkhd track_ID")?;
         r.skip(4, "tkhd reserved")?;
-        r.skip(4, "tkhd duration")?;
-        id
+        let d = r.u32("tkhd duration")?;
+        // A 32-bit all-ones duration is the indefinite marker too.
+        (id, if d == u32::MAX { u64::MAX } else { d as u64 })
     };
     r.skip(8, "tkhd reserved")?;
     r.skip(2, "tkhd layer")?;
@@ -739,6 +785,7 @@ fn parse_tkhd(p: &[u8]) -> Result<Tkhd> {
     let height = r.u32("tkhd height")? >> 16;
     Ok(Tkhd {
         track_id,
+        duration,
         flags,
         width,
         height,
@@ -818,9 +865,11 @@ fn parse_trak(trak: &[u8], file_len: u64) -> Result<Track> {
         }
     }
     let mut edits = Vec::new();
+    let mut repeat_edits = false;
     if let Some((_, edts)) = find_box(trak, b"edts")? {
         if let Some((_, elst)) = find_box(edts, b"elst")? {
-            let (v, _f, body) = parse_full_box(elst)?;
+            let (v, f, body) = parse_full_box(elst)?;
+            repeat_edits = f & 1 == 1;
             let mut r = Reader::new(body);
             let n = r.u32("elst entry_count")? as usize;
             for _ in 0..n {
@@ -858,6 +907,8 @@ fn parse_trak(trak: &[u8], file_len: u64) -> Result<Track> {
         samples,
         references,
         edits,
+        repeat_edits,
+        track_duration: tk.duration,
         sample_groups,
         sample_group_descriptions,
     })
@@ -1284,6 +1335,8 @@ mod tests {
             samples: vec![],
             references: vec![],
             edits: vec![],
+            repeat_edits: false,
+            track_duration: 0,
             sample_groups: vec![],
             sample_group_descriptions: vec![],
         };
@@ -1406,6 +1459,8 @@ mod tests {
             samples: vec![],
             references: vec![],
             edits: vec![],
+            repeat_edits: false,
+            track_duration: 0,
             sample_groups: vec![parse_sbgp(&sbgp[8..]).unwrap()],
             sample_group_descriptions: vec![desc2],
         };
