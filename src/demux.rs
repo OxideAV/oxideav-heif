@@ -192,6 +192,63 @@ pub fn core_pixel_format_for(
     core_pixel_format(fmt, full)
 }
 
+/// The `ster` stereo pair (`left`, `right`) an image item belongs to
+/// (HEIF §6.8.5), when any.
+fn stereo_pair_of<D: AsRef<[u8]>>(file: &HeifFile<D>, item_id: u32) -> Option<(u32, u32)> {
+    let meta = file.meta.as_ref()?;
+    meta.groups_containing(item_id, b"ster")
+        .into_iter()
+        .chain(meta.groups_containing(item_id, b"stem"))
+        .find_map(|g| g.stereo_pair())
+        .filter(|(l, r)| l != r)
+}
+
+/// The layer an image item selects (`lsel`), for tagging a view.
+fn view_layer_id<D: AsRef<[u8]>>(file: &HeifFile<D>, item_id: u32) -> Option<u16> {
+    let meta = file.meta.as_ref()?;
+    crate::props::ItemProperties::resolve(meta, item_id)
+        .ok()?
+        .lsel()
+        .map(|l| l.layer_id)
+}
+
+/// The stream-level layer list of a still: the output layers of a
+/// layered primary without `lsel`, or the two views of a `ster` pair.
+fn still_layers<D: AsRef<[u8]>>(
+    file: &HeifFile<D>,
+    node: &ImageNode,
+) -> Vec<oxideav_core::LayerInfo> {
+    use oxideav_core::LayerInfo;
+    if node.item.item_type == crate::meta::ITEM_TYPE_LHV1 && node.properties.lsel().is_none() {
+        if let Some(o) = node.properties.oinf() {
+            let mut out = o.output_layers(node.properties.tols().unwrap_or(0));
+            out.sort_unstable();
+            out.dedup();
+            if out.len() > 1 {
+                return out
+                    .into_iter()
+                    .map(|l| {
+                        let mut info = LayerInfo::new(l as u16);
+                        if l != 0 {
+                            info = info.with_depends_on(vec![0u16]);
+                        }
+                        info
+                    })
+                    .collect();
+            }
+        }
+    }
+    if let Some((left, right)) = stereo_pair_of(file, node.item.id) {
+        return [(0u16, left), (1u16, right)]
+            .into_iter()
+            .map(|(view, id)| {
+                LayerInfo::new(view_layer_id(file, id).unwrap_or(view)).with_view_id(view)
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
 /// The effective colour information of an item (its `nclx`, else the
 /// MIAF §7.3.6.4 default).
 fn item_colour(node: &ImageNode) -> crate::props::Colr {
@@ -415,6 +472,10 @@ impl HeifDemuxer {
                             params.height = Some(h);
                         }
                     }
+                }
+                let layers = still_layers(&file, &node);
+                if !layers.is_empty() {
+                    params = params.with_layers(layers);
                 }
                 metadata.push(("primary_item_id".into(), node.item.id.to_string()));
                 metadata.push((
@@ -779,9 +840,38 @@ impl Decoder for HeifCodec {
         // The colour information rides on the frame (H.273 code points +
         // range; identity-matrix items as planar RGB, see
         // HeifFrame::to_core_signalled).
-        let (mut vf, _pf) = img.frame.to_core_signalled(&img.nclx)?;
-        vf.pts = packet.pts;
-        self.queue.push_back(Frame::Video(vf));
+        let signal_frame = |f: &crate::HeifFrame, nclx: &crate::props::Colr| {
+            let (mut vf, _pf) = f.to_core_signalled(nclx)?;
+            vf.pts = packet.pts;
+            Ok::<_, CoreError>(vf)
+        };
+        if !img.layers.is_empty() {
+            // A layered item without lsel: every output layer, tagged.
+            for l in &img.layers {
+                let vf = signal_frame(&l.frame, &img.nclx)?
+                    .with_layer(oxideav_core::LayerIdentity::new(l.layer_id as u16));
+                self.queue.push_back(Frame::Video(vf));
+            }
+        } else if let Some((left, right)) = stereo_pair_of(&file, img.item_id) {
+            // HEIF §6.8.5 'ster': the primary is one view of a stereo
+            // pair — both views out, tagged view 0 (left) / 1 (right).
+            let other = if img.item_id == left { right } else { left };
+            let partner = crate::decode::decode_item(&file, other, self.item_decoder())?;
+            let (first, second) = if img.item_id == left {
+                (&img, &partner)
+            } else {
+                (&partner, &img)
+            };
+            for (view, image) in [(0u16, first), (1u16, second)] {
+                let layer = view_layer_id(&file, image.item_id).unwrap_or(view);
+                let vf = signal_frame(&image.frame, &image.nclx)?
+                    .with_layer(oxideav_core::LayerIdentity::new(layer).with_view_id(view));
+                self.queue.push_back(Frame::Video(vf));
+            }
+        } else {
+            let vf = signal_frame(&img.frame, &img.nclx)?;
+            self.queue.push_back(Frame::Video(vf));
+        }
         self.last = Some(img);
         Ok(())
     }

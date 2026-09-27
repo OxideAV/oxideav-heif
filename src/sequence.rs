@@ -967,6 +967,29 @@ fn parse_visual_entry(entry_type: FourCc, p: &[u8]) -> Result<SampleEntry> {
         amve: None,
         children: Vec::new(),
     };
+    // QuickTime writers end a sample entry with a 4-byte zero
+    // terminator after the child boxes; stop before a tail shorter
+    // than a box header when it is all zeros.
+    let rest = match rest.len() % 8 {
+        0 => rest,
+        _ => {
+            let mut end = rest.len();
+            let mut off = 0usize;
+            while off + 8 <= end {
+                let size =
+                    u32::from_be_bytes([rest[off], rest[off + 1], rest[off + 2], rest[off + 3]])
+                        as usize;
+                if size < 8 || off + size > end {
+                    break;
+                }
+                off += size;
+            }
+            if off < end && end - off < 8 && rest[off..end].iter().all(|b| *b == 0) {
+                end = off;
+            }
+            &rest[..end]
+        }
+    };
     for h in iter_boxes(rest) {
         let h = h?;
         let body = payload(rest, &h);

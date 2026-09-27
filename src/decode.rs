@@ -149,20 +149,32 @@ impl<'r> ItemDecoder<'r> {
                 node.item.id
             )));
         };
+        let mut options = oxideav_core::CodecOptions::new();
         let (id, extradata, layout) = match kind {
             CodedKind::Hevc(cfg) => (CODEC_ID_HEVC, cfg.raw.clone(), hevc_layout(cfg)?),
             CodedKind::Av1(cfg) => (CODEC_ID_AV1, cfg.raw.clone(), av1_layout(cfg)?),
             CodedKind::Avc(cfg) => (CODEC_ID_AVC, cfg.raw.clone(), cfg.layout()?),
-            // The base layer travels Annex B (parameter sets in band),
-            // so the decoder gets no record.
-            CodedKind::LayeredHevc(_) => (
-                CODEC_ID_HEVC,
-                Vec::new(),
-                layered_base_layout(&node.properties)?,
-            ),
+            CodedKind::LayeredHevc(cfg) => {
+                let plan = LayeredPlan::of(node, cfg)?;
+                match &plan.extradata {
+                    // hvcC ++ lhvC: the multi-layer decoder's record pair
+                    // (HEIF B.2.3.2 / oxideav-h265 `layer` / `ols`).
+                    Some(x) => {
+                        options = match plan.layer {
+                            Some(l) => options.set("layer", l.to_string()),
+                            None => options.set("ols", plan.tols.to_string()),
+                        };
+                        (CODEC_ID_HEVC, x.clone(), plan.layout)
+                    }
+                    // No base record: the base layer travels Annex B
+                    // (parameter sets in band), so the decoder gets none.
+                    None => (CODEC_ID_HEVC, Vec::new(), plan.layout),
+                }
+            }
         };
         let mut params = CodecParameters::video(CodecId::new(id));
         params.extradata = extradata;
+        params.options = options;
         if let Some((w, h)) = node.ispe() {
             params.width = Some(w);
             params.height = Some(h);
@@ -209,30 +221,44 @@ impl<'r> ItemDecoder<'r> {
                 node.item.id
             )));
         };
-        let layout = match &kind {
-            CodedKind::Hevc(c) => hevc_layout(c)?,
-            CodedKind::Av1(c) => av1_layout(c)?,
-            CodedKind::Avc(c) => c.layout()?,
-            CodedKind::LayeredHevc(_) => layered_base_layout(&node.properties)?,
-        };
-        let params = Self::codec_parameters(node)?;
-        let data = match &kind {
+        let mut params = Self::codec_parameters(node)?;
+        let mut layers: Option<Vec<u8>> = None;
+        let (layout, data) = match &kind {
+            CodedKind::Hevc(c) => (hevc_layout(c)?, file.item_data_owned(node.item.id)?),
+            CodedKind::Av1(c) => (av1_layout(c)?, file.item_data_owned(node.item.id)?),
+            CodedKind::Avc(c) => (c.layout()?, file.item_data_owned(node.item.id)?),
             CodedKind::LayeredHevc(cfg) => {
-                // HEIF B.2.2.1.3: the item's tols names the output
-                // layer set; anything beyond the base layer is a typed
-                // refusal unless the caller settles for the base.
-                let tols = node.properties.tols().unwrap_or(0);
-                let enhancement = node
-                    .properties
-                    .oinf()
-                    .map(|o| o.output_layers(tols).iter().any(|l| *l != 0))
-                    .unwrap_or(tols != 0);
-                if enhancement && !self.base_layer_fallback {
-                    return Err(HeifError::layered_hevc(node.item.id, tols));
+                let plan = LayeredPlan::of(node, cfg)?;
+                match &plan.extradata {
+                    Some(_) => {
+                        // HEIF B.2.2.1.3 + §6.5.11: the tols output layer
+                        // set decodes in full; an lsel picks one
+                        // reconstructed image, otherwise every output
+                        // layer comes back (base first) and the item's
+                        // image is the first.
+                        if self.base_layer_fallback && plan.layer.is_none() {
+                            params.options = params.options.set("layer", "0");
+                        } else if plan.layer.is_none() {
+                            layers = Some(plan.output_layers.clone());
+                        }
+                        (plan.layout, file.item_data_owned(node.item.id)?)
+                    }
+                    None => {
+                        // Without a base record only the base layer can be
+                        // decoded (Annex B, filtered to nuh_layer_id 0):
+                        // an output layer set with enhancement layers is a
+                        // typed refusal unless the caller settles for it.
+                        let enhancement = plan.output_layers.iter().any(|l| *l != 0);
+                        if enhancement && !self.base_layer_fallback {
+                            return Err(HeifError::layered_hevc(node.item.id, plan.tols));
+                        }
+                        (
+                            plan.layout,
+                            base_layer_annex_b(cfg, &file.item_data(node.item.id)?)?,
+                        )
+                    }
                 }
-                base_layer_annex_b(cfg, &file.item_data(node.item.id)?)?
             }
-            _ => file.item_data_owned(node.item.id)?,
         };
         if data.is_empty() {
             return Err(HeifError::invalid(format!(
@@ -246,6 +272,88 @@ impl<'r> ItemDecoder<'r> {
             data,
             layout,
             ispe: node.ispe(),
+            layers,
+        })
+    }
+
+    /// Decode a coded item to every reconstructed image it yields: one
+    /// for single-layer items and for layered items with an `lsel`,
+    /// one per output layer of the `tols` output layer set (increasing
+    /// `nuh_layer_id`, the base first) for a layered item without one
+    /// (HEIF §6.5.11 requires an `lsel` in that case; the frames are
+    /// offered anyway, tagged by layer).
+    pub fn decode_coded_layers<D: AsRef<[u8]>>(
+        &self,
+        file: &HeifFile<D>,
+        node: &ImageNode,
+    ) -> Result<Vec<LayerFrame>> {
+        let job = self.prepare(file, node)?;
+        let dec = self.make(&job.params)?;
+        job.run_all(dec)
+    }
+}
+
+/// One reconstructed image of a coded item with the layer it belongs
+/// to (single-layer items: layer 0).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LayerFrame {
+    /// `nuh_layer_id` of the output layer.
+    pub layer_id: u8,
+    /// The reconstructed (or, on [`DecodedImage::layers`], output) image.
+    pub frame: HeifFrame,
+}
+
+/// How an `lhv1` item decodes (HEIF B.2.2.1.3 / §6.5.11 / §6.5.29).
+struct LayeredPlan {
+    /// `hvcC` ++ `lhvC` when the item carries a base record.
+    extradata: Option<Vec<u8>>,
+    /// The `lsel` layer, when any.
+    layer: Option<u16>,
+    /// `target_ols_idx`.
+    tols: u16,
+    /// Output layers of the target output layer set (increasing
+    /// `nuh_layer_id`), `[0]` when the `oinf` does not list the set.
+    output_layers: Vec<u8>,
+    /// Sample layout of the operating point.
+    layout: HeifPixelFormat,
+}
+
+impl LayeredPlan {
+    fn of(node: &ImageNode, cfg: &crate::lhvc::LhevcConfig) -> Result<Self> {
+        let props = &node.properties;
+        let tols = props.tols().unwrap_or(0);
+        let oinf = props.oinf().ok_or_else(|| {
+            HeifError::invalid(format!(
+                "item {}: lhv1 item without an oinf property (HEIF B.2.2.1.3)",
+                node.item.id
+            ))
+        })?;
+        let mut output_layers = oinf.output_layers(tols);
+        if output_layers.is_empty() {
+            output_layers.push(0);
+        }
+        output_layers.sort_unstable();
+        output_layers.dedup();
+        let layer = props.lsel().map(|l| l.layer_id);
+        if let Some(l) = layer {
+            if !output_layers.iter().any(|o| *o as u16 == l) {
+                return Err(HeifError::invalid(format!(
+                    "item {}: lsel layer {l} is not an output layer of output layer set {tols} ({output_layers:?})",
+                    node.item.id
+                )));
+            }
+        }
+        let extradata = props.hvcc().map(|h| {
+            let mut x = h.raw.clone();
+            x.extend_from_slice(&cfg.raw);
+            x
+        });
+        Ok(Self {
+            extradata,
+            layer,
+            tols,
+            output_layers,
+            layout: layered_layout(props, tols)?,
         })
     }
 }
@@ -257,10 +365,18 @@ struct CodedJob {
     data: Vec<u8>,
     layout: HeifPixelFormat,
     ispe: Option<(u32, u32)>,
+    /// The output layers whose pictures the decoder emits in turn
+    /// (`None`: a single picture, layer 0).
+    layers: Option<Vec<u8>>,
 }
 
 impl CodedJob {
-    fn run(self, mut dec: Box<dyn Decoder>) -> Result<HeifFrame> {
+    fn run(self, dec: Box<dyn Decoder>) -> Result<HeifFrame> {
+        let mut frames = self.run_all(dec)?;
+        Ok(frames.swap_remove(0).frame)
+    }
+
+    fn run_all(self, mut dec: Box<dyn Decoder>) -> Result<Vec<LayerFrame>> {
         let id = self.item_id;
         let pkt = Packet::new(0, TimeBase::new(1, 1), self.data)
             .with_pts(0)
@@ -270,12 +386,13 @@ impl CodedJob {
         })?;
         dec.flush()
             .map_err(|e| HeifError::invalid(format!("item {id}: flush: {e}")))?;
-        let mut first: Option<oxideav_core::VideoFrame> = None;
+        let want = self.layers.as_ref().map(Vec::len).unwrap_or(1);
+        let mut frames: Vec<oxideav_core::VideoFrame> = Vec::with_capacity(want);
         loop {
             match dec.receive_frame() {
                 Ok(Frame::Video(v)) => {
-                    if first.is_none() {
-                        first = Some(v);
+                    if frames.len() < want {
+                        frames.push(v);
                     }
                 }
                 Ok(_) => {}
@@ -283,9 +400,37 @@ impl CodedJob {
                 Err(e) => return Err(HeifError::invalid(format!("item {id}: decode failed: {e}"))),
             }
         }
-        let vf = first
-            .ok_or_else(|| HeifError::invalid(format!("item {id}: decoder produced no picture")))?;
-        frame_from_planes(vf, self.layout, self.ispe, id)
+        drop(dec);
+        if frames.is_empty() {
+            return Err(HeifError::invalid(format!(
+                "item {id}: decoder produced no picture"
+            )));
+        }
+        let layers = self.layers.unwrap_or_else(|| vec![0]);
+        if frames.len() < layers.len() {
+            return Err(HeifError::invalid(format!(
+                "item {id}: decoder produced {} of the {} output layers {layers:?}",
+                frames.len(),
+                layers.len()
+            )));
+        }
+        frames
+            .into_iter()
+            .zip(layers)
+            .map(|(vf, layer_id)| {
+                // A layer's own picture tags its layer when the codec
+                // says so; otherwise the emission order (increasing
+                // nuh_layer_id) is the oinf output-layer order.
+                let layer_id = vf
+                    .layer()
+                    .map(|l| l.layer_id.min(u8::MAX as u16) as u8)
+                    .unwrap_or(layer_id);
+                Ok(LayerFrame {
+                    layer_id,
+                    frame: frame_from_planes(vf, self.layout, self.ispe, id)?,
+                })
+            })
+            .collect()
     }
 }
 
@@ -307,11 +452,19 @@ pub enum CodedKind<'a> {
 /// point of output layer set 0 (its `maxChromaFormat` /
 /// `maxBitDepthMinus8`), else that of the first operating point.
 pub fn layered_base_layout(props: &ItemProperties) -> Result<HeifPixelFormat> {
+    layered_layout(props, 0)
+}
+
+/// Sample layout of an `lhv1` item's output layer set `tols`: the
+/// `oinf` operating point of that set (its `maxChromaFormat` /
+/// `maxBitDepthMinus8`), else that of set 0, else the first one.
+pub fn layered_layout(props: &ItemProperties, tols: u16) -> Result<HeifPixelFormat> {
     let oinf = props
         .oinf()
         .ok_or_else(|| HeifError::invalid("lhv1 item without an oinf property (HEIF B.2.2.1.3)"))?;
     let op = oinf
-        .operating_point(0)
+        .operating_point(tols)
+        .or_else(|| oinf.operating_point(0))
         .or_else(|| oinf.operating_points.first())
         .ok_or_else(|| HeifError::invalid("oinf without operating points"))?;
     let chroma = Chroma::from_idc(op.max_chroma_format)
@@ -423,6 +576,9 @@ pub fn av1_layout(cfg: &Av1Config) -> Result<HeifPixelFormat> {
 /// Same-layout properties helper used by callers that only hold a
 /// property list (no graph node).
 pub fn layout_of(props: &ItemProperties) -> Option<HeifPixelFormat> {
+    if props.lhvc().is_some() {
+        return layered_layout(props, props.tols().unwrap_or(0)).ok();
+    }
     if let Some(h) = props.hvcc() {
         return hevc_layout(h).ok();
     }
@@ -431,9 +587,6 @@ pub fn layout_of(props: &ItemProperties) -> Option<HeifPixelFormat> {
     }
     if let Some(a) = props.avcc() {
         return a.layout().ok();
-    }
-    if props.lhvc().is_some() {
-        return layered_base_layout(props).ok();
     }
     None
 }
@@ -554,6 +707,13 @@ pub struct DecodedImage {
     /// stays the baseline rendition. Apply with
     /// [`DecodedImage::apply_gain_map`].
     pub gain_map: Option<GainMapAttachment>,
+    /// Every output image of a layered (`lhv1`) item decoded without an
+    /// `lsel` — one per output layer of its `tols` output layer set,
+    /// increasing `nuh_layer_id`, each with the item's transforms
+    /// applied ([`DecodedImage::frame`] is the first). Empty for
+    /// single-layer items and for layered items with an `lsel` (HEIF
+    /// §6.5.11: the selected layer is the item's one image).
+    pub layers: Vec<LayerFrame>,
 }
 
 /// A decoded gain map and its metadata (see [`DecodedImage::gain_map`]).
@@ -619,6 +779,9 @@ struct Session<'a, 'r, D> {
     /// Remaining uses of every coded item of the graph(s) being decoded.
     uses: HashMap<u32, usize>,
     decodes: usize,
+    /// The extra output layers of a layered root item (see
+    /// [`DecodedImage::layers`]).
+    root_layers: Vec<LayerFrame>,
 }
 
 /// Count the coded items `node` reaches through `dimg` inputs and
@@ -659,7 +822,21 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
             return Ok(f);
         }
         self.count_decode(1)?;
-        let f = self.decoder.decode_coded(self.file, node)?;
+        let f = if node.depth_in_chain == 0 && is_multi_output_layered(node) {
+            // The root item yields every output layer; the first is the
+            // item's image, the rest ride along.
+            let mut frames = self.decoder.decode_coded_layers(self.file, node)?;
+            let first = frames.remove(0);
+            for l in frames.iter_mut() {
+                let out =
+                    std::mem::replace(&mut l.frame, HeifFrame::zeroed(1, 1, first.frame.format)?);
+                l.frame = apply_transforms_owned(out, node.properties.transformative(), false)?;
+            }
+            self.root_layers = frames;
+            first.frame
+        } else {
+            self.decoder.decode_coded(self.file, node)?
+        };
         if left > 0 {
             self.cache.insert(id, f.clone());
         }
@@ -871,6 +1048,7 @@ pub fn decode_item<D: AsRef<[u8]>>(
         cache: HashMap::new(),
         uses,
         decodes: 0,
+        root_layers: Vec::new(),
     };
     let frame = session.output(&node)?;
     let depth = match &node.depth {
@@ -915,7 +1093,7 @@ pub fn decode_item<D: AsRef<[u8]>>(
             }
         }
     }
-    Ok(DecodedImage {
+    let mut img = DecodedImage {
         item_id,
         premultiplied_alpha: node.premultiplied_alpha && node.alpha.is_some(),
         frame,
@@ -928,7 +1106,41 @@ pub fn decode_item<D: AsRef<[u8]>>(
         thumbnail_ids: node.thumbnails.iter().map(|t| t.item.id).collect(),
         properties: node.properties.clone(),
         gain_map,
-    })
+        layers: Vec::new(),
+    };
+    if !session.root_layers.is_empty() {
+        img.layers.push(LayerFrame {
+            layer_id: first_output_layer(&node),
+            frame: img.frame.clone(),
+        });
+        img.layers.append(&mut session.root_layers);
+    }
+    Ok(img)
+}
+
+/// `true` for an `lhv1` item whose `tols` output layer set has more
+/// than one output layer and that carries no `lsel`.
+fn is_multi_output_layered(node: &ImageNode) -> bool {
+    node.item.item_type == ITEM_TYPE_LHV1
+        && node.properties.lsel().is_none()
+        && node.properties.hvcc().is_some()
+        && node
+            .properties
+            .oinf()
+            .map(|o| o.output_layers(node.properties.tols().unwrap_or(0)).len() > 1)
+            .unwrap_or(false)
+}
+
+/// The lowest output layer of a layered item's `tols` set (0 otherwise).
+fn first_output_layer(node: &ImageNode) -> u8 {
+    node.properties
+        .oinf()
+        .and_then(|o| {
+            o.output_layers(node.properties.tols().unwrap_or(0))
+                .into_iter()
+                .min()
+        })
+        .unwrap_or(0)
 }
 
 /// Locate and decode the gain map of `node`: the node itself when it

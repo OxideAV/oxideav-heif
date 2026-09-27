@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- L-HEVC enhancement layers (oxideav-h265 0.0.12, now the minimum pin):
+  an `lhv1` item that carries `hvcC` + `lhvC` decodes through the
+  multi-layer decoder (extradata = base `hvcC` ++ item `lhvC`;
+  `layer=<lsel>` for an item with an `lsel`, else `ols=<tols>`) — the
+  HEIF stereo shape (two `lhv1` items with `lsel` 0 / 1 in a `ster`
+  group) yields each view, and an item without `lsel` whose `tols`
+  output layer set has several output layers yields all of them as
+  `DecodedImage::layers` (`decode::LayerFrame`, base first,
+  transforms applied; `ItemDecoder::decode_coded_layers`).
+  `base_layer_fallback` now decodes `layer=0`; the typed
+  `layered_hevc` refusal remains only for items without a base `hvcC`
+  (Annex B base-layer path). Framework: the still stream announces
+  `CodecParameters::layers` (output layers, or the two views of a
+  `ster` pair) and the `"heif"` decoder emits one frame per layer /
+  view tagged with oxideav-core's `LayerIdentity` (view 0 = left).
+  Both views of an MV-HEVC access unit from a black-box producer
+  (Apple VideoToolbox through `AVAssetWriter`, `tests/fixtures/layered/`)
+  wrapped by `HeifWriter` decode byte-exact against the black-box
+  decoder's per-view output (`ffmpeg -view_ids`). QuickTime sample
+  entries ending in a 4-byte zero terminator after their child boxes
+  now parse.
+
 - Decode optimisation, phase 1 (byte-identical output; the r462
   fixture pins and a serial-vs-parallel test over every grid in the
   corpora are the gate). `ItemDecoder::with_execution_context`: the
