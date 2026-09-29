@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-heif/compare/v0.0.4...v0.0.5) - 2026-09-29
+
+### Other
+
+- r463 — finals reconcile, Amd 1 / Amd 2 surface, low-overhead files, layered items, tiled / cfen items, the r463 performance table
+- tili / cexg / cfen: tiled items behind deti offset tables, constrained-extent tiles, colour format enhancement
+- enhancement layers through oxideav-h265 0.0.12 — stereo pairs, per-layer output, LayerIdentity tags
+- parallel grid tiles under ExecutionContext, incremental canvas, copy-free reconstructions
+- identity-matrix items as planar RGB, ColorSignal on streams + frames; rd/tiles pick the CTB
+- low-overhead image files (HEIF Amd 2 Annex O) — reader expansion, writer, dExf
+- props + groups: HEIF Amd 1 reve/ndwt/cexg/dadj/stag, Amd 2 pixi channels + tilC, pymd/rgpa/stem, MIAF Annex A order + looping
+- finals reconcile: tmap fully-applied weight, MIAF Amd 1 altr mandate, advisories
+
 - Tiled image items (HEIF Amd 2:2026 §6.11): `tili` items compose from
   their `deti`-addressed tiles — `tiled::DataEntryTiledItem` parses the
   `dref` entry (offset / size / count field widths, sequential flag,
