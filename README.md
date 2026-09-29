@@ -37,21 +37,22 @@ one stream per image-sequence track (`"h265"` / `"av1"` packets with
 | Area | Status |
 |------|--------|
 | ISOBMFF boxes | size 0 / 1 / `largesize` / `uuid`, FullBox, bounded recursive walk |
-| Brands | `mif1` `mif2` `msf1` `heic` `heix` `hevc` `hevx` `heim` `heis` `hevm` `hevs` `miaf` `MiHB` `MiHA` `MiHE` `MiAB` `avif` `avis` `avio` `MA1B` `MA1A` `jpeg` `avci` `avcs` `tmap` `1pic` `pred`, `styp` |
+| Brands | `mif1` `mif2` `mif3` `msf1` `heic` `heix` `hevc` `hevx` `heim` `heis` `hevm` `hevs` `miaf` `MiHB` `MiHA` `MiHE` `MiAB` `avif` `avis` `avio` `MA1B` `MA1A` `jpeg` `avci` `avcs` `tmap` `1pic` `pred`, `styp` |
+| Low-overhead files | Amd 2:2026 Annex O `mini` box (O.3.2 in full: bit-packed header, chunk sizes, HDR block with gain map) expanded to the normative O.4 equivalent `meta` + `mdat` on parse (`HeifFile::minimized`); `encode_still_minimized` writes `mif3` files (HEVC / AV1, alpha, ICC, Exif, XMP, gain map, Exif orientation) that libheif renders identically to the regular file; `image/hif2`, `.hmg`; `dExf` / deflated XMP inflate (`deflate` feature) |
 | `meta` tree | `hdlr`, `pitm` v0/v1, `iinf` v0/v1 + `infe` v2/v3 (`mime` / `uri ` tails, hidden flag), `iloc` v0–v2 (all widths, construction methods 0 / 1 / 2, multi-extent, zero-length "to end"), `iref` v0/v1, `iprp` / `ipco` / `ipma` v0/v1 (7 / 15-bit indices, essential flag, index-0 placeholders), `idat`, `grpl`, `dinf` / `dref`, `ipro` |
-| Properties | `ispe` `pixi` `colr` (nclx + `rICC` / `prof`) `pasp` `clap` `irot` `imir` `iscl` `auxC` `hvcC` `av1C` `lhvC` `oinf` `tols` `avcC` `clli` `mdcv` `cclv` `amve` (14496-12 8th ed. §12.1.6–9 plain-Box syntax, FullBox-prefixed writers tolerated) `rloc` `lsel` `a1op` `a1lx` `rref` `crtt` `mdft` `udes` `altt`; §6.5.1 descriptive-before-transformative order, unrecognised-essential refusal, exact rational `clap` |
-| Coded items | `hvc1` / `hev1` → oxideav-h265 (`hvcC` extradata, length-prefixed AU); `av01` → oxideav-av1 (`av1C` extradata, temporal unit); `avc1` → oxideav-h264 (`avcC` extradata, length-prefixed AU; byte-exact against a black-box AVC decoder on Baseline / Main / High / 4:2:2 / 4:4:4 / 10-bit); `lhv1` → base layer through oxideav-h265 (`lhvC` / `oinf` / `tols` typed; enhancement layers = the typed `layered_hevc` refusal or `base_layer_fallback`); 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8–16 bit; via direct factories or a caller `CodecRegistry` |
-| Derived images | `grid` (row-major, trim, tile alpha), `iovl` (sRGB fill via the H.273 matrix of the output `colr`, offsets, clipping, §6.9.1 straight / pre-multiplied alpha, translucent canvas → output alpha), `iden`, `tmap` (23008-12:2025/Amd 1 §6.6.2.4: base by default, normative tone-mapped reconstruction on request or as an input of another derived item; see Gain maps) |
+| Properties | `ispe` `pixi` `colr` (nclx + `rICC` / `prof`) `pasp` `clap` `irot` `imir` `iscl` `auxC` `hvcC` `av1C` `lhvC` `oinf` `tols` `avcC` `clli` `mdcv` `cclv` `amve` (14496-12 8th ed. §12.1.6–9 plain-Box syntax, FullBox-prefixed writers tolerated) `rloc` `lsel` `a1op` `a1lx` `rref` `crtt` `mdft` `udes` `altt` `reve` `ndwt` `cexg` `dadj` `stag` (Amd 1:2025 §6.5.41–45) `tilC` + `tipa` and the per-channel `pixi` (`px_flags & 1`, Amd 2:2026); §6.5.1 descriptive-before-transformative order, unrecognised-essential refusal, exact rational `clap` |
+| Coded items | `hvc1` / `hev1` → oxideav-h265 (`hvcC` extradata, length-prefixed AU); `av01` → oxideav-av1 (`av1C` extradata, temporal unit); `avc1` → oxideav-h264 (`avcC` extradata, length-prefixed AU; byte-exact against a black-box AVC decoder on Baseline / Main / High / 4:2:2 / 4:4:4 / 10-bit); `lhv1` → oxideav-h265's multi-layer decoder (`hvcC` ++ `lhvC` extradata, `layer=<lsel>` / `ols=<tols>`): the stereo shape (two `lhv1` items with `lsel` 0 / 1 in a `ster` group) yields each view, an item without `lsel` every output layer (`DecodedImage::layers`), both views byte-exact against a black-box decoder's per-view output; `cexg` items decode extent by extent; 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8–16 bit; via direct factories or a caller `CodecRegistry`; grid / `tili` / `cexg` tiles decode in parallel under `ItemDecoder::with_execution_context` (byte-identical for every budget) |
+| Derived images | `grid` (row-major, trim, tile alpha), `iovl` (sRGB fill via the H.273 matrix of the output `colr`, offsets, clipping, §6.9.1 straight / pre-multiplied alpha, translucent canvas → output alpha), `iden`, `tmap` (23008-12:2025/Amd 1:2025 §6.6.2.4: base by default, normative tone-mapped reconstruction on request or as an input of another derived item; see Gain maps), `cfen` (Amd 1 §6.6.2.5: the inputs' luma planes become Y / Cb / Cr or R / G / B and alpha; packed inputs refused — the Amd 2 region formula is a docs question), `tili` tiled items (Amd 2 §6.11: `deti` offset tables, empty tiles, `ispe` crop; external tiles refused) |
 | Transforms | `clap` → `irot` → `imir` → `iscl` in `ipma` order; `iscl` (§6.5.13) resizes by the exact ceil-ratio with an area/bilinear resampler; sub-sample chroma positions promote to 4:4:4 (MIAF §7.3.6.7) |
 | Auxiliaries | alpha (`urn:mpeg:mpegB:cicp:systems:auxiliary:alpha` and `urn:mpeg:hevc:2015:auxid:1`, resized / depth-matched, `prem`), depth (both URN families, surfaced as a frame); alpha *tracks* (§7.5.3 `auxv` + `auxl` + `auxi`, plain-Box `auxi` tolerated) composed into a `"heif"` stream of frames with alpha by the demuxer, written by `SequenceWriter::alpha` |
 | Metadata | thumbnails (`thmb`), Exif (offset word resolved), XMP, ICC, effective `nclx` (MIAF default when absent), `pixi` / `clli` / `mdcv` / … via the typed property list |
-| MIAF | `MiafProfile` + `check`: §7 general requirements, §8 shared constraints, Annex A HEVC / AV1 codec limits, plus the HEIF Amd 1 `tmap` shalls (`"HEIF-A1 …"` clauses) — typed `MiafViolation`s with clause numbers |
-| Image sequences | `moov` / `trak` / `stbl` (`stts` `ctts` `stsc` `stsz` `stz2` `stco` `co64` `stss` `sbgp` `csgp` `sgpd` `tref` `elst`), top-level `prft` / `ssix`, visual sample entries (`hvcC` `av1C` `avcC` `lhvC` `ccst` `auxi` `colr` `clap` `pasp` `clli` `mdcv` `cclv` `amve`), §7.2.1 matrix → rotation / mirror; framework `Demuxer` with pts / dts / sync / seek |
-| Writer | `HeifWriter` (coded / grid / overlay / identity / `tmap` items, thumbnails, alpha / depth, Exif / XMP (raw bodies, any encoding) / arbitrary `cdsc` items, item names, entity groups with flags, de-duplicated `ipco`, MIAF `mdat` order, brand auto-selection); `SequenceWriter` (`msf1` / `hevc`, brand override, `pict` track + `ccst`, HDR sample-entry boxes, `stco` / `co64` per §8.7.5, cover-image `meta` that can alias a track sample; opens in libheif / ImageMagick / ffmpeg / Apple ImageIO) |
-| Gain maps | ISO 21496-1 + HEIF Amd 1 §6.6.2.4: `ToneMapImage` body (`version` 0 + C.2 `GainMapMetadata`), `dimg` = [base, gain map] (count 2 enforced), the three `colr` placements and the `tmap` brand (§10.2.6) checked; `DecodedImage::gain_map` (decoded gain-map item + metadata + alternate `colr`), `apply_gain_map(h_target)` → linear RGB in the application space (Formulas 1–3, §6.2.2 resampling, Annex B primaries conversion, single↔multi-channel rules, limited-range clip); `ItemDecoder::tone_mapped()` → the reconstruction in the `tmap` item's `colr` at its `pixi` depth (alpha carried over); writer authors `tmap` items (`HeifWriter::add_tone_map`, `EncodeOptions::gain_map`) with the hidden map, the brand and the `altr` [tmap, base] fallback; matches a black-box tone-mapper within 1 code at every headroom (2 on the half-size map, 7 after a BT.2020→709 conversion of the 16-bit PQ reconstruction), and the tool tone-maps our authored file identically to its own |
-| Colour | `rgb::to_rgb`: YCbCr → RGB(A) with the item `colr` matrix / range (H.273), identity (GBR), monochrome, alpha carried; the renderer step over the composed frame |
-| Encoder (`registry`) | `encode_still`: HEVC (lossless `pcm` or CABAC `intra` at a QP; VUI range + colour description, Main Still Picture, `rd` / `tiles`) or AV1 stills (lossless or quality 0..=100, `speed`, native 8/10/12-bit 4:0:0–4:4:4, `av1C` from the codec configuration) items, padding + `clap`, grid tiling (MIAF 64-px floor), thumbnails, alpha (per-codec `auxC` URN, single-channel `pixi`, own parameter-set ids; AV1 alpha as a monochrome still), Exif / XMP / ICC, transforms as essential properties on the coded item; `"heif"` framework `Encoder` (frame in — planar YCbCr / grey or packed RGB / RGBA / BGR(A) / 16-bit / grey+alpha — file out; declared options `codec` / `mode` / `qp` / `grid` / `thumbnail` / `range` / `quality` / `speed` / `rd` / `tiles`); the `"heif"` muxer passes its whole-file packets through, so `oxideav convert in.png out.heic` writes a HEIC |
-| Fuzz | `fuzz/`: `heif_parse`, `heif_compose`, `heif_sequence` (standalone build), daily workflow |
+| MIAF | `MiafProfile` + `check`: §7 general requirements, §8 shared constraints, Annex A HEVC / AV1 codec limits, the HEIF Amd 1 `tmap` / `cfen` shalls (`"HEIF-A1 …"`), MIAF Amd 1:2025 §7.3.11.5 (`tmap` in an `altr` with a master image, `"MIAF-A1 …"`), Amd 2 `pixi` / `mif3` / `tili` rules (`"HEIF-A2 …"`) — typed `MiafViolation`s with clause numbers, should-level rules as `advisories`; MIAF Amd 1 Annex A practices: `Meta::display_order` (`altr` collapse), `Track::loop_behaviour` (`elst` `RepeatEdits`) |
+| Image sequences | `moov` / `trak` / `stbl` (`stts` `ctts` `stsc` `stsz` `stz2` `stco` `co64` `stss` `sbgp` `csgp` `sgpd` `tref` `elst`), top-level `prft` / `ssix`, visual sample entries (`hvcC` `av1C` `avcC` `lhvC` `ccst` `auxi` `colr` `clap` `pasp` `clli` `mdcv` `cclv` `amve`; QuickTime zero terminators tolerated), `elst` `RepeatEdits` + `tkhd` duration, §7.2.1 matrix → rotation / mirror; framework `Demuxer` with pts / dts / sync / seek |
+| Writer | `HeifWriter` (coded / grid / overlay / identity / `tmap` / `cfen` / `tili` / `cexg` items, thumbnails, alpha / depth, Exif / XMP (raw bodies, any encoding) / arbitrary `cdsc` items, item names, entity groups with flags and payloads (`pymd` pyramids, `stem` stereo with fallback), de-duplicated `ipco`, MIAF `mdat` order, `deti` data references, brand auto-selection); `SequenceWriter` (`msf1` / `hevc`, brand override, `pict` track + `ccst`, HDR sample-entry boxes, `stco` / `co64` per §8.7.5, looping via `elst`, cover-image `meta` that can alias a track sample; opens in libheif / ImageMagick / ffmpeg / Apple ImageIO) |
+| Gain maps | ISO 21496-1 + HEIF Amd 1:2025 §6.6.2.4 (the published text; "fully applied" = weight ±1.0): `ToneMapImage` body (`version` 0 + C.2 `GainMapMetadata`), `dimg` = [base, gain map] (count 2 enforced), the three `colr` placements and the `tmap` brand (§10.2.6) checked; `DecodedImage::gain_map` (decoded gain-map item + metadata + alternate `colr`), `apply_gain_map(h_target)` → linear RGB in the application space (Formulas 1–3, §6.2.2 resampling, Annex B primaries conversion, single↔multi-channel rules, limited-range clip); `ItemDecoder::tone_mapped()` → the reconstruction in the `tmap` item's `colr` at its `pixi` depth (alpha carried over); writer authors `tmap` items (`HeifWriter::add_tone_map`, `EncodeOptions::gain_map`) with the hidden map, the brand and the `altr` [tmap, base] fallback; matches a black-box tone-mapper within 1 code at every headroom (2 on the half-size map, 7 after a BT.2020→709 conversion of the 16-bit PQ reconstruction), and the tool tone-maps our authored file identically to its own |
+| Colour | `rgb::to_rgb`: YCbCr → RGB(A) with the item `colr` matrix / range (H.273), identity (GBR), monochrome, alpha carried; the renderer step over the composed frame. Framework: the effective `nclx` rides as the core `ColorSignal` on streams and frames; identity-matrix 4:4:4 items are planar RGB (`Gbrp*` / `Gbrap*`) end to end |
+| Encoder (`registry`) | `encode_still`: HEVC (lossless `pcm` or CABAC `intra` at a QP; VUI range + colour description, Main Still Picture, `rd` / `tiles`) or AV1 stills (lossless or quality 0..=100, `speed`, native 8/10/12-bit 4:0:0–4:4:4, `av1C` from the codec configuration) items, padding + `clap`, grid tiling (MIAF 64-px floor), thumbnails, alpha (per-codec `auxC` URN, single-channel `pixi`, own parameter-set ids; AV1 alpha as a monochrome still), Exif / XMP / ICC, transforms as essential properties on the coded item; `rd` / `tiles` pick the HEVC quadtree coder's CTB size automatically (`auto_ctb`, or `hevc_ctb`); `"heif"` framework `Encoder` (frame in — planar YCbCr / grey / planar RGB (`Gbrp*`, coded identity-matrix 4:4:4 by AV1) or packed RGB / RGBA / BGR(A) / 16-bit / grey+alpha — file out; declared options `codec` / `mode` / `qp` / `grid` / `thumbnail` / `range` / `quality` / `speed` / `rd` / `tiles` / `ctb`); the `"heif"` muxer passes its whole-file packets through, so `oxideav convert in.png out.heic` writes a HEIC |
+| Fuzz | `fuzz/`: `heif_parse`, `heif_compose`, `heif_sequence`, `heif_records` (standalone build; `mini`, `deti`, `cfen` and every typed property with round-trip oracles), daily workflow |
 
 `iscl` is applied at composition (§6.5.13); `tmap` gain maps are
 applied on request (`DecodedImage::apply_gain_map` /
@@ -122,8 +123,36 @@ and BT.2020-application-space gain maps, base headroom 0 → alternate
 `apply_gain_map` at headrooms 0 / 2 / 4 matches the tool's tone-mapped
 renditions within 1 code (2 on the half-size resample).
 
-`tmap` carriage is ISO/IEC 23008-12:2025/Amd 1 §6.6.2.4 (staged as the
-MPEG DAM text): `dimg` = [base, gain map] with `reference_count` 2, the
+**Layered items** (`tests/layered.rs`, `tests/fixtures/layered/`): a
+three-frame MV-HEVC stereo movie from a black-box producer (Apple
+VideoToolbox through `AVAssetWriter`; the producer source is vendored)
+has its first access unit wrapped by `HeifWriter` as the HEIF stereo
+shape — two `lhv1` items over the same access unit with `lsel` 0 / 1
+in a `ster` group — and as a bare two-output-layer item. Each view
+decodes **byte-exact** against the black-box decoder's per-view output
+(`ffmpeg -view_ids 0` / `1`); the framework still stream announces the
+two views (`CodecParameters::layers`) and the `"heif"` decoder emits
+both frames tagged with the core `LayerIdentity`. No third-party reader
+on the machine opens `lhv1` items (reported, not asserted).
+
+**Low-overhead files** (`tests/mini.rs`): `encode_still_minimized`'s
+`mif3` files (HEVC / AV1, alpha, ICC, Exif, XMP, gain map, orientation)
+decode byte-identically to the regular writer's file of the same
+picture, and `heif-convert` renders both identically; it keys its codec
+choice on the equivalent brand this writer puts in `minor_version`.
+
+**Tiled / enhanced items** (`tests/tiled.rs`): `tili` items with a
+padded last row / column and an empty tile, `cexg` items with one
+extent per tile and `cfen` items (Y + Cb + Cr at full or half
+resolution, R + G + B under an identity matrix) round-trip through the
+writer and the reader (serial and parallel) to the expected
+composition; no third-party producer of these exists here.
+
+`tmap` carriage is ISO/IEC 23008-12:2025/Amd 1:2025 §6.6.2.4 (the
+published amendment, reconciled in r463 against the MPEG draft it was
+built from — the one normative addition is the "fully applied"
+definition, a weight of +1.0 / −1.0, which the reconstruction already
+met): `dimg` = [base, gain map] with `reference_count` 2, the
 item body is a `ToneMapImage` (`version` 0, then the C.2 metadata — any
 other version is refused), the base carries the baseline `colr`, the
 gain map an `nclx` with primaries = transfer = 2 (its matrix / range
@@ -131,13 +160,17 @@ decode the stored map; limited range clips to 0..1), the `tmap` item
 the alternate `colr`; `ispe` on all three (the output is the base's
 size), `pixi` on the `tmap` as the applied colour-resolution hint, the
 gain map hidden, the `tmap` compatible brand (§10.2.6), and an `altr`
-[tmap, base] group for readers without tone-map support. Decoding the
+[tmap, base] group for readers without tone-map support — under MIAF
+Amd 1:2025 §7.3.11.5 that grouping with a valid master image is
+mandatory (`check` reports `"MIAF-A1 7.3.11.5"`). Decoding the
 `tmap` item yields the base by default (an SDR pipeline's choice) and
 the normative reconstruction — the map fully applied, re-encoded in
 the `tmap` item's `colr` at the `pixi` depth — with
 `ItemDecoder::tone_mapped()`; a `tmap` feeding another derived item is
-always the applied image (§6.6.2.4.1). The 4th-ed. WD's "alpha /
-depth carried over" paragraph is followed for alpha. ISO 21496-1 anchors
+always the applied image (§6.6.2.4.1). The published Amd 1 says
+nothing about the other channels; the base's alpha is carried over to
+the reconstruction as this crate's reading of §6.9.1 (the 4th-edition
+working draft proposes the same). ISO 21496-1 anchors
 the application space at HDR reference white = 1.0 but names no
 absolute luminance for a PQ alternate; the reconstruction uses
 203 cd/m² (the example in its 3.6) unless `with_reference_white`
@@ -254,44 +287,41 @@ writer round-trips (`tests/gainmap.rs`, `tests/avc_lhevc.rs`,
 `tests/writer.rs`) and, for gain maps, the vendored oracle files.
 
 
-## Performance baseline (r462)
+## Performance (r463; baseline r462)
 
 `examples/heifbench` (`cargo run --release --example heifbench --
-<files>`), reference machine: Apple M4 Max, macOS 26.6, rustc 1.98.1,
-release build, medians of 3 runs. No optimisation has
-been applied yet; these are the "before" numbers for the optimisation
-rounds.
-
-The three inputs are the matrix run's 4032×3024 (12 MP) files: Apple
+[--threads N|auto] <files>`), reference machine: Apple M4 Max (16
+cores), macOS 26.6, rustc 1.98.1, release build, medians of 5 runs. The
+three inputs are the matrix run's 4032×3024 (12 MP) files: Apple
 ImageIO's 512-px `grid` HEIC (48 tiles + `grid`), `heif-enc` x265's
-single-item HEIC and `heif-enc` aom's single-item AVIF, all 8-bit
-4:2:0 of the same synthetic picture (smooth gradients — hence the
-small files; a photograph codes to 10–30× the bytes and takes the
-entropy decoder longer). Decode = `HeifFile::parse` + `decode_primary`
-(direct factories), medians of 3 in-process runs; peak RSS = maximum
-resident set size of a fresh process decoding once; encode = the
-decoded picture re-encoded with `EncodeOptions` defaults (HEVC:
-`intra` QP 26; AV1: quality 60, `fast`), one run.
+single-item HEIC and `heif-enc` aom's single-item AVIF, all 8-bit 4:2:0
+of the same synthetic picture. Decode = `HeifFile::parse` +
+`decode_primary` (direct factories) under an `ExecutionContext` of the
+given thread budget; peak RSS = maximum resident set size of a fresh
+process decoding once. The output FNV-1a is the byte-identity gate: it
+did not move between r462 and any r463 configuration.
 
-| File | Size | Layout | Items | Decode | Peak RSS (decode) | Encode HEVC default | Encode AV1 default |
-|---|---|---|---|---|---|---|---|
-| Apple grid HEIC | 179 KiB | 4032×3024 4:2:0 8-bit | 49 | 0.333 s | 83 MiB | 2.67 s (35 KiB) | 96.0 s (10 KiB) |
-| single-item HEIC | 45 KiB | 4032×3024 4:2:0 8-bit | 1 | 0.299 s | 290 MiB | 2.70 s (33 KiB) | 90.9 s (11 KiB) |
-| single-item AVIF | 34 KiB | 4032×3024 4:2:0 8-bit | 1 | 0.700 s | 229 MiB | 2.65 s (39 KiB) | 88.8 s (13 KiB) |
+| File | r462 decode / RSS | r463 serial | 2 threads | 4 threads | 8 threads | 16 threads |
+|---|---|---|---|---|---|---|
+| Apple grid HEIC (49 items) | 0.330 s / 89 MiB | 0.326 s / 52 MiB | 0.180 s / 61 MiB | 0.100 s / 69 MiB | 0.058 s / 88 MiB | 0.063 s / 130 MiB |
+| single-item HEIC | 0.294 s / 290 MiB | 0.298 s / 290 MiB | — | — | — | — |
+| single-item AVIF | 0.778 s / 229 MiB | 0.709 s / 226 MiB | — | — | — | — |
 
-Reading the numbers: the grid decode holds one 512×512 tile plus the
-canvas at a time (83 MiB), while a single 12 MP HEVC / AV1 item peaks
-at 229–290 MiB — the codec's own picture buffers plus the tight copy
-this crate takes of the decoded planes (`frame_from_planes`) plus the
-composition output; the AV1 decode is 2.3× the HEVC one at equal
-picture size. Encoding is dominated by the codec: the AV1 still
-encoder at `fast` takes ~90 s for 12 MP (≈ 7.5 µs / pixel), the HEVC
-intra encoder ~2.7 s. Obvious optimisation targets for the following
-rounds, in order: (1) decode planes straight into the composition
-canvas instead of copying (single-item RSS ≈ codec buffers only), (2)
-tile-parallel grid decode, (3) the AV1 encoder's per-pixel cost (a
-codec-crate item), (4) `to_yuv420_8` / `packed_to_planar` conversions
-in the encode path.
+What changed (phase 1, container side): grid / `tili` / `cexg` tiles
+decode as independent jobs on up to `effective_workers` threads (codec
+instances made on the workers, each serial) and are written straight
+into an output-size canvas as they complete; reconstructions move out
+of the codec's planes when they are tight, an untransformed item is
+not copied, and coded items are cached only while another use in the
+graph follows. The serial grid decode holds the canvas plus one tile
+(89 → 52 MiB); the single-item cases are the codecs' own work and
+buffers (a 12 MP HEVC still decodes in 0.30 s with a 290 MiB peak
+inside oxideav-h265, AVIF 0.71 s / 226 MiB inside oxideav-av1) — the
+container adds no copies any more. Handing a single still's codec the
+thread budget measured slower (HEVC 0.30 → 0.34 s), so the budget is
+spent on independent items only. Encoding is unchanged from r462: the
+HEVC intra encoder ~2.7 s, the AV1 still encoder ~90 s at `fast` for
+12 MP (codec-crate items).
 
 ## Standalone build
 
