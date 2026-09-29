@@ -212,6 +212,36 @@ impl<D: AsRef<[u8]>> HeifFile<D> {
         self.item_data(item_id).map(Cow::into_owned)
     }
 
+    /// The payload of every `iloc` extent of an item, one slice per
+    /// extent in `iloc` order (construction methods 0 and 1; the
+    /// extents of a method-2 item are offsets into other items and are
+    /// refused here). HEIF Amd 1:2025 §6.5.41 (`cexg`) makes each
+    /// extent one independently decodable tile.
+    pub fn item_extents(&self, item_id: u32) -> Result<Vec<&[u8]>> {
+        let meta = self.meta()?;
+        let loc = meta
+            .location(item_id)
+            .ok_or_else(|| HeifError::invalid(format!("item {item_id} has no iloc entry")))?;
+        let source: &[u8] = match loc.construction_method {
+            0 => {
+                self.check_self_contained(meta, loc)?;
+                self.bytes()
+            }
+            1 => meta.idat.as_deref().ok_or_else(|| {
+                HeifError::invalid(format!(
+                    "item {item_id} uses idat offsets but meta has no idat box"
+                ))
+            })?,
+            m => {
+                return Err(HeifError::unsupported(format!(
+                    "item {item_id}: per-extent access to construction method {m} data"
+                )))
+            }
+        };
+        let spans = self.spans_in(loc, source.len())?;
+        Ok(spans.iter().map(|(s, e)| &source[*s..*e]).collect())
+    }
+
     /// The byte spans (absolute file offsets) of an item whose data
     /// lives in this file via construction method 0. Used by the
     /// demuxers to hand out packets without copying twice.

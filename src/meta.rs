@@ -61,6 +61,11 @@ pub const ITEM_TYPE_IOVL: FourCc = *b"iovl";
 pub const ITEM_TYPE_IDEN: FourCc = *b"iden";
 /// Tone-map derived image item (ISO/IEC 21496-1 gain maps).
 pub const ITEM_TYPE_TMAP: FourCc = *b"tmap";
+/// Tiled image item (HEIF Amd 2:2026 §6.11).
+pub const ITEM_TYPE_TILI: FourCc = *b"tili";
+/// Colour format enhancement derived image item (HEIF Amd 1:2025
+/// §6.6.2.5).
+pub const ITEM_TYPE_CFEN: FourCc = *b"cfen";
 /// Exif metadata item (Annex A.2).
 pub const ITEM_TYPE_EXIF: FourCc = *b"Exif";
 /// Deflate-compressed Exif metadata item (HEIF Amd 2:2026 A.2.1).
@@ -145,12 +150,24 @@ impl ItemInfo {
         self.flags & 1 == 1
     }
 
-    /// `true` for the derived image item types this crate knows.
+    /// `true` for the derived image item types this crate knows, and
+    /// for tiled image items (`tili`, Amd 2:2026 §6.11 — composed from
+    /// tiles like a grid, without input items).
     pub fn is_derived_image(&self) -> bool {
         matches!(
             self.item_type,
-            ITEM_TYPE_GRID | ITEM_TYPE_IOVL | ITEM_TYPE_IDEN | ITEM_TYPE_TMAP
+            ITEM_TYPE_GRID
+                | ITEM_TYPE_IOVL
+                | ITEM_TYPE_IDEN
+                | ITEM_TYPE_TMAP
+                | ITEM_TYPE_TILI
+                | ITEM_TYPE_CFEN
         )
+    }
+
+    /// `true` for a tiled image item (`tili`).
+    pub fn is_tiled_image(&self) -> bool {
+        self.item_type == ITEM_TYPE_TILI
     }
 
     /// `true` for the coded image item types this crate knows.
@@ -433,14 +450,21 @@ impl EntityGroup {
 /// One `dref` entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DataReference {
-    /// Entry box type (`url ` / `urn `).
+    /// Entry box type (`url ` / `urn ` / `deti`).
     pub entry_type: FourCc,
-    /// `(flags & 1) == 1`: the data is in this file.
+    /// The data is in this file: `(flags & 1) == 1` for `url ` /
+    /// `urn `; for a `deti` entry (HEIF Amd 2:2026 §6.11.5, whose
+    /// flags are field widths) `external_tiles_urls == 0`.
     pub self_contained: bool,
     /// `location` string for `url ` entries (empty when self-contained).
     pub location: String,
     /// `name` string for `urn ` entries.
     pub name: String,
+    /// The entry's FullBox flags.
+    pub flags: u32,
+    /// The entry body after the FullBox header (parsed by
+    /// [`crate::tiled::DataEntryTiledItem::parse`] for `deti`).
+    pub payload: Vec<u8>,
 }
 
 /// Parsed file-level `meta` box.
@@ -1106,11 +1130,18 @@ fn parse_dinf(p: &[u8]) -> Result<Vec<DataReference>> {
             }
             _ => (String::new(), String::new()),
         };
+        let self_contained = if &h.box_type == b"deti" {
+            (eflags >> 7) & 1 == 0
+        } else {
+            eflags & 1 == 1
+        };
         out.push(DataReference {
             entry_type: h.box_type,
-            self_contained: eflags & 1 == 1,
+            self_contained,
             location,
             name,
+            flags: eflags,
+            payload: ebody.to_vec(),
         });
         cursor = h.end();
     }

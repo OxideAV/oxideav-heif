@@ -12,7 +12,8 @@ use crate::boxes::{fourcc_str, FourCc, Reader};
 use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
 use crate::meta::{
-    reference, ItemInfo, Meta, ITEM_TYPE_GRID, ITEM_TYPE_IDEN, ITEM_TYPE_IOVL, ITEM_TYPE_TMAP,
+    reference, ItemInfo, Meta, ITEM_TYPE_CFEN, ITEM_TYPE_GRID, ITEM_TYPE_IDEN, ITEM_TYPE_IOVL,
+    ITEM_TYPE_TILI, ITEM_TYPE_TMAP,
 };
 use crate::props::{AuxKind, ItemProperties};
 
@@ -217,6 +218,121 @@ pub enum ImageKind {
     Identity,
     /// A `tmap` (tone map / gain map) derived image; body kept raw.
     ToneMap(Vec<u8>),
+    /// A `tili` tiled image item (Amd 2:2026 §6.11).
+    Tiled(TiledItem),
+    /// A `cfen` colour format enhancement derived image (Amd 1:2025
+    /// §6.6.2.5).
+    ColourFormatEnhancement(ColourFormatEnhancement),
+}
+
+/// The `ColourFormatEnhancement` body of a `cfen` item (HEIF Amd 1:2025
+/// §6.6.2.5.2, channel table as amended by Amd 2:2026): per input, the
+/// channel(s) its luma plane carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColourFormatEnhancement {
+    /// One entry per `dimg` input, in reference order.
+    pub inputs: Vec<CfenInput>,
+}
+
+/// What one `cfen` input's luma plane carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CfenInput {
+    /// `is_packed_flag == 0`: the whole luma plane is `channel_id`
+    /// (Table 2: 1 unspecified, 2 Y / R / C, 3 Cb / G / M, 4 Cr / B / Y,
+    /// 5 alpha, 6 depth, 7 K).
+    Channel(u8),
+    /// `is_packed_flag == 1`: the luma plane is partitioned into
+    /// `rows × cols` regions separated by guard bands.
+    Packed {
+        /// `num_cols_minus1 + 1`.
+        cols: u8,
+        /// `num_rows_minus1 + 1`.
+        rows: u8,
+        /// `hor_guard_band_mul2` (guard band = value × 2).
+        hor_guard_band_mul2: u8,
+        /// `ver_guard_band_mul2`.
+        ver_guard_band_mul2: u8,
+        /// `packed_channel_id[j][k]`, row-major.
+        channels: Vec<u8>,
+    },
+}
+
+impl ColourFormatEnhancement {
+    /// Parse a `cfen` item body for `reference_count` inputs.
+    pub fn parse(body: &[u8], reference_count: usize) -> Result<Self> {
+        let mut r = crate::boxes::Reader::new(body);
+        let version = r.u8("cfen version")?;
+        if version != 0 {
+            return Err(HeifError::unsupported(format!(
+                "cfen version {version} (Amd 1 defines 0)"
+            )));
+        }
+        let mut inputs = Vec::with_capacity(reference_count.min(64));
+        for _ in 0..reference_count {
+            let packed = r.u8("cfen is_packed_flag")? & 1 == 1;
+            if packed {
+                let w = r.u16("cfen packing")?;
+                let cols = ((w >> 13) & 7) as u8 + 1;
+                let rows = ((w >> 10) & 7) as u8 + 1;
+                let hor = ((w >> 5) & 0x1f) as u8;
+                let ver = (w & 0x1f) as u8;
+                let channels = r
+                    .bytes(cols as usize * rows as usize, "cfen packed_channel_id")?
+                    .to_vec();
+                inputs.push(CfenInput::Packed {
+                    cols,
+                    rows,
+                    hor_guard_band_mul2: hor,
+                    ver_guard_band_mul2: ver,
+                    channels,
+                });
+            } else {
+                inputs.push(CfenInput::Channel(r.u8("cfen channel_id")?));
+            }
+        }
+        Ok(Self { inputs })
+    }
+
+    /// Serialise as a `cfen` item body.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut b = vec![0u8];
+        for i in &self.inputs {
+            match i {
+                CfenInput::Channel(c) => {
+                    b.push(0);
+                    b.push(*c);
+                }
+                CfenInput::Packed {
+                    cols,
+                    rows,
+                    hor_guard_band_mul2,
+                    ver_guard_band_mul2,
+                    channels,
+                } => {
+                    b.push(1);
+                    let w = ((cols.saturating_sub(1) as u16 & 7) << 13)
+                        | ((rows.saturating_sub(1) as u16 & 7) << 10)
+                        | ((*hor_guard_band_mul2 as u16 & 0x1f) << 5)
+                        | (*ver_guard_band_mul2 as u16 & 0x1f);
+                    b.extend_from_slice(&w.to_be_bytes());
+                    b.extend_from_slice(channels);
+                }
+            }
+        }
+        b
+    }
+}
+
+/// A `tili` item's tiling: its `tilC` and the properties the
+/// `TileItemPropertyAssociationBox` gives every tile (decoder
+/// configuration first, as for a coded item).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TiledItem {
+    /// `tilC`.
+    pub config: crate::props::TilC,
+    /// The tiles' properties (empty for external tiles, whose
+    /// properties live in their own files).
+    pub tile_properties: ItemProperties,
 }
 
 /// One node of a derivation graph.
@@ -272,6 +388,14 @@ impl ImageNode {
                 "item {} ('{}'): no ispe property (HEIF §6.5.3 requires one)",
                 self.item.id,
                 fourcc_str(t)
+            ))),
+            ImageKind::Tiled(_) => Err(HeifError::invalid(format!(
+                "item {} (tili): no ispe property (Amd 2 §6.11.2 requires one)",
+                self.item.id
+            ))),
+            ImageKind::ColourFormatEnhancement(_) => Err(HeifError::invalid(format!(
+                "item {} (cfen): no ispe property (Amd 1 §6.6.2.5.1 requires one)",
+                self.item.id
             ))),
         }
     }
@@ -397,6 +521,45 @@ fn build_node<D: AsRef<[u8]>>(
             }
             ImageKind::Identity
         }
+        ITEM_TYPE_CFEN => {
+            // Amd 1 §6.6.2.5.1: reference_count >= 1.
+            if input_ids.is_empty() {
+                stack.pop();
+                return Err(HeifError::invalid(format!(
+                    "cfen item {item_id} has no input (reference_count shall be >= 1)"
+                )));
+            }
+            let body = file.item_data(item_id)?;
+            ImageKind::ColourFormatEnhancement(ColourFormatEnhancement::parse(
+                &body,
+                input_ids.len(),
+            )?)
+        }
+        ITEM_TYPE_TILI => {
+            if !input_ids.is_empty() {
+                stack.pop();
+                return Err(HeifError::invalid(format!(
+                    "tili item {item_id} has dimg inputs (its tiles are addressed through deti)"
+                )));
+            }
+            let tilc = properties.tilc().cloned().ok_or_else(|| {
+                HeifError::invalid(format!(
+                    "tili item {item_id} without a tilC property (Amd 2 §6.11.3)"
+                ))
+            })?;
+            let tile_properties = match &tilc.in_file_tiles {
+                Some((_, assoc)) => ItemProperties::from_associations(
+                    meta,
+                    assoc,
+                    &format!("tili item {item_id} tile"),
+                )?,
+                None => ItemProperties::from_associations(meta, &[], "tili")?,
+            };
+            ImageKind::Tiled(TiledItem {
+                config: tilc,
+                tile_properties,
+            })
+        }
         ITEM_TYPE_TMAP => {
             // HEIF Amd 1 §6.6.2.4.1: reference_count shall be 2 — the
             // base input image, then the gain map input image.
@@ -488,7 +651,12 @@ fn build_node<D: AsRef<[u8]>>(
 pub fn is_derived_type(t: &FourCc) -> bool {
     matches!(
         *t,
-        ITEM_TYPE_GRID | ITEM_TYPE_IOVL | ITEM_TYPE_IDEN | ITEM_TYPE_TMAP
+        ITEM_TYPE_GRID
+            | ITEM_TYPE_IOVL
+            | ITEM_TYPE_IDEN
+            | ITEM_TYPE_TMAP
+            | ITEM_TYPE_TILI
+            | ITEM_TYPE_CFEN
     )
 }
 

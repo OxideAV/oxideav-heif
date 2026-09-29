@@ -108,6 +108,43 @@ pub fn predict_output(node: &ImageNode) -> Result<(HeifPixelFormat, (u32, u32))>
                 .ok_or_else(|| HeifError::invalid("derived item without inputs"))?;
             predict_output(first)?
         }
+        ImageKind::ColourFormatEnhancement(c) => {
+            let mut geometry = Vec::with_capacity(node.inputs.len());
+            for i in &node.inputs {
+                let (f, size) = predict_output(i)?;
+                geometry.push((size, f.bit_depth));
+            }
+            let (f, size, _) = crate::compose::plan_colour_format_enhancement(
+                c,
+                &geometry,
+                node.properties.nclx(),
+            )?;
+            (f, size)
+        }
+        ImageKind::Tiled(t) => {
+            // The tiles' layout comes from their tilC-associated decoder
+            // configuration; odd tile / output sizes promote as a grid.
+            let (w, h) = node.reconstructed_size()?;
+            let f = decode::layout_of(&t.tile_properties).ok_or_else(|| {
+                HeifError::invalid(format!(
+                    "item {}: no decoder configuration among the tile properties",
+                    node.item.id
+                ))
+            })?;
+            let (tw, th) = (t.config.tile_width, t.config.tile_height);
+            let promote = needs_444(
+                f.chroma,
+                tw % 2 == 1 || w % 2 == 1,
+                th % 2 == 1 || h % 2 == 1,
+            );
+            (
+                HeifPixelFormat {
+                    chroma: if promote { Chroma::Yuv444 } else { f.chroma },
+                    ..f
+                },
+                (w, h),
+            )
+        }
     };
     for e in node.properties.transformative() {
         match &e.property {

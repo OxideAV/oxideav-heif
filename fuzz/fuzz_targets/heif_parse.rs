@@ -25,6 +25,7 @@ fuzz_target!(|data: &[u8]| {
     for it in meta.items.iter().take(256) {
         let _ = file.item_data(it.id);
         let _ = file.item_file_spans(it.id);
+        let _ = file.item_extents(it.id);
         let _ = ItemProperties::resolve(meta, it.id).map(|p| {
             let _ = p.output_size((64, 64), false);
             let _ = p.unsupported_essential();
@@ -48,6 +49,12 @@ fuzz_target!(|data: &[u8]| {
     }
     let _ = file.primary_item();
     let _ = meta.display_order();
+    let _ = file.minimized.as_ref().map(|m| m.to_box());
+    for d in meta.data_references.iter().take(16) {
+        if let Ok(deti) = oxideav_heif::tiled::DataEntryTiledItem::parse(d) {
+            let _ = deti.tile_spans(data, 4);
+        }
+    }
     for g in meta.entity_groups.iter().take(64) {
         let _ = (
             g.version,

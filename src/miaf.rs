@@ -969,6 +969,52 @@ fn walk(rep: &mut MiafReport, node: &ImageNode, profile: MiafProfile) {
             }
         }
         ImageKind::Coded(_) | ImageKind::ToneMap(_) => {}
+        ImageKind::ColourFormatEnhancement(_) => {
+            // HEIF Amd 1 §6.6.2.5.1: the cfen item carries pixi + ispe +
+            // an nclx colr; every input pixi + ispe; the inputs after the
+            // first shall be hidden.
+            if node.properties.pixi().is_none()
+                || node.properties.ispe().is_none()
+                || node.properties.nclx().is_none()
+            {
+                rep.push(
+                    "HEIF-A1 6.6.2.5.1",
+                    Some(id),
+                    "cfen item needs pixi, ispe and an nclx colr",
+                );
+            }
+            for (k, i) in node.inputs.iter().enumerate() {
+                if i.properties.pixi().is_none() || i.properties.ispe().is_none() {
+                    rep.push(
+                        "HEIF-A1 6.6.2.5.1",
+                        Some(i.item.id),
+                        "cfen input needs pixi and ispe",
+                    );
+                }
+                if k > 0 && !i.item.is_hidden() {
+                    rep.push(
+                        "HEIF-A1 6.6.2.5.1",
+                        Some(i.item.id),
+                        "cfen inputs after the first shall be hidden",
+                    );
+                }
+            }
+        }
+        ImageKind::Tiled(t) => {
+            // HEIF Amd 2 §6.11.2 / §6.11.3: tilC + ispe; a tile size of
+            // 0 has no geometry.
+            let t = &t.config;
+            if t.tile_width == 0 || t.tile_height == 0 {
+                rep.push(
+                    "HEIF-A2 6.11.3.3",
+                    Some(id),
+                    format!("tilC tile size {}x{}", t.tile_width, t.tile_height),
+                );
+            }
+            if node.properties.ispe().is_none() {
+                rep.push("HEIF-A2 6.11.2", Some(id), "tili item without ispe");
+            }
+        }
     }
     for i in &node.inputs {
         walk(rep, i, profile);

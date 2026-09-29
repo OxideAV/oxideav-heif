@@ -63,6 +63,27 @@ pub enum ItemBody {
     Metadata(Vec<u8>),
     /// A `tmap` `ToneMapImage` body (`idat`, construction method 1).
     ToneMap(Vec<u8>),
+    /// A `cfen` `ColourFormatEnhancement` body (`idat`).
+    ColourFormatEnhancement(crate::derived::ColourFormatEnhancement),
+    /// A coded image item stored as several `iloc` extents (`mdat`,
+    /// construction method 0) — the shape of a `cexg` item (HEIF Amd
+    /// 1:2025 §6.5.41), every extent one independently decodable tile.
+    CodedExtents(Vec<Vec<u8>>),
+    /// A `tili` tiled image item (HEIF Amd 2:2026 §6.11): the packed
+    /// tile data + offset table (`mdat`, addressed through a `deti`
+    /// data reference), the `deti` entry `(flags, payload)` and the
+    /// tiles' properties (written to `ipco`, associated through the
+    /// `tilC`'s `TileItemPropertyAssociationBox`).
+    Tiled {
+        /// Tile data followed by the `TiledImageOffsetTable`.
+        data: Vec<u8>,
+        /// `deti` FullBox flags + body.
+        deti: (u32, Vec<u8>),
+        /// `tile_item_type`.
+        tile_item_type: FourCc,
+        /// Properties of every tile, in association order.
+        tile_properties: Vec<(Property, bool)>,
+    },
 }
 
 #[doc(hidden)]
@@ -88,6 +109,10 @@ pub struct WriterItem {
 /// A queued entity group: `(grouping_type, group_id, flags, entity ids,
 /// payload after the ids)`.
 type QueuedGroup = (FourCc, u32, u32, Vec<u32>, Vec<u8>);
+
+/// One `iloc` item entry being laid out: `(item id, construction
+/// method, extents as (offset, length))`.
+type IlocEntry = (u32, u8, Vec<(u64, u64)>);
 
 /// Builder for a still-image / image-collection file.
 #[derive(Clone, Debug, Default)]
@@ -143,6 +168,178 @@ impl HeifWriter {
             properties,
         });
         id
+    }
+
+    /// Add a `cfen` colour format enhancement derived item (HEIF Amd
+    /// 1:2025 §6.6.2.5) over `inputs` `(item id, channel_id)` in
+    /// reference order; `properties` shall carry `pixi`, `ispe` and an
+    /// `nclx` `colr`. Inputs after the first are marked hidden
+    /// (§6.6.2.5.1).
+    pub fn add_colour_format_enhancement(
+        &mut self,
+        inputs: &[(u32, u8)],
+        properties: Vec<(Property, bool)>,
+    ) -> Result<u32> {
+        if inputs.is_empty() {
+            return Err(HeifError::invalid("cfen: at least one input"));
+        }
+        let body = crate::derived::ColourFormatEnhancement {
+            inputs: inputs
+                .iter()
+                .map(|(_, c)| crate::derived::CfenInput::Channel(*c))
+                .collect(),
+        };
+        let id = self.alloc_id();
+        self.items.push(WriterItem {
+            id,
+            item_type: crate::meta::ITEM_TYPE_CFEN,
+            name: String::new(),
+            content_type: None,
+            hidden: false,
+            body: ItemBody::ColourFormatEnhancement(body),
+            properties,
+        });
+        for (k, (input, _)) in inputs.iter().enumerate() {
+            if k > 0 {
+                self.set_hidden(*input, true);
+            }
+        }
+        self.add_reference(
+            crate::derived::DIMG,
+            id,
+            inputs.iter().map(|(i, _)| *i).collect(),
+        );
+        Ok(id)
+    }
+
+    /// Add a coded image item whose picture is `rows × columns`
+    /// independently decodable tiles of `tile_width × tile_height`,
+    /// one `iloc` extent each in row-major order, described by a `cexg`
+    /// property (HEIF Amd 1:2025 §6.5.41; the tiles decode under the
+    /// item's own decoder configuration). `properties` must carry the
+    /// configuration and the `ispe`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_constrained_extents_item(
+        &mut self,
+        item_type: FourCc,
+        rows: u32,
+        columns: u32,
+        tile_width: u32,
+        tile_height: u32,
+        tiles: Vec<Vec<u8>>,
+        mut properties: Vec<(Property, bool)>,
+    ) -> Result<u32> {
+        if rows == 0 || columns == 0 || tiles.len() as u64 != rows as u64 * columns as u64 {
+            return Err(HeifError::invalid(format!(
+                "constrained extents: {} tiles for {columns}x{rows}",
+                tiles.len()
+            )));
+        }
+        if rows > 65_536 || columns > 65_536 {
+            return Err(HeifError::invalid(
+                "constrained extents: more than 65536 rows or columns",
+            ));
+        }
+        let large_fields = tile_width > u16::MAX as u32 || tile_height > u16::MAX as u32;
+        // cexg is descriptive: it precedes any transformative property.
+        let first_transform = properties
+            .iter()
+            .position(|(p, _)| p.is_transformative())
+            .unwrap_or(properties.len());
+        properties.insert(
+            first_transform,
+            (
+                Property::Cexg(crate::props::Cexg {
+                    rows,
+                    columns,
+                    tile_width,
+                    tile_height,
+                    large_fields,
+                    extent_config: None,
+                }),
+                false,
+            ),
+        );
+        let id = self.alloc_id();
+        self.items.push(WriterItem {
+            id,
+            item_type,
+            name: String::new(),
+            content_type: None,
+            hidden: false,
+            body: ItemBody::CodedExtents(tiles),
+            properties,
+        });
+        Ok(id)
+    }
+
+    /// Add a `tili` tiled image item (HEIF Amd 2:2026 §6.11) of
+    /// `width × height` pixels cut into `tile_width × tile_height`
+    /// tiles: `tiles` are the coded tile payloads in row-major order
+    /// (`None` = an empty tile; the count must be `ceil(w / tw) ×
+    /// ceil(h / th)`), each a picture of `tile_item_type` decodable under
+    /// `tile_properties` (decoder configuration first). The tiles are
+    /// stored back to back followed by the offset table (32-bit offsets
+    /// and sizes) and addressed through a `deti` data reference; the
+    /// item carries `tilC` + `ispe` + `properties`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_tiled_item(
+        &mut self,
+        width: u32,
+        height: u32,
+        tile_width: u32,
+        tile_height: u32,
+        tile_item_type: FourCc,
+        tiles: Vec<Option<Vec<u8>>>,
+        tile_properties: Vec<(Property, bool)>,
+        properties: Vec<(Property, bool)>,
+    ) -> Result<u32> {
+        if tile_width == 0 || tile_height == 0 || width == 0 || height == 0 {
+            return Err(HeifError::invalid("tiled item: zero dimension"));
+        }
+        let expect = width.div_ceil(tile_width) as u64 * height.div_ceil(tile_height) as u64;
+        if tiles.len() as u64 != expect {
+            return Err(HeifError::invalid(format!(
+                "tiled item: {} tiles for a {}x{} image of {}x{} tiles ({expect} expected)",
+                tiles.len(),
+                width,
+                height,
+                tile_width,
+                tile_height
+            )));
+        }
+        let (data, _entry, deti) = crate::tiled::DataEntryTiledItem::pack_tiles(&tiles)?;
+        let mut props = vec![
+            (
+                Property::TilC(crate::props::TilC {
+                    tile_width,
+                    tile_height,
+                    extra_dimensions: Vec::new(),
+                    // The association indices are assigned when the
+                    // ipco is laid out.
+                    in_file_tiles: Some((tile_item_type, Vec::new())),
+                }),
+                true,
+            ),
+            (Property::Ispe(crate::props::Ispe { width, height }), false),
+        ];
+        props.extend(properties);
+        let id = self.alloc_id();
+        self.items.push(WriterItem {
+            id,
+            item_type: crate::meta::ITEM_TYPE_TILI,
+            name: String::new(),
+            content_type: None,
+            hidden: false,
+            body: ItemBody::Tiled {
+                data,
+                deti,
+                tile_item_type,
+                tile_properties,
+            },
+            properties: props,
+        });
+        Ok(id)
     }
 
     /// Add a `grid` derived item over `tiles` (row-major); an `ispe`
@@ -586,9 +783,58 @@ impl HeifWriter {
         // ── ipco / ipma
         let mut ipco_boxes: Vec<Vec<u8>> = Vec::new();
         let mut ipma_rows: Vec<(u32, Vec<(u16, bool)>)> = Vec::new();
+        let intern = |ipco_boxes: &mut Vec<Vec<u8>>, p: &Property| -> u16 {
+            let bytes = property_box(p);
+            // Decoder configurations are never shared between
+            // items: Apple ImageIO refuses a file whose master and
+            // alpha auxiliary point at one `hvcC` entry (verified
+            // by re-muxing its own streams both ways), and every
+            // third-party producer writes one record per coded
+            // item. Everything else de-duplicates.
+            let shared = if p.is_decoder_config() {
+                None
+            } else {
+                ipco_boxes.iter().position(|b| *b == bytes)
+            };
+            let idx = match shared {
+                Some(i) => i,
+                None => {
+                    ipco_boxes.push(bytes);
+                    ipco_boxes.len() - 1
+                }
+            };
+            idx as u16 + 1
+        };
         for it in &self.items {
             let mut row = Vec::new();
+            // A tiled item's tile properties go into the ipco first; its
+            // tilC then carries their indices.
+            let tile_assoc: Option<(FourCc, Vec<(bool, u16)>)> = match &it.body {
+                ItemBody::Tiled {
+                    tile_item_type,
+                    tile_properties,
+                    ..
+                } => Some((
+                    *tile_item_type,
+                    tile_properties
+                        .iter()
+                        .map(|(p, e)| (*e, intern(&mut ipco_boxes, p)))
+                        .collect(),
+                )),
+                _ => None,
+            };
             for (p, essential) in &it.properties {
+                let substituted;
+                let p = match (p, &tile_assoc) {
+                    (Property::TilC(t), Some(assoc)) => {
+                        substituted = Property::TilC(crate::props::TilC {
+                            in_file_tiles: Some(assoc.clone()),
+                            ..t.clone()
+                        });
+                        &substituted
+                    }
+                    _ => p,
+                };
                 let bytes = property_box(p);
                 // Decoder configurations are never shared between
                 // items: Apple ImageIO refuses a file whose master and
@@ -730,7 +976,8 @@ impl HeifWriter {
         let mut idat = Vec::new();
         let mut idat_spans: Vec<(u32, u64, u64)> = Vec::new();
         let mut mdat = Vec::new();
-        let mut mdat_spans: Vec<(u32, u64, u64)> = Vec::new();
+        // (item, extents as (offset in mdat, length)).
+        let mut mdat_spans: Vec<(u32, Vec<(u64, u64)>)> = Vec::new();
         let is_thumb_or_meta = |it: &WriterItem| {
             matches!(it.body, ItemBody::Metadata(_))
                 || self
@@ -751,11 +998,27 @@ impl HeifWriter {
                 .iter()
                 .filter(|i| !is_thumb_or_meta(i) && !primary_chain.contains(&i.id)),
         );
+        // `deti` data references of tiled items, in mdat order (the
+        // entry's 1-based position is the item's data_reference_index).
+        let mut dref_entries: Vec<(u32, (u32, Vec<u8>))> = Vec::new();
         for it in order {
             match &it.body {
                 ItemBody::Coded(d) | ItemBody::Metadata(d) => {
-                    mdat_spans.push((it.id, mdat.len() as u64, d.len() as u64));
+                    mdat_spans.push((it.id, vec![(mdat.len() as u64, d.len() as u64)]));
                     mdat.extend_from_slice(d);
+                }
+                ItemBody::CodedExtents(tiles) => {
+                    let mut spans = Vec::with_capacity(tiles.len());
+                    for t in tiles {
+                        spans.push((mdat.len() as u64, t.len() as u64));
+                        mdat.extend_from_slice(t);
+                    }
+                    mdat_spans.push((it.id, spans));
+                }
+                ItemBody::Tiled { data, deti, .. } => {
+                    mdat_spans.push((it.id, vec![(mdat.len() as u64, data.len() as u64)]));
+                    mdat.extend_from_slice(data);
+                    dref_entries.push((it.id, deti.clone()));
                 }
                 ItemBody::Grid(g) => {
                     let b = g.to_bytes();
@@ -770,6 +1033,11 @@ impl HeifWriter {
                 ItemBody::ToneMap(b) => {
                     idat_spans.push((it.id, idat.len() as u64, b.len() as u64));
                     idat.extend_from_slice(b);
+                }
+                ItemBody::ColourFormatEnhancement(c) => {
+                    let b = c.to_bytes();
+                    idat_spans.push((it.id, idat.len() as u64, b.len() as u64));
+                    idat.extend_from_slice(&b);
                 }
                 ItemBody::Identity => {}
             }
@@ -791,32 +1059,55 @@ impl HeifWriter {
             } else {
                 b.extend_from_slice(&(count as u16).to_be_bytes());
             }
-            let mut entries: Vec<(u32, u8, u64, u64)> = Vec::new();
+            let mut entries: Vec<IlocEntry> = Vec::new();
+            entries.extend(mdat_spans.iter().map(|(id, spans)| {
+                (
+                    *id,
+                    0u8,
+                    spans.iter().map(|(o, l)| (mdat_base + o, *l)).collect(),
+                )
+            }));
             entries.extend(
-                mdat_spans
+                idat_spans
                     .iter()
-                    .map(|(id, o, l)| (*id, 0u8, mdat_base + o, *l)),
+                    .map(|(id, o, l)| (*id, 1u8, vec![(*o, *l)])),
             );
-            entries.extend(idat_spans.iter().map(|(id, o, l)| (*id, 1u8, *o, *l)));
             entries.sort_by_key(|e| e.0);
-            for (id, cm, off, len) in entries {
+            for (id, cm, extents) in entries {
                 if large_ids {
                     b.extend_from_slice(&id.to_be_bytes());
                 } else {
                     b.extend_from_slice(&(id as u16).to_be_bytes());
                 }
                 b.extend_from_slice(&(cm as u16).to_be_bytes());
-                b.extend_from_slice(&0u16.to_be_bytes()); // data_reference_index
-                b.extend_from_slice(&1u16.to_be_bytes()); // extent_count
-                b.extend_from_slice(&off.to_be_bytes());
-                b.extend_from_slice(&len.to_be_bytes());
+                let dref_index = dref_entries
+                    .iter()
+                    .position(|(i, _)| *i == id)
+                    .map(|p| p as u16 + 1)
+                    .unwrap_or(0);
+                b.extend_from_slice(&dref_index.to_be_bytes()); // data_reference_index
+                b.extend_from_slice(&(extents.len() as u16).to_be_bytes()); // extent_count
+                for (off, len) in extents {
+                    b.extend_from_slice(&off.to_be_bytes());
+                    b.extend_from_slice(&len.to_be_bytes());
+                }
             }
             full_boxed(b"iloc", if large_ids { 2 } else { 1 }, 0, &b)
+        };
+        let dinf = if dref_entries.is_empty() {
+            Vec::new()
+        } else {
+            let mut d = (dref_entries.len() as u32).to_be_bytes().to_vec();
+            for (_, (flags, payload)) in &dref_entries {
+                d.extend(full_boxed(b"deti", 0, *flags, payload));
+            }
+            boxed(b"dinf", &full_boxed(b"dref", 0, 0, &d))
         };
         let meta_with = |iloc: &[u8]| -> Vec<u8> {
             let mut body = vec![0u8; 4];
             body.extend_from_slice(&hdlr);
             body.extend_from_slice(&pitm);
+            body.extend_from_slice(&dinf);
             body.extend_from_slice(&iloc_placeholder_or(iloc));
             body.extend_from_slice(&iinf);
             body.extend_from_slice(&iref);
@@ -910,7 +1201,7 @@ impl HeifWriter {
                     it.id
                 )));
             }
-            if matches!(it.body, ItemBody::Coded(_))
+            if matches!(it.body, ItemBody::Coded(_) | ItemBody::CodedExtents(_))
                 && !it.properties.iter().any(|(p, _)| p.is_decoder_config())
             {
                 return Err(HeifError::invalid(format!(

@@ -866,6 +866,36 @@ impl ItemProperties {
         Ok(Self { entries })
     }
 
+    /// Resolve an explicit association list `(essential, 1-based ipco
+    /// index)` — the `TileItemPropertyAssociationBox` of a `tilC`
+    /// (HEIF Amd 2:2026 §6.11.3) — against `meta`'s `ipco`.
+    pub fn from_associations(meta: &Meta, assoc: &[(bool, u16)], what: &str) -> Result<Self> {
+        let mut entries = Vec::with_capacity(assoc.len());
+        for (essential, index) in assoc {
+            if *index == 0 {
+                continue;
+            }
+            let raw = meta.properties.get(*index as usize - 1).ok_or_else(|| {
+                HeifError::invalid(format!(
+                    "{what}: property index {index} beyond the {} ipco entries",
+                    meta.properties.len()
+                ))
+            })?;
+            let property = Property::parse(raw).map_err(|e| {
+                HeifError::invalid(format!(
+                    "{what} property #{index} ('{}'): {e}",
+                    fourcc_str(&raw.box_type)
+                ))
+            })?;
+            entries.push(PropertyEntry {
+                index: *index,
+                essential: *essential,
+                property,
+            });
+        }
+        Ok(Self { entries })
+    }
+
     /// Every entry.
     pub fn iter(&self) -> impl Iterator<Item = &PropertyEntry> {
         self.entries.iter()

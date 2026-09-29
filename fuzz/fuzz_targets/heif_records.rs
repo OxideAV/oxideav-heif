@@ -94,6 +94,25 @@ fuzz_target!(|data: &[u8]| {
             let _ = oxideav_heif::derived::build_primary_graph(&f);
         }
     }
+    // deti data reference (Amd 2 §6.11.5) + its offset table over the
+    // same bytes.
+    let dref = oxideav_heif::meta::DataReference {
+        entry_type: *b"deti",
+        self_contained: (sel >> 7) & 1 == 0,
+        location: String::new(),
+        name: String::new(),
+        flags: sel as u32,
+        payload: body.to_vec(),
+    };
+    if let Ok(d) = oxideav_heif::tiled::DataEntryTiledItem::parse(&dref) {
+        let _ = d.tile_spans(body, (sel % 7) as u64);
+    }
+    // cfen body (Amd 1 §6.6.2.5.2): parse → serialize → parse.
+    if let Ok(c) = oxideav_heif::derived::ColourFormatEnhancement::parse(body, sel % 5) {
+        let again =
+            oxideav_heif::derived::ColourFormatEnhancement::parse(&c.to_bytes(), sel % 5).unwrap();
+        assert_eq!(again, c, "cfen must round-trip");
+    }
     // Records on their own.
     if let Ok(m) = GainMapMetadata::parse_tmap_body(body) {
         let again = GainMapMetadata::parse_tmap_body(&m.serialize_tmap_body()).unwrap();

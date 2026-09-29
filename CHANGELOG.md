@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Tiled image items (HEIF Amd 2:2026 §6.11): `tili` items compose from
+  their `deti`-addressed tiles — `tiled::DataEntryTiledItem` parses the
+  `dref` entry (offset / size / count field widths, sequential flag,
+  the external-URL template) and its `TiledImageOffsetTable` (sizes
+  inferred from offset differences when absent, empty tiles), the
+  tiles decode as coded pictures of `tile_item_type` under the
+  `tipa`-associated properties (in parallel under the thread budget),
+  are cropped to the `ispe` and empty tiles render neutral grey
+  (`GridCanvas::place_blank`). `HeifWriter::add_tiled_item` packs
+  tiles + table behind a `deti` (the first `dinf/dref` this writer
+  emits) and threads the tile properties through the `tilC`.
+  Hyperrectangles and external tiles are typed refusals.
+  `HeifFile::item_extents` returns an item's `iloc` extents one by one.
+- `cexg` items (HEIF Amd 1:2025 §6.5.41): a coded item whose `iloc`
+  extents are the tiles of the announced grid decodes extent by
+  extent into the canvas (`HeifWriter::add_constrained_extents_item`
+  writes the multi-extent `iloc`); an `ExtentDecoderConfigurationRecord`
+  is refused (codec-specific, undefined for HEVC / AV1 here).
+- `cfen` colour format enhancement derived items (HEIF Amd 1:2025
+  §6.6.2.5, channel table as amended by Amd 2): the inputs' luma planes
+  become the Y / Cb / Cr (or, under an identity-matrix `colr`, R / G /
+  B) and alpha planes of one picture, the chroma layout following the
+  chroma planes' sizes (`derived::ColourFormatEnhancement`,
+  `compose::composite_colour_format_enhancement` /
+  `plan_colour_format_enhancement`, `HeifWriter::add_colour_format_enhancement`;
+  `check` reports the §6.6.2.5.1 property / hidden-input rules). Packed
+  inputs are refused: the Amd 2 region formula divides by
+  `num_cols_minus1` / `num_rows_minus1` (a docs question, not guessed).
+- `Reader::uint` reads any 1..=8-byte width (the 24 / 40 / 48-bit
+  fields of `deti` tables).
+
 - L-HEVC enhancement layers (oxideav-h265 0.0.12, now the minimum pin):
   an `lhv1` item that carries `hvcC` + `lhvC` decodes through the
   multi-layer decoder (extradata = base `hvcC` ++ item `lhvC`;

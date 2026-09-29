@@ -335,16 +335,16 @@ impl<'a> Reader<'a> {
         Ok([b[0], b[1], b[2], b[3]])
     }
 
-    /// Read an unsigned integer of `width` bytes (0, 4 or 8 — the field
-    /// widths the `iloc` box permits; 0 yields 0). Widths 1 and 2 are
-    /// accepted too for other users.
+    /// Read a big-endian unsigned integer of `width` bytes (0..=8; 0
+    /// yields 0 — the `iloc` convention for an absent field; 3 / 5 / 6
+    /// serve the 24 / 40 / 48-bit fields of `deti` offset tables).
     pub fn uint(&mut self, width: usize, what: &str) -> Result<u64> {
         match width {
             0 => Ok(0),
-            1 => self.u8(what).map(u64::from),
-            2 => self.u16(what).map(u64::from),
-            4 => self.u32(what).map(u64::from),
-            8 => self.u64(what),
+            1..=8 => {
+                let b = self.bytes(width, what)?;
+                Ok(b.iter().fold(0u64, |acc, x| (acc << 8) | *x as u64))
+            }
             w => Err(HeifError::invalid(format!(
                 "{what}: unsupported field width {w}"
             ))),

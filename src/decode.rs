@@ -215,6 +215,18 @@ impl<'r> ItemDecoder<'r> {
     /// (the codec instance is made separately, so jobs can run on
     /// worker threads without touching the file).
     fn prepare<D: AsRef<[u8]>>(&self, file: &HeifFile<D>, node: &ImageNode) -> Result<CodedJob> {
+        self.prepare_with(node, |id| file.item_data(id), node.ispe())
+    }
+
+    /// [`ItemDecoder::prepare`] over a caller-supplied payload source
+    /// and output geometry (a `tili` tile: the tile bytes from the offset
+    /// table, the `tilC` tile size).
+    fn prepare_with<'d>(
+        &self,
+        node: &ImageNode,
+        item_data: impl Fn(u32) -> Result<std::borrow::Cow<'d, [u8]>>,
+        ispe: Option<(u32, u32)>,
+    ) -> Result<CodedJob> {
         let ItemKind::Coded(kind) = classify(node)? else {
             return Err(HeifError::invalid(format!(
                 "item {} is not a coded image",
@@ -223,10 +235,11 @@ impl<'r> ItemDecoder<'r> {
         };
         let mut params = Self::codec_parameters(node)?;
         let mut layers: Option<Vec<u8>> = None;
+        let owned = |id: u32| item_data(id).map(std::borrow::Cow::into_owned);
         let (layout, data) = match &kind {
-            CodedKind::Hevc(c) => (hevc_layout(c)?, file.item_data_owned(node.item.id)?),
-            CodedKind::Av1(c) => (av1_layout(c)?, file.item_data_owned(node.item.id)?),
-            CodedKind::Avc(c) => (c.layout()?, file.item_data_owned(node.item.id)?),
+            CodedKind::Hevc(c) => (hevc_layout(c)?, owned(node.item.id)?),
+            CodedKind::Av1(c) => (av1_layout(c)?, owned(node.item.id)?),
+            CodedKind::Avc(c) => (c.layout()?, owned(node.item.id)?),
             CodedKind::LayeredHevc(cfg) => {
                 let plan = LayeredPlan::of(node, cfg)?;
                 match &plan.extradata {
@@ -241,7 +254,7 @@ impl<'r> ItemDecoder<'r> {
                         } else if plan.layer.is_none() {
                             layers = Some(plan.output_layers.clone());
                         }
-                        (plan.layout, file.item_data_owned(node.item.id)?)
+                        (plan.layout, owned(node.item.id)?)
                     }
                     None => {
                         // Without a base record only the base layer can be
@@ -254,7 +267,7 @@ impl<'r> ItemDecoder<'r> {
                         }
                         (
                             plan.layout,
-                            base_layer_annex_b(cfg, &file.item_data(node.item.id)?)?,
+                            base_layer_annex_b(cfg, &item_data(node.item.id)?)?,
                         )
                     }
                 }
@@ -271,7 +284,7 @@ impl<'r> ItemDecoder<'r> {
             params,
             data,
             layout,
-            ispe: node.ispe(),
+            ispe,
             layers,
         })
     }
@@ -821,6 +834,15 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
             }
             return Ok(f);
         }
+        if let Some(cexg) = node.properties.cexg() {
+            if cexg.tile_count() > 1 {
+                let f = self.reconstruct_constrained_extents(node, cexg)?;
+                if left > 0 {
+                    self.cache.insert(id, f.clone());
+                }
+                return Ok(f);
+            }
+        }
         self.count_decode(1)?;
         let f = if node.depth_in_chain == 0 && is_multi_output_layered(node) {
             // The root item yields every output layer; the first is the
@@ -860,6 +882,18 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
                     }
                 }
                 canvas.finish()
+            }
+            ImageKind::Tiled(t) => self.reconstruct_tiled(node, t),
+            ImageKind::ColourFormatEnhancement(c) => {
+                let mut frames = Vec::with_capacity(node.inputs.len());
+                for i in &node.inputs {
+                    frames.push(self.output(i)?);
+                }
+                crate::compose::composite_colour_format_enhancement(
+                    c,
+                    &frames,
+                    node.properties.nclx(),
+                )
             }
             ImageKind::Overlay(o) => {
                 let mut frames = Vec::with_capacity(node.inputs.len());
@@ -946,16 +980,212 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         tiles: &[ImageNode],
         canvas: &mut GridCanvas,
     ) -> Result<()> {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::{mpsc, Mutex};
         self.count_decode(tiles.len())?;
         let mut jobs = Vec::with_capacity(tiles.len());
         for (i, t) in tiles.iter().enumerate() {
             self.uses.insert(t.item.id, 0);
             jobs.push((i, self.decoder.prepare(self.file, t)?));
         }
+        self.run_tile_jobs(jobs, canvas)
+    }
+
+    /// A `tili` item (Amd 2:2026 §6.11): the tiles addressed by the
+    /// item's `deti` offset table, each decoded as a coded picture of
+    /// `tile_item_type` under the `tilC`-associated properties, placed
+    /// row-major into a `tile_width × tile_height` grid and cropped to
+    /// the `ispe` (§6.11.2: the padding beyond the true size). Empty
+    /// tiles (offset all ones) render as neutral grey — the text leaves
+    /// them to the reader.
+    fn reconstruct_tiled(
+        &mut self,
+        node: &ImageNode,
+        t: &crate::derived::TiledItem,
+    ) -> Result<HeifFrame> {
+        let id = node.item.id;
+        let cfg = &t.config;
+        if !cfg.extra_dimensions.is_empty() {
+            return Err(HeifError::unsupported(format!(
+                "tili item {id}: {} extra dimensions (only 2-D tiled images are composed)",
+                cfg.extra_dimensions.len()
+            )));
+        }
+        let Some((tile_type, _)) = &cfg.in_file_tiles else {
+            return Err(HeifError::unsupported(format!(
+                "tili item {id}: tiles stored in external files"
+            )));
+        };
+        let (w, h) = node.reconstructed_size()?;
+        let (cols, rows) = cfg
+            .tile_grid(w, h)
+            .ok_or_else(|| HeifError::invalid(format!("tili item {id}: zero tile size")))?;
+        let num_tiles = cfg
+            .tile_count(w, h)
+            .ok_or_else(|| HeifError::exhausted(format!("tili item {id}: tile count overflow")))?;
+        if num_tiles > crate::tiled::MAX_TILES {
+            return Err(HeifError::exhausted(format!(
+                "tili item {id}: {num_tiles} tiles (cap {})",
+                crate::tiled::MAX_TILES
+            )));
+        }
+        if rows > u16::MAX as u32 || cols > u16::MAX as u32 {
+            return Err(HeifError::exhausted(format!(
+                "tili item {id}: {cols}x{rows} tiles"
+            )));
+        }
+        let meta = self.file.meta()?;
+        let loc = meta
+            .location(id)
+            .ok_or_else(|| HeifError::invalid(format!("tili item {id} has no iloc entry")))?;
+        let dref = match loc.data_reference_index {
+            0 => None,
+            n => meta.data_references.get(n as usize - 1),
+        }
+        .filter(|d| &d.entry_type == b"deti")
+        .ok_or_else(|| {
+            HeifError::invalid(format!(
+                "tili item {id}: data_reference_index {} does not name a deti entry (Amd 2 §6.11.2)",
+                loc.data_reference_index
+            ))
+        })?;
+        let deti = crate::tiled::DataEntryTiledItem::parse(dref)?;
+        let data = self.file.item_data(id)?;
+        let spans = deti.tile_spans(&data, num_tiles)?;
+        let desc = crate::derived::GridDescriptor {
+            rows: rows as u16,
+            columns: cols as u16,
+            output_width: w,
+            output_height: h,
+        };
+        let mut canvas = GridCanvas::new(&desc);
+        // Every tile is "a coded image item of tile_item_type" with the
+        // tilC-associated properties.
+        let tile_node = ImageNode {
+            item: crate::meta::ItemInfo {
+                item_type: *tile_type,
+                ..node.item.clone()
+            },
+            kind: ImageKind::Coded(*tile_type),
+            properties: t.tile_properties.clone(),
+            inputs: Vec::new(),
+            alpha: None,
+            depth: None,
+            other_auxiliaries: Vec::new(),
+            premultiplied_alpha: false,
+            thumbnails: Vec::new(),
+            metadata: Vec::new(),
+            depth_in_chain: node.depth_in_chain + 1,
+        };
+        let mut jobs = Vec::new();
+        let mut empty = Vec::new();
+        for (i, span) in spans.iter().enumerate() {
+            match span {
+                Some((off, len)) => {
+                    let bytes = &data[*off as usize..(*off + *len) as usize];
+                    let job = self.decoder.prepare_with(
+                        &tile_node,
+                        |_| Ok(std::borrow::Cow::Borrowed(bytes)),
+                        Some((cfg.tile_width, cfg.tile_height)),
+                    )?;
+                    jobs.push((i, job));
+                }
+                None => empty.push(i),
+            }
+        }
+        if jobs.is_empty() {
+            return Err(HeifError::unsupported(format!(
+                "tili item {id}: every tile is empty"
+            )));
+        }
+        self.count_decode(jobs.len())?;
+        self.run_tile_jobs(jobs, &mut canvas)?;
+        for i in empty {
+            canvas.place_blank(i)?;
+        }
+        canvas.finish()
+    }
+
+    /// A coded item with a `cexg` property (HEIF Amd 1:2025 §6.5.41): every
+    /// `iloc` extent is one independently decodable tile of a
+    /// `rows × columns` grid of `image_tile_width × image_tile_height`
+    /// tiles, row-major in extent order, cropped to the `ispe`.
+    fn reconstruct_constrained_extents(
+        &mut self,
+        node: &ImageNode,
+        cexg: &crate::props::Cexg,
+    ) -> Result<HeifFrame> {
+        let id = node.item.id;
+        let (w, h) = node.reconstructed_size()?;
+        let extents = self.file.item_extents(id)?;
+        if extents.len() != cexg.tile_count() {
+            return Err(HeifError::invalid(format!(
+                "item {id}: {} iloc extents for a cexg of {}x{} tiles (shall be equal, §6.5.41.1)",
+                extents.len(),
+                cexg.columns,
+                cexg.rows
+            )));
+        }
+        let covers = cexg.tile_width as u64 * cexg.columns as u64 >= w as u64
+            && cexg.tile_height as u64 * cexg.rows as u64 >= h as u64;
+        if cexg.tile_width == 0 || cexg.tile_height == 0 || !covers {
+            return Err(HeifError::invalid(format!(
+                "item {id}: cexg {}x{} tiles of {}x{} do not cover the {w}x{h} image",
+                cexg.columns, cexg.rows, cexg.tile_width, cexg.tile_height
+            )));
+        }
+        if cexg.rows > u16::MAX as u32 || cexg.columns > u16::MAX as u32 {
+            return Err(HeifError::exhausted(format!(
+                "item {id}: cexg {}x{} tiles",
+                cexg.columns, cexg.rows
+            )));
+        }
+        if cexg.extent_config.is_some() {
+            // The per-extent ExtentDecoderConfigurationRecord is
+            // codec-specific and undefined for the codecs here; the
+            // item's own configuration properties decode the tiles.
+            return Err(HeifError::unsupported(format!(
+                "item {id}: cexg with an ExtentDecoderConfigurationRecord"
+            )));
+        }
+        let desc = crate::derived::GridDescriptor {
+            rows: cexg.rows as u16,
+            columns: cexg.columns as u16,
+            output_width: w,
+            output_height: h,
+        };
+        let mut canvas = GridCanvas::new(&desc);
+        let mut jobs = Vec::with_capacity(extents.len());
+        for (i, bytes) in extents.iter().enumerate() {
+            let job = self.decoder.prepare_with(
+                node,
+                |_| Ok(std::borrow::Cow::Borrowed(*bytes)),
+                Some((cexg.tile_width, cexg.tile_height)),
+            )?;
+            jobs.push((i, job));
+        }
+        self.count_decode(jobs.len())?;
+        self.run_tile_jobs(jobs, &mut canvas)?;
+        canvas.finish()
+    }
+
+    /// Run prepared tile jobs on up to `threads` workers (inline when
+    /// the budget is serial), placing each result into `canvas`.
+    fn run_tile_jobs(
+        &mut self,
+        jobs: Vec<(usize, CodedJob)>,
+        canvas: &mut GridCanvas,
+    ) -> Result<()> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Mutex};
         let workers =
             ExecutionContext::with_threads(self.decoder.threads).effective_workers(jobs.len());
+        if workers == 1 {
+            for (i, job) in jobs {
+                let dec = self.decoder.make(&job.params)?;
+                let f = job.run(dec)?;
+                canvas.place(i, &f)?;
+            }
+            return Ok(());
+        }
         let queue = Mutex::new(jobs.into_iter());
         let abort = AtomicBool::new(false);
         let decoder = self.decoder;

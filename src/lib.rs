@@ -73,6 +73,7 @@ pub mod mini;
 pub mod props;
 pub mod rgb;
 pub mod sequence;
+pub mod tiled;
 pub mod writer;
 
 #[cfg(feature = "registry")]
