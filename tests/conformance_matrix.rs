@@ -16,6 +16,14 @@
 //! `heif-info` — and their render (PNG / PPM) is compared with our own
 //! decode (RGB, 8-bit units).
 //!
+//! **Round trip at the production defaults** (round 464): a PNG
+//! source goes through the CLI path — the registry `"heif"` encoder
+//! fed the packed RGB frame a PNG decoder yields, no options (the
+//! real `oxideav` binary when `OXIDEAV_CLI=/path/to/oxideav` is set)
+//! — to a HEIC and an AVIF; each is decoded back by this crate and by
+//! the five readers, and the PSNR of every rendering against the
+//! source is reported (8-bit RGB), with the file size.
+//!
 //! Every cell is a measurement from the run; absent binaries print
 //! SKIP and become `no producer (absent)` / `no reader (absent)`. The
 //! test prints both tables as Markdown (the README carries the last
@@ -1164,6 +1172,125 @@ fn writer_shapes() -> Vec<(String, &'static str, HeifFrame, EncodeOptions)> {
     v
 }
 
+/// PSNR (dB, 8-bit RGB over the overlap) of a rendered PNG against
+/// the source samples; `None` when the PNG cannot be compared.
+fn psnr_png(png_path: &Path, w: u32, h: u32, src: &[u16]) -> Option<f64> {
+    let bytes = std::fs::read(png_path).ok()?;
+    if bytes.len() < 26 || bytes[25] == 3 || bytes[24] < 8 {
+        return None;
+    }
+    let png = read_png(&bytes);
+    let png_max = ((1u32 << png.bit_depth) - 1) as f64;
+    let (mut se, mut n) = (0f64, 0u64);
+    for y in 0..png.height.min(h) {
+        for x in 0..png.width.min(w) {
+            for c in 0..3 {
+                let pc = if png.channels < 3 { 0 } else { c };
+                let e = png.sample(x, y, pc) as f64 / png_max * 255.0;
+                let g = src[((y * w + x) as usize) * 3 + c] as f64;
+                se += (e - g) * (e - g);
+                n += 1;
+            }
+        }
+    }
+    Some(10.0 * (255.0f64 * 255.0 / (se / n.max(1) as f64).max(1e-9)).log10())
+}
+
+/// Write `src` (8-bit RGB) as a file through the CLI path: the real
+/// `oxideav convert` when `OXIDEAV_CLI` names the binary, else the
+/// registry `"heif"` encoder fed the packed frame directly (the same
+/// encoder, options and conversion the CLI runs). Returns the file.
+fn round_trip_encode(dir: &Path, w: u32, h: u32, src: &[u16], ext: &str, tag: &str) -> PathBuf {
+    let out = dir.join(format!("rt_{tag}.{ext}"));
+    if let Ok(cli) = std::env::var("OXIDEAV_CLI") {
+        let png = dir.join(format!("rt_{tag}_src.png"));
+        std::fs::write(&png, write_png(w, h, 3, 8, src)).unwrap();
+        run(Command::new(cli).arg("convert").arg(&png).arg(&out)).expect("oxideav convert");
+        return out;
+    }
+    use oxideav_core::{CodecId, CodecOptions, CodecParameters, Frame};
+    let mut params = CodecParameters::video(CodecId::new("heif"));
+    params.width = Some(w);
+    params.height = Some(h);
+    params.pixel_format = Some(oxideav_core::PixelFormat::Rgb24);
+    // The `.avif` extension implies `codec=av1` on the CLI.
+    if ext == "avif" {
+        params.options = CodecOptions::new().set("codec", "av1");
+    }
+    let mut enc = oxideav_heif::encode::make_encoder(&params).unwrap();
+    let data: Vec<u8> = src.iter().map(|v| *v as u8).collect();
+    let frame = oxideav_core::VideoFrame {
+        pts: Some(0),
+        planes: vec![oxideav_core::VideoPlane {
+            stride: w as usize * 3,
+            data,
+        }],
+    };
+    enc.send_frame(&Frame::Video(frame)).unwrap();
+    enc.flush().unwrap();
+    std::fs::write(&out, &enc.receive_packet().unwrap().data).unwrap();
+    out
+}
+
+/// One round-trip row: `(label, bytes, our PSNR, per-reader cell)`.
+type RoundTripRow = (String, u64, f64, Vec<(Reader, String)>);
+
+fn round_trip_rows(dir: &Path, readers: &[Reader]) -> Vec<RoundTripRow> {
+    let mut rows = Vec::new();
+    let mut sizes = vec![(96u32, 80u32, "96×80")];
+    if twelve_mp() {
+        sizes.push((4032, 3024, "4032×3024 (12 MP)"));
+    }
+    for (w, h, size_label) in sizes {
+        let src = source(w, h, 3, 8);
+        for ext in ["heic", "avif"] {
+            let tag = format!("{ext}_{w}x{h}");
+            let file = round_trip_encode(dir, w, h, &src, ext, &tag);
+            let bytes = std::fs::metadata(&file).unwrap().len();
+            // Our decode → PNG (the PNG half of the round trip) → PSNR.
+            let hf = HeifFile::parse(&std::fs::read(&file).unwrap()).unwrap();
+            let img = decode_primary(&hf, ItemDecoder::direct()).unwrap();
+            assert_eq!((img.width(), img.height()), (w, h), "{tag}");
+            let rgb = to_rgb(&img.frame, Some(&img.nclx)).unwrap();
+            let mut samples = Vec::with_capacity((w * h * 3) as usize);
+            for y in 0..h {
+                for x in 0..w {
+                    for c in 0..3 {
+                        samples.push(rgb.sample(x, y, c));
+                    }
+                }
+            }
+            let back = dir.join(format!("rt_{tag}_back.png"));
+            std::fs::write(&back, write_png(w, h, 3, 8, &samples)).unwrap();
+            let ours = psnr_png(&back, w, h, &src).unwrap();
+            let mut cells = Vec::new();
+            for &r in readers {
+                let cell = if !have_binary(r.name()) {
+                    "no reader (absent)".to_string()
+                } else {
+                    match render(dir, r, &file, &format!("rt_{tag}")) {
+                        Ok(None) => "opens".into(),
+                        Ok(Some(png)) => match psnr_png(&png, w, h, &src) {
+                            Some(p) => format!("{p:.2} dB"),
+                            None => "opens".into(),
+                        },
+                        Err(e) => format!("REFUSED ({e})"),
+                    }
+                };
+                eprintln!("round trip {:<28} {:<13} {}", tag, r.name(), cell);
+                cells.push((r, cell));
+            }
+            rows.push((
+                format!("{} {size_label}", ext.to_uppercase()),
+                bytes,
+                ours,
+                cells,
+            ));
+        }
+    }
+    rows
+}
+
 /// The 12 MP rows (a 4032×3024 encode per codec, ~90 s for AV1 in
 /// release, far longer in a debug build) run only when
 /// `OXIDEAV_HEIF_MATRIX_12MP=1`; CI prints SKIP for them.
@@ -1304,8 +1431,50 @@ fn conformance_matrix_both_directions() {
         }
         writeln!(md).unwrap();
     }
+    // ── round trip at the production defaults
+    let round_trips = round_trip_rows(&dir, &readers);
+    writeln!(
+        md,
+        "\n### Round trip at the production defaults (PNG → file → PNG; PSNR vs the source, 8-bit RGB)\n"
+    )
+    .unwrap();
+    write!(md, "| File | bytes | this crate |").unwrap();
+    for r in readers {
+        write!(md, " {} |", r.name()).unwrap();
+    }
+    writeln!(md).unwrap();
+    writeln!(md, "|{}", "---|".repeat(readers.len() + 3)).unwrap();
+    for (name, bytes, ours, cells) in &round_trips {
+        write!(md, "| {name} | {bytes} | {ours:.2} dB |").unwrap();
+        for (_, c) in cells {
+            write!(md, " {c} |").unwrap();
+        }
+        writeln!(md).unwrap();
+    }
     eprintln!("{md}");
     std::fs::write(dir.join("matrix.md"), &md).unwrap();
+    // Round-trip invariants: every reader opens the file; our own
+    // decode and every rendering reader land within 1 dB of each
+    // other against the source (the lossy defaults, not the readers,
+    // set the level); the HEIC default reaches 44 dB on the 12 MP
+    // picture (the 96×80 one is bounded by its own 4:2:0 chroma —
+    // ~35 dB lossless — so only a sanity floor applies there).
+    for (name, _, ours, cells) in &round_trips {
+        if name.starts_with("HEIC") {
+            let floor = if name.contains("12 MP") { 44.0 } else { 30.0 };
+            assert!(*ours >= floor, "{name}: {ours:.2} dB at the defaults");
+        }
+        for (r, c) in cells {
+            assert!(!c.starts_with("REFUSED"), "{name}: {} {c}", r.name());
+            if let Some(db) = c.strip_suffix(" dB").and_then(|v| v.parse::<f64>().ok()) {
+                assert!(
+                    (db - ours).abs() <= 1.0,
+                    "{name}: {} renders at {db:.2} dB, this crate at {ours:.2} dB",
+                    r.name()
+                );
+            }
+        }
+    }
     eprintln!("matrix written to {}", dir.join("matrix.md").display());
     // ── invariants: nothing undecided; our decode never fails on a
     // produced file; the black-box readers never refuse our files.

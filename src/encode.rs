@@ -1080,13 +1080,48 @@ fn add_picture_item(
 /// at most (the converted picture); an already-matching source is
 /// copied once without its alpha plane.
 fn coding_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<HeifFrame> {
-    let native_av1 = opts.codec == StillCodec::Av1 && frame.format.bit_depth <= 12;
-    if native_av1 {
-        Ok(frame.without_alpha().tight())
-    } else {
-        let coded = opts.hevc_coded_format(frame.format)?;
-        to_yuv420(frame, coded.bit_depth)
+    match opts.codec {
+        StillCodec::Av1 if frame.format.bit_depth <= 12 => Ok(frame.without_alpha().tight()),
+        // AV1 keeps the chroma layout of a deeper source at the coded
+        // depth (16-bit 4:4:4 → 10-bit 4:4:4).
+        StillCodec::Av1 => to_depth(
+            &frame.without_alpha(),
+            coded_depth(frame.format.bit_depth, opts.hevc_depth)?,
+        ),
+        StillCodec::Hevc => {
+            let coded = opts.hevc_coded_format(frame.format)?;
+            to_yuv420(frame, coded.bit_depth)
+        }
     }
+}
+
+/// Re-quantise every plane of `f` to `depth` bits (round to nearest
+/// going down, bit replication going up), keeping the chroma layout.
+pub fn to_depth(f: &HeifFrame, depth: u8) -> Result<HeifFrame> {
+    let fmt = HeifPixelFormat::new(f.format.chroma, depth, f.format.has_alpha)?;
+    let src_depth = f.format.bit_depth;
+    if src_depth == depth {
+        return Ok(f.tight());
+    }
+    let max = fmt.max_value() as u32;
+    let mut out = HeifFrame::zeroed(f.width, f.height, fmt)?;
+    for p in 0..fmt.plane_count() {
+        let (w, h) = out.plane_dims(p);
+        for y in 0..h {
+            for x in 0..w {
+                let v = f.sample(p, x, y) as u32;
+                let o = if src_depth > depth {
+                    let s = src_depth - depth;
+                    ((v + (1 << (s - 1))) >> s).min(max)
+                } else {
+                    let s = depth - src_depth;
+                    ((v << s) | (v >> (src_depth - s))).min(max)
+                };
+                out.set_sample(p, x, y, o as u16);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// [`coding_picture`] over an owned frame: a frame already in the
@@ -1096,10 +1131,14 @@ fn coding_picture_owned(
     frame: HeifFrame,
     opts: &EncodeOptions,
 ) -> Result<(HeifFrame, Option<HeifFrame>)> {
-    let coded = if native_av1(&frame, opts) {
-        frame.format.without_alpha()
-    } else {
-        opts.hevc_coded_format(frame.format)?
+    let coded = match opts.codec {
+        StillCodec::Av1 if frame.format.bit_depth <= 12 => frame.format.without_alpha(),
+        StillCodec::Av1 => HeifPixelFormat::new(
+            frame.format.chroma,
+            coded_depth(frame.format.bit_depth, opts.hevc_depth)?,
+            false,
+        )?,
+        StillCodec::Hevc => opts.hevc_coded_format(frame.format)?,
     };
     let bps = frame.format.bytes_per_sample();
     let tight = frame
@@ -1134,9 +1173,10 @@ fn coding_picture_owned(
     ))
 }
 
-/// Whether AV1 codes `frame` natively (its own depth / chroma).
-fn native_av1(frame: &HeifFrame, opts: &EncodeOptions) -> bool {
-    opts.codec == StillCodec::Av1 && frame.format.bit_depth <= 12
+/// Whether the items are AV1 (coded in the source's chroma layout,
+/// alpha as a monochrome item) rather than HEVC (4:2:0 items).
+fn native_av1(_frame: &HeifFrame, opts: &EncodeOptions) -> bool {
+    opts.codec == StillCodec::Av1
 }
 
 /// Code the tiles of a `cols × rows` grid over `padded` (already a
@@ -1393,7 +1433,8 @@ fn encode_still_planes(
     if let Some(gm) = &opts.gain_map {
         gm.frame.validate()?;
         let g_src = if native_av1 {
-            gm.frame.without_alpha().tight()
+            // The map keeps its own depth up to 12 bits.
+            to_depth(&gm.frame.without_alpha(), gm.frame.format.bit_depth.min(12))?
         } else {
             to_yuv420(&gm.frame, cfmt.bit_depth)?
         };
@@ -1611,7 +1652,7 @@ pub fn encode_still_minimized(frame: &HeifFrame, opts: &EncodeOptions) -> Result
     };
     if let Some(alpha) = frame.alpha_as_frame() {
         let a_src = if native_av1 {
-            alpha
+            mono_at_depth(alpha, coded_depth)?
         } else {
             to_yuv420(&alpha, coded_depth)?
         };
@@ -1637,7 +1678,7 @@ pub fn encode_still_minimized(frame: &HeifFrame, opts: &EncodeOptions) -> Result
     if let Some(gm) = &opts.gain_map {
         gm.frame.validate()?;
         let g_src = if native_av1 {
-            gm.frame.without_alpha().tight()
+            to_depth(&gm.frame.without_alpha(), gm.frame.format.bit_depth.min(12))?
         } else {
             to_yuv420(&gm.frame, coded_depth)?
         };

@@ -38,6 +38,16 @@ All notable changes to this project will be documented in this file.
   `depth`; 12-bit sources at 12; `to_yuv420` converts to any depth;
   `coded_depth` is the rule). A layout that merely needs the quadtree
   coder runs its level-0 search unless `rd` asks for more.
+- Round-trip proof at the production defaults
+  (`tests/conformance_matrix.rs`, third table): a PNG source through
+  the CLI path (the registry encoder fed the packed frame; the real
+  `oxideav convert` binary when `OXIDEAV_CLI` names it) to a HEIC and
+  an AVIF, decoded back by this crate and rendered by the five
+  readers — PSNR against the source per reader, every reader within
+  1 dB of our decode. AV1 items of a source deeper than 12 bits keep
+  their chroma layout at the coded depth (`to_depth`; a 16-bit 4:4:4
+  source is a 10-bit 4:4:4 item, which Apple ImageIO now renders
+  exactly) instead of dropping to 8-bit 4:2:0.
 - `examples/heifencbench`: the stage-timed encode bench (wall, CPU,
   peak RSS from `getrusage`; library and framework paths).
 - oxideav-h265 0.0.13 is the minimum pin (wavefront, `cqpoffset`,
