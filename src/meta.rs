@@ -74,6 +74,8 @@ pub const ITEM_TYPE_DEXF: FourCc = *b"dExf";
 pub const ITEM_TYPE_MIME: FourCc = *b"mime";
 /// URI-typed item (IPTC, Annex A.5).
 pub const ITEM_TYPE_URI: FourCc = *b"uri ";
+/// Region item (HEIF §6.10).
+pub const ITEM_TYPE_RGAN: FourCc = *b"rgan";
 
 /// Item reference types (HEIF §6 / §7.4.5 of the 2017 edition).
 pub mod reference {
@@ -413,6 +415,24 @@ impl EntityGroup {
         }))
     }
 
+    /// `unrg` (HEIF Amd 2:2026 §11.3.5.1, union of regions): the
+    /// region items whose union the group denotes; `None` for other
+    /// groups.
+    pub fn region_union(&self) -> Option<&[u32]> {
+        (&self.grouping_type == b"unrg").then_some(self.entity_ids.as_slice())
+    }
+
+    /// `corg` (HEIF Amd 2:2026 §11.3.5.2, compound region): `(main
+    /// region item, the region items it logically includes)`; `None`
+    /// for other groups or a `corg` with fewer than two entities (the
+    /// clause's minimum — the inclusion is logical, not geometric).
+    pub fn compound_region(&self) -> Option<(u32, &[u32])> {
+        if &self.grouping_type != b"corg" || self.entity_ids.len() < 2 {
+            return None;
+        }
+        Some((self.entity_ids[0], &self.entity_ids[1..]))
+    }
+
     /// `stem` (HEIF Amd 1:2025 §6.8.11): `(left, right, monoscopic
     /// fallback, fallback position)`; `None` for other groups or a
     /// `stem` without exactly three entities.
@@ -703,6 +723,33 @@ impl Meta {
             }
         }
         out
+    }
+
+    /// The region items (`rgan`) describing `image`: those with a
+    /// `cdsc` reference to it (HEIF §6.10).
+    pub fn region_items_of(&self, image: u32) -> Vec<u32> {
+        self.references_to(image, &reference::CDSC)
+            .into_iter()
+            .filter(|id| {
+                self.item(*id)
+                    .is_some_and(|i| i.item_type == ITEM_TYPE_RGAN)
+            })
+            .collect()
+    }
+
+    /// The `unrg` / `corg` groups of regions defined inside `image`
+    /// (HEIF Amd 2:2026 §11.3.5): every entity of such a group is a
+    /// region item with a `cdsc` reference to that image (the group
+    /// may additionally carry its own `cdsc` under unique ids).
+    pub fn region_groups_of(&self, image: u32) -> Vec<&EntityGroup> {
+        let regions = self.region_items_of(image);
+        self.entity_groups
+            .iter()
+            .filter(|g| matches!(&g.grouping_type, b"unrg" | b"corg"))
+            .filter(|g| {
+                !g.entity_ids.is_empty() && g.entity_ids.iter().all(|e| regions.contains(e))
+            })
+            .collect()
     }
 
     /// Entity groups of `grouping_type` containing `entity_id`.

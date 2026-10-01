@@ -584,3 +584,116 @@ fn hevc_rd_and_tiles_choose_the_ctb_automatically() {
         }
     );
 }
+
+/// HEIF Amd 2:2026 §11.3.5: `unrg` / `corg` groups over region items
+/// (`rgan`, each with a `cdsc` to the image) are written, surfaced
+/// through the typed accessors and `region_groups_of`, and the
+/// clause rules (region items only, one image, `corg` ≥ 2) fire in
+/// `check`.
+#[test]
+fn region_groups_round_trip_and_are_checked() {
+    use oxideav_heif::meta::ITEM_TYPE_RGAN;
+    let bytes = encode_still(&picture(64, 48), &lossless()).unwrap();
+    let region_body = |x: u16, y: u16| -> Vec<u8> {
+        // A minimal RegionItem body: version 0, flags 0 (16-bit
+        // fields), reference size, one rectangle geometry (type 1).
+        let mut b = vec![0u8, 0];
+        for v in [64u16, 48] {
+            b.extend_from_slice(&v.to_be_bytes());
+        }
+        b.push(1); // region_count
+        b.push(1); // geometry_type: rectangle
+        for v in [x, y, 8, 8] {
+            b.extend_from_slice(&v.to_be_bytes());
+        }
+        b
+    };
+    let rebuild = |extra: &dyn Fn(&mut HeifWriter, u32, &[u32])| -> Vec<u8> {
+        let f = HeifFile::parse(&bytes).unwrap();
+        let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+        let mut w = HeifWriter::new();
+        let master =
+            oxideav_heif::encode::encode_still_into(&mut w, &img.frame, &lossless()).unwrap();
+        w.set_primary(master);
+        let regions: Vec<u32> = (0..3)
+            .map(|i| w.add_metadata_item(master, ITEM_TYPE_RGAN, None, region_body(i * 16, 0)))
+            .collect();
+        extra(&mut w, master, &regions);
+        w.write_to_vec().unwrap()
+    };
+    let good = rebuild(&|w, _, r| {
+        w.add_region_union(200, r.to_vec());
+        w.add_compound_region(201, r[0], vec![r[1], r[2]]);
+    });
+    let f = HeifFile::parse(&good).unwrap();
+    let meta = f.meta().unwrap();
+    let primary = meta.primary_item_id.unwrap();
+    let regions = meta.region_items_of(primary);
+    assert_eq!(regions.len(), 3);
+    let groups = meta.region_groups_of(primary);
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].region_union(), Some(regions.as_slice()));
+    assert_eq!(groups[0].compound_region(), None);
+    assert_eq!(
+        groups[1].compound_region(),
+        Some((regions[0], &regions[1..]))
+    );
+    assert_eq!(groups[1].region_union(), None);
+    let rep = check(&f, MiafProfile::Miaf).unwrap();
+    assert!(
+        !rep.violations
+            .iter()
+            .any(|v| v.clause.starts_with("HEIF-A2 11.3.5")),
+        "{:?}",
+        rep.violations
+    );
+    // Violations: a corg with one entity, a non-region entity, regions
+    // of two different images.
+    let bad = rebuild(&|w, master, r| {
+        w.add_compound_region(202, r[0], vec![]);
+        w.add_region_union(203, vec![r[0], master]);
+        // A second image: an `iden` over the master.
+        let other = w.add_identity(
+            master,
+            vec![(
+                Property::Ispe(oxideav_heif::props::Ispe {
+                    width: 64,
+                    height: 48,
+                }),
+                false,
+            )],
+        );
+        let far = w.add_metadata_item(other, ITEM_TYPE_RGAN, None, region_body(0, 16));
+        w.add_region_union(204, vec![r[0], far]);
+    });
+    let f = HeifFile::parse(&bad).unwrap();
+    let rep = check(&f, MiafProfile::Miaf).unwrap();
+    let clauses: Vec<&str> = rep
+        .violations
+        .iter()
+        .filter(|v| v.clause.starts_with("HEIF-A2 11.3.5"))
+        .map(|v| v.message.as_str())
+        .collect();
+    assert!(
+        clauses.iter().any(|m| m.contains("corg group 202")),
+        "{clauses:?}"
+    );
+    assert!(
+        clauses.iter().any(|m| m.contains("unrg group 203")),
+        "{clauses:?}"
+    );
+    assert!(
+        clauses.iter().any(|m| m.contains("unrg group 204")),
+        "{clauses:?}"
+    );
+    // Only the (short) corg is a group of the primary's regions: the
+    // groups that reach the master item or another image's region are
+    // not.
+    let meta = f.meta().unwrap();
+    let ids: Vec<u32> = meta
+        .region_groups_of(meta.primary_item_id.unwrap())
+        .iter()
+        .map(|g| g.group_id)
+        .collect();
+    assert_eq!(ids, vec![202]);
+}

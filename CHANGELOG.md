@@ -48,6 +48,15 @@ All notable changes to this project will be documented in this file.
   their chroma layout at the coded depth (`to_depth`; a 16-bit 4:4:4
   source is a 10-bit 4:4:4 item, which Apple ImageIO now renders
   exactly) instead of dropping to 8-bit 4:2:0.
+- `unrg` / `corg` groups of regions (HEIF Amd 2:2026 §11.3.5):
+  `EntityGroup::region_union` / `compound_region` (main region +
+  the regions it logically includes), `Meta::region_items_of` (the
+  `rgan` items with a `cdsc` to an image) and `Meta::region_groups_of`
+  (the groups whose every entity is such a region),
+  `HeifWriter::add_region_union` / `add_compound_region`, and `check`
+  rules under `HEIF-A2 11.3.5.x` (region items only, one image per
+  group, a `corg` names a main region and at least one part).
+  `ITEM_TYPE_RGAN`.
 - `examples/heifencbench`: the stage-timed encode bench (wall, CPU,
   peak RSS from `getrusage`; library and framework paths).
 - oxideav-h265 0.0.13 is the minimum pin (wavefront, `cqpoffset`,

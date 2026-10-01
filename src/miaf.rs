@@ -120,6 +120,71 @@ impl MiafReport {
     }
 }
 
+/// HEIF Amd 2:2026 §11.3.5 (`unrg` / `corg` groups of regions): every
+/// entity is a region item, all of one group's regions describe the
+/// same image through `cdsc`, and a compound region names at least
+/// the main region and one part. Reported under `"HEIF-A2 11.3.5.x"`.
+fn check_region_groups(meta: &crate::meta::Meta, rep: &mut MiafReport) {
+    for g in &meta.entity_groups {
+        let clause = match &g.grouping_type {
+            b"unrg" => "HEIF-A2 11.3.5.1",
+            b"corg" => "HEIF-A2 11.3.5.2",
+            _ => continue,
+        };
+        let name = fourcc_str(&g.grouping_type);
+        if &g.grouping_type == b"corg" && g.entity_ids.len() < 2 {
+            rep.push(
+                clause,
+                None,
+                format!(
+                    "corg group {} has {} entities (a main region and at least one part)",
+                    g.group_id,
+                    g.entity_ids.len()
+                ),
+            );
+        }
+        let mut images: Vec<Vec<u32>> = Vec::new();
+        for e in &g.entity_ids {
+            match meta.item(*e) {
+                Some(it) if it.item_type == crate::meta::ITEM_TYPE_RGAN => {
+                    let mut imgs = meta.references_from(*e, &reference::CDSC);
+                    imgs.sort_unstable();
+                    images.push(imgs);
+                }
+                Some(it) => rep.push(
+                    clause,
+                    Some(*e),
+                    format!(
+                        "{name} group {} entity {e} is a '{}' item, not a region item",
+                        g.group_id,
+                        fourcc_str(&it.item_type)
+                    ),
+                ),
+                // An entity id that is not an item (a track, or a group
+                // under unique ids): not a region item either.
+                None => rep.push(
+                    clause,
+                    None,
+                    format!(
+                        "{name} group {} entity {e} is not a region item",
+                        g.group_id
+                    ),
+                ),
+            }
+        }
+        if images.windows(2).any(|w| w[0] != w[1]) {
+            rep.push(
+                clause,
+                None,
+                format!(
+                    "{name} group {}: its region items describe different images (cdsc)",
+                    g.group_id
+                ),
+            );
+        }
+    }
+}
+
 /// HEIF Amd 1:2025 §6.6.2.4 / §10.2.6 (`tmap` derived image items):
 /// the input pair, the three `colr` placements, the `ToneMapImage`
 /// version and the `tmap` brand, reported under `"HEIF-A1 …"` clauses;
@@ -431,6 +496,7 @@ pub fn check<D: AsRef<[u8]>>(file: &HeifFile<D>, profile: MiafProfile) -> Result
         );
     }
     check_tone_maps(file, meta, &mut rep);
+    check_region_groups(meta, &mut rep);
     // Per-item structural checks.
     for it in meta.items.iter().filter(|i| i.is_image()) {
         let id = it.id;

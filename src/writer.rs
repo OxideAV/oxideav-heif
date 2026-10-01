@@ -711,6 +711,21 @@ impl HeifWriter {
         self.add_entity_group_with_flags(*b"stem", group_id, flags, vec![left, right, fallback]);
     }
 
+    /// A union of regions group (`unrg`, HEIF Amd 2:2026 §11.3.5.1)
+    /// over region items that all describe one image.
+    pub fn add_region_union(&mut self, group_id: u32, regions: Vec<u32>) {
+        self.add_entity_group(*b"unrg", group_id, regions);
+    }
+
+    /// A compound region group (`corg`, HEIF Amd 2:2026 §11.3.5.2):
+    /// `main` logically includes `parts` (at least one).
+    pub fn add_compound_region(&mut self, group_id: u32, main: u32, parts: Vec<u32>) {
+        let mut ids = Vec::with_capacity(parts.len() + 1);
+        ids.push(main);
+        ids.extend(parts);
+        self.add_entity_group(*b"corg", group_id, ids);
+    }
+
     /// Mark an item hidden (`infe` flags bit 0).
     pub fn set_hidden(&mut self, id: u32, hidden: bool) {
         if let Some(it) = self.items.iter_mut().find(|i| i.id == id) {
