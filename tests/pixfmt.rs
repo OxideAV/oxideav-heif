@@ -120,6 +120,15 @@ fn packed_inputs_round_trip_within_one_code() {
             );
             let rgb = to_rgb(&img.frame, Some(&img.nclx)).unwrap();
             let grey = matches!(pf, PixelFormat::Ya8 | PixelFormat::Ya16Le);
+            // 16-bit sources code at 10 bits (Main 10), 8-bit ones at 8:
+            // the comparison runs at the coded depth.
+            let depth = img.frame.format.bit_depth;
+            let wide = matches!(
+                pf,
+                PixelFormat::Rgb48Le | PixelFormat::Rgba64Le | PixelFormat::Ya16Le
+            );
+            assert_eq!(depth, if wide { 10 } else { 8 }, "{pf:?}: coded depth");
+            let shift = 16 - depth;
             let mut max = 0i32;
             for y in 0..h {
                 for x in 0..w {
@@ -131,22 +140,18 @@ fn packed_inputs_round_trip_within_one_code() {
                         [r, g, b, a]
                     };
                     for (c, wv) in want.iter().enumerate().take(3) {
-                        let d = (rgb.sample(x, y, c) as i32 - (*wv >> 8) as i32).abs();
+                        let d = (rgb.sample(x, y, c) as i32 - (*wv >> shift) as i32).abs();
                         max = max.max(d);
                     }
                     if has_alpha {
-                        let d = (rgb.sample(x, y, 3) as i32 - (want[3] >> 8) as i32).abs();
+                        let d = (rgb.sample(x, y, 3) as i32 - (want[3] >> shift) as i32).abs();
                         max = max.max(d);
                     }
                 }
             }
             // 8-bit full range is ±1; limited range quantises to 219
-            // codes and 16-bit sources are rounded to 8 bits before
+            // codes and 16-bit sources are rounded to 10 bits before
             // coding, one extra code of slack each.
-            let wide = matches!(
-                pf,
-                PixelFormat::Rgb48Le | PixelFormat::Rgba64Le | PixelFormat::Ya16Le
-            );
             let tol = 1 + (range != "full") as i32 + wide as i32;
             assert!(max <= tol, "{pf:?} {range}: max diff {max}");
         }

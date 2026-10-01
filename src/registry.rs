@@ -122,7 +122,11 @@ mod tests {
                 "speed",
                 "rd",
                 "tiles",
-                "ctb"
+                "ctb",
+                "threads",
+                "depth",
+                "filters",
+                "chroma"
             ]
         );
         assert_eq!(

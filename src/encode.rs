@@ -45,10 +45,16 @@ pub struct EncodeOptions {
     pub codec: StillCodec,
     /// HEVC: `"pcm"` (lossless), `"intra"` (CABAC intra at `qp`).
     pub hevc_mode: String,
-    /// HEVC intra QP (0..=51).
+    /// HEVC intra QP (0..=51). The default, [`DEFAULT_QP`], is the
+    /// production setting (see the README's defaults section).
     pub qp: u8,
     /// Split the picture into a grid of `tile × tile` tiles (`grid`
-    /// derived item) when set; tiles are at least 64 pixels (MIAF).
+    /// derived item): `Some(tile)` always (tiles are at least 64
+    /// pixels, MIAF), `Some(0)` never, `None` automatically —
+    /// [`GRID_AUTO_TILE`]-pixel tiles once the picture exceeds
+    /// [`GRID_AUTO_MIN_PIXELS`] (the codec's working set then scales
+    /// with a tile, not the picture, and the tiles are the parallel
+    /// unit under a thread budget).
     pub grid_tile: Option<u32>,
     /// Add a thumbnail whose largest dimension is this many pixels.
     pub thumbnail_max_dim: Option<u32>,
@@ -83,7 +89,36 @@ pub struct EncodeOptions {
     /// ISO 21496-1 gain map to carry as a `tmap` derived item over
     /// the primary (HEIF Amd 1 §6.6.2.4).
     pub gain_map: Option<GainMapSpec>,
+    /// Thread budget (`None` / `Some(1)` = serial, the core contract).
+    /// Spent on the tiles of a `grid` (independent jobs, bytes
+    /// identical to the serial order), on the HEVC quadtree coder's
+    /// wavefront (`wpp`, enabled whenever that coder runs without
+    /// `tiles`, so the bytes never depend on the budget) or tile
+    /// fan-out, and on the AV1 still encoder's tile search (the tile
+    /// layout is a function of the picture size alone — see
+    /// [`AV1_TILE_LAYOUT_THREADS`]).
+    pub threads: Option<usize>,
+    /// HEVC coded bit depth (8 / 10 / 12). `None` follows the source
+    /// ([`coded_depth`]): 8-bit sources code at 8 bits (the historical
+    /// coder, or the quadtree coder when `rd` / `tiles` / `ctb` ask
+    /// for it), 9–10-bit ones at 10, 11–12-bit at 12 and deeper ones
+    /// at 10 (Main 10 / Main 12 through the quadtree coder).
+    pub hevc_depth: Option<u8>,
+    /// HEVC in-loop filters (deblocking + SAO) on the lossy `intra`
+    /// mode. `None` = the production default (on).
+    pub hevc_filters: Option<bool>,
+    /// Extra options handed to the HEVC encoder after the ones this
+    /// crate derives (`aq`, `rdoq`, `sdh`, `cqpoffset`, …; a later
+    /// key wins). Expert knob; the framework encoder exposes a typed
+    /// subset.
+    pub hevc_options: Vec<(String, String)>,
 }
+
+/// The nominal worker count the AV1 still tile layout is derived from
+/// (`oxideav_av1::encoder::auto_tile_layout`): fixed, so the coded
+/// bytes of an AV1 item never depend on the thread budget the search
+/// actually ran on.
+pub const AV1_TILE_LAYOUT_THREADS: usize = 8;
 
 /// A gain map to write next to the base image (see
 /// [`EncodeOptions::gain_map`]): the map picture, its ISO 21496-1
@@ -118,12 +153,26 @@ pub struct GainMapSpec {
     pub alternate_bit_depth: u8,
 }
 
+/// The production HEVC intra QP: on a 12 MP photograph the historical
+/// coder with the in-loop filters lands at or above the OS encoder's
+/// default-quality PSNR (see the README) — the tuned default of
+/// `oxideav convert in.png out.heic`.
+pub const DEFAULT_QP: u8 = 18;
+
+/// Tile edge of the automatic grid (`grid_tile == None`): the OS
+/// producer's own tiling of a 12 MP picture.
+pub const GRID_AUTO_TILE: u32 = 512;
+
+/// Pictures with more luma samples than this are tiled automatically
+/// (4 MP: 2048 × 2048).
+pub const GRID_AUTO_MIN_PIXELS: u64 = 4 * 1024 * 1024;
+
 impl Default for EncodeOptions {
     fn default() -> Self {
         Self {
             codec: StillCodec::Hevc,
             hevc_mode: "intra".into(),
-            qp: 26,
+            qp: DEFAULT_QP,
             grid_tile: None,
             thumbnail_max_dim: None,
             colr: Colr::MIAF_DEFAULT,
@@ -137,8 +186,73 @@ impl Default for EncodeOptions {
             hevc_tiles: None,
             hevc_ctb: None,
             gain_map: None,
+            threads: None,
+            hevc_depth: None,
+            hevc_filters: None,
+            hevc_options: Vec::new(),
         }
     }
+}
+
+impl EncodeOptions {
+    /// The thread budget as a worker count (1 = serial).
+    pub fn workers(&self) -> usize {
+        self.threads.unwrap_or(1).max(1)
+    }
+
+    /// The grid tile a `width × height` picture is coded with under
+    /// [`EncodeOptions::grid_tile`]'s rule (`None` = single item).
+    pub fn effective_grid_tile(&self, width: u32, height: u32) -> Option<u32> {
+        match self.grid_tile {
+            Some(0) => None,
+            Some(t) => Some(t),
+            None => (width as u64 * height as u64 > GRID_AUTO_MIN_PIXELS).then_some(GRID_AUTO_TILE),
+        }
+    }
+
+    /// Whether the HEVC items run on the quadtree coder (`rd` /
+    /// `tiles` / `ctb` set, or a coded layout the historical 8-bit
+    /// 4:2:0 coder does not take).
+    pub fn hevc_quadtree(&self, coded: HeifPixelFormat) -> bool {
+        self.hevc_rd.is_some()
+            || self.hevc_tiles.is_some()
+            || self.hevc_ctb.is_some()
+            || coded.bit_depth != 8
+            || coded.chroma != Chroma::Yuv420
+    }
+
+    /// The layout HEVC items of a `source`-depth picture are coded in:
+    /// 4:2:0 at [`EncodeOptions::hevc_depth`] or the depth the source
+    /// implies (8 → 8, 9–10 → 10, 11+ → 12).
+    pub fn hevc_coded_format(&self, source: HeifPixelFormat) -> Result<HeifPixelFormat> {
+        HeifPixelFormat::new(
+            Chroma::Yuv420,
+            coded_depth(source.bit_depth, self.hevc_depth)?,
+            false,
+        )
+    }
+}
+
+/// The depth a lossy item codes a `source_depth` picture at when the
+/// caller gives none: 8 → 8, 9–10 → 10, 11–12 → 12, deeper → 10
+/// (a 16-bit source carries no 16 significant bits; Main 10 is the
+/// layout every reader opens). An explicit `depth` must be 8 / 10 /
+/// 12.
+pub fn coded_depth(source_depth: u8, depth: Option<u8>) -> Result<u8> {
+    Ok(match depth {
+        Some(d @ (8 | 10 | 12)) => d,
+        Some(other) => {
+            return Err(HeifError::unsupported(format!(
+                "coded depth {other} (8, 10 or 12)"
+            )))
+        }
+        None => match source_depth {
+            ..=8 => 8,
+            9..=10 => 10,
+            11..=12 => 12,
+            _ => 10,
+        },
+    })
 }
 
 /// The HEVC coding-tree block size `rd` / `tiles` need (they run on
@@ -203,20 +317,56 @@ pub fn pad_frame(f: &HeifFrame, w: u32, h: u32) -> Result<HeifFrame> {
 }
 
 #[doc(hidden)]
-/// Convert a frame to 8-bit 4:2:0 (the layout the HEVC / AV1 encoders
-/// accept): monochrome gains neutral chroma, 4:2:2 / 4:4:4 chroma is
-/// box-averaged, depths above 8 are rounded down.
+/// Convert a frame to 8-bit 4:2:0 (the layout the historical HEVC
+/// coder accepts): monochrome gains neutral chroma, 4:2:2 / 4:4:4
+/// chroma is box-averaged, depths above 8 are rounded down.
 pub fn to_yuv420_8(f: &HeifFrame) -> Result<HeifFrame> {
-    let fmt = HeifPixelFormat::new(Chroma::Yuv420, 8, false)?;
-    let shift = f.format.bit_depth - 8;
+    to_yuv420(f, 8)
+}
+
+/// Convert a frame to 4:2:0 at `depth` bits (8 / 10 / 12 / 16):
+/// monochrome gains neutral chroma, 4:2:2 / 4:4:4 chroma is
+/// box-averaged (rounded to nearest), deeper sources are rounded down
+/// to `depth`, shallower ones scaled up by bit replication. A frame
+/// already in that layout comes back tightly packed. The alpha plane
+/// is dropped.
+pub fn to_yuv420(f: &HeifFrame, depth: u8) -> Result<HeifFrame> {
+    let fmt = HeifPixelFormat::new(Chroma::Yuv420, depth, false)?;
+    if f.format.without_alpha() == fmt {
+        let bps = fmt.bytes_per_sample();
+        let planes = (0..fmt.plane_count())
+            .map(|i| {
+                let (w, h) = f.plane_dims(i);
+                let stride = w as usize * bps;
+                let mut data = Vec::with_capacity(stride * h as usize);
+                for y in 0..h {
+                    data.extend_from_slice(f.row(i, y));
+                }
+                crate::image::HeifPlane { stride, data }
+            })
+            .collect();
+        return Ok(HeifFrame {
+            width: f.width,
+            height: f.height,
+            format: fmt,
+            planes,
+        });
+    }
+    let src_depth = f.format.bit_depth;
+    let max = fmt.max_value() as u32;
     let round = |v: u32| -> u16 {
-        if shift == 0 {
+        if src_depth == depth {
             v as u16
+        } else if src_depth > depth {
+            let shift = src_depth - depth;
+            ((v + (1 << (shift - 1))) >> shift).min(max) as u16
         } else {
-            ((v + (1 << (shift - 1))) >> shift).min(255) as u16
+            // Bit replication: 0 → 0, max → max.
+            let shift = depth - src_depth;
+            ((v << shift) | (v >> (src_depth - shift))).min(max) as u16
         }
     };
-    let mut out = HeifFrame::filled(f.width, f.height, fmt, 128)?;
+    let mut out = HeifFrame::filled(f.width, f.height, fmt, 1 << (depth - 1))?;
     for y in 0..f.height {
         for x in 0..f.width {
             out.set_sample(0, x, y, round(f.sample(0, x, y) as u32));
@@ -446,8 +596,9 @@ fn profile_compat_flags(profile_idc: u8) -> u32 {
 }
 
 #[doc(hidden)]
-/// Encode one 8-bit 4:2:0 picture as an HEVC item. `w`/`h` must be
-/// multiples of 16 (the encoder's constraint); use [`pad_frame`].
+/// Encode one 4:2:0 / monochrome picture as an HEVC item (serial;
+/// see [`encode_hevc_picture_owned`]). `w`/`h` must be multiples of
+/// 16 (the encoder's constraint); use [`pad_frame`].
 pub fn encode_hevc_picture(frame: &HeifFrame, mode: &str, qp: u8) -> Result<CodedPicture> {
     encode_hevc_picture_with(frame, mode, qp, &[])
 }
@@ -494,15 +645,60 @@ pub fn encode_hevc_picture_with(
     qp: u8,
     extra: &[(&str, &str)],
 ) -> Result<CodedPicture> {
-    if frame.format.chroma != Chroma::Yuv420 || frame.format.bit_depth != 8 {
+    encode_hevc_picture_owned(frame.clone(), mode, qp, extra, 1)
+}
+
+/// The framework pixel format of an HEVC coded layout (4:2:0 or
+/// monochrome at 8 / 10 / 12 bits).
+fn hevc_input_format(f: HeifPixelFormat) -> Result<oxideav_core::PixelFormat> {
+    use oxideav_core::PixelFormat as P;
+    Ok(match (f.chroma, f.bit_depth) {
+        (Chroma::Yuv420, 8) => P::Yuv420P,
+        (Chroma::Yuv420, 10) => P::Yuv420P10Le,
+        (Chroma::Yuv420, 12) => P::Yuv420P12Le,
+        (Chroma::Yuv420, 16) => P::Yuv420P16Le,
+        (Chroma::Mono, 8) => P::Gray8,
+        (Chroma::Mono, 10) => P::Gray10Le,
+        (Chroma::Mono, 12) => P::Gray12Le,
+        (Chroma::Mono, 16) => P::Gray16Le,
+        (Chroma::Yuv422, 8) => P::Yuv422P,
+        (Chroma::Yuv422, 10) => P::Yuv422P10Le,
+        (Chroma::Yuv422, 12) => P::Yuv422P12Le,
+        (Chroma::Yuv444, 8) => P::Yuv444P,
+        (Chroma::Yuv444, 10) => P::Yuv444P10Le,
+        (Chroma::Yuv444, 12) => P::Yuv444P12Le,
+        _ => {
+            return Err(HeifError::unsupported(format!(
+                "HEVC item encoding: no coded layout for {:?} {}-bit",
+                f.chroma, f.bit_depth
+            )))
+        }
+    })
+}
+
+/// Encode one picture as an HEVC item, moving its planes into the
+/// codec's input (no copy on this side): 4:2:0 / monochrome at 8 /
+/// 10 / 12 bits (16 on `pcm`), `w` / `h` multiples of 16 (the
+/// encoder's constraint; see [`pad_frame`]). `threads` is handed to
+/// the encoder as its `ExecutionContext` (the quadtree coder's
+/// wavefront / tile fan-out; the historical coder ignores it).
+pub fn encode_hevc_picture_owned(
+    frame: HeifFrame,
+    mode: &str,
+    qp: u8,
+    extra: &[(&str, &str)],
+    threads: usize,
+) -> Result<CodedPicture> {
+    if frame.format.has_alpha {
         return Err(HeifError::unsupported(
-            "HEVC item encoding takes 8-bit 4:2:0 input (see to_yuv420_8)",
+            "HEVC item encoding takes a colour-only picture (drop the alpha plane)",
         ));
     }
+    let pf = hevc_input_format(frame.format)?;
     let mut params = CodecParameters::video(CodecId::new(crate::decode::CODEC_ID_HEVC));
     params.width = Some(frame.width);
     params.height = Some(frame.height);
-    params.pixel_format = Some(oxideav_core::PixelFormat::Yuv420P);
+    params.pixel_format = Some(pf);
     let mut options = CodecOptions::new()
         .set("mode", mode)
         .set("qp", qp.to_string());
@@ -512,8 +708,21 @@ pub fn encode_hevc_picture_with(
     params.options = options;
     let mut enc = oxideav_h265::make_encoder(&params)
         .map_err(|e| HeifError::unsupported(format!("HEVC encoder: {e}")))?;
-    let (mut vf, _) = frame.to_core()?;
-    vf.pts = Some(0);
+    if threads > 1 {
+        enc.set_execution_context(&oxideav_core::ExecutionContext::with_threads(threads));
+    }
+    let planes = frame
+        .planes
+        .into_iter()
+        .map(|p| oxideav_core::VideoPlane {
+            stride: p.stride,
+            data: p.data,
+        })
+        .collect();
+    let vf = oxideav_core::VideoFrame {
+        pts: Some(0),
+        planes,
+    };
     enc.send_frame(&Frame::Video(vf))
         .map_err(|e| HeifError::invalid(format!("HEVC encoder rejected the frame: {e}")))?;
     enc.flush()
@@ -526,6 +735,7 @@ pub fn encode_hevc_picture_with(
             Err(e) => return Err(HeifError::invalid(format!("HEVC encoder: {e}"))),
         }
     }
+    drop(enc);
     let (cfg, data, w, h, layout) = hevc_item_from_annex_b(&annex_b)?;
     Ok(CodedPicture {
         item_type: ITEM_TYPE_HVC1,
@@ -543,8 +753,18 @@ pub fn encode_hevc_picture_with(
 /// 4:2:0 / 4:2:2 / 4:4:4 — lossless when `opts.av1_quality` is `None`
 /// or 100, else at that quality. Dimensions must be multiples of 8.
 pub fn encode_av1_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<CodedPicture> {
+    encode_av1_picture_owned(frame.without_alpha(), opts)
+}
+
+/// [`encode_av1_picture`] over an owned colour-only picture: the
+/// planes are widened into the codec's `u16` input plane by plane
+/// (each source plane freed as it goes). The tile layout is derived
+/// from the picture size for [`AV1_TILE_LAYOUT_THREADS`] workers and
+/// the search runs on `opts.threads`, so the bytes never depend on the
+/// budget.
+pub fn encode_av1_picture_owned(frame: HeifFrame, opts: &EncodeOptions) -> Result<CodedPicture> {
     use oxideav_av1::encoder::{
-        encode_still_yuv, ChromaFormat, StillOptions, StillSpeed, YuvFrame,
+        encode_still_yuv, still::auto_tile_layout, ChromaFormat, StillOptions, StillSpeed, YuvFrame,
     };
     if !matches!(frame.format.bit_depth, 8 | 10 | 12) {
         return Err(HeifError::unsupported(format!(
@@ -552,34 +772,50 @@ pub fn encode_av1_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Cod
             frame.format.bit_depth
         )));
     }
-    let t = frame.without_alpha().tight();
-    let format = match t.format.chroma {
+    if frame.format.has_alpha {
+        return Err(HeifError::unsupported(
+            "AV1 item encoding takes a colour-only picture (drop the alpha plane)",
+        ));
+    }
+    let format = match frame.format.chroma {
         Chroma::Mono => ChromaFormat::Monochrome,
         Chroma::Yuv420 => ChromaFormat::Yuv420,
         Chroma::Yuv422 => ChromaFormat::Yuv422,
         Chroma::Yuv444 => ChromaFormat::Yuv444,
     };
-    let plane16 = |p: usize| -> Vec<u16> {
-        let (w, h) = t.plane_dims(p);
+    let (width, height, fmt) = (frame.width, frame.height, frame.format);
+    let bps = fmt.bytes_per_sample();
+    let mut planes = frame.planes.into_iter();
+    let mut plane16 = |p: usize| -> Vec<u16> {
+        let plane = planes.next().expect("validated plane count");
+        let (w, h) = fmt.plane_dims(p, width, height);
         let mut v = Vec::with_capacity((w * h) as usize);
-        for y in 0..h {
-            for x in 0..w {
-                v.push(t.sample(p, x, y));
+        for y in 0..h as usize {
+            let row = &plane.data[y * plane.stride..y * plane.stride + w as usize * bps];
+            if bps == 1 {
+                v.extend(row.iter().map(|b| *b as u16));
+            } else {
+                v.extend(
+                    row.chunks_exact(2)
+                        .map(|c| u16::from_le_bytes([c[0], c[1]])),
+                );
             }
         }
         v
     };
-    let (u, v) = if t.format.chroma == Chroma::Mono {
+    let y = plane16(0);
+    let (u, v) = if fmt.chroma == Chroma::Mono {
         (Vec::new(), Vec::new())
     } else {
         (plane16(1), plane16(2))
     };
+    drop(planes);
     let input = YuvFrame {
-        width: t.width,
-        height: t.height,
-        bit_depth: t.format.bit_depth,
+        width,
+        height,
+        bit_depth: fmt.bit_depth,
         format,
-        y: plane16(0),
+        y,
         u,
         v,
     };
@@ -593,6 +829,11 @@ pub fn encode_av1_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Cod
         _ => StillSpeed::Fast,
     };
     so.reduced_header = true;
+    let (cols, rows) = auto_tile_layout(width, height, AV1_TILE_LAYOUT_THREADS);
+    so.tile_cols_log2 = cols;
+    so.tile_rows_log2 = rows;
+    so.auto_tiles = false;
+    so.threads = opts.workers();
     match &opts.colr {
         Colr::Nclx {
             primaries,
@@ -617,13 +858,13 @@ pub fn encode_av1_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Cod
         item_type: ITEM_TYPE_AV01,
         data: still.temporal_unit_bytes,
         config: Property::Av1C(cfg),
-        coded_width: t.width,
-        coded_height: t.height,
+        coded_width: width,
+        coded_height: height,
         layout,
     })
 }
 
-fn encode_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<CodedPicture> {
+fn encode_picture(frame: HeifFrame, opts: &EncodeOptions) -> Result<CodedPicture> {
     encode_picture_with(frame, opts, &[])
 }
 
@@ -634,41 +875,74 @@ fn encode_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<CodedPictur
 const ALPHA_HEVC_OPTIONS: &[(&str, &str)] = &[("vpsid", "1"), ("spsid", "1"), ("ppsid", "1")];
 
 fn encode_picture_with(
-    frame: &HeifFrame,
+    frame: HeifFrame,
     opts: &EncodeOptions,
     extra: &[(&str, &str)],
 ) -> Result<CodedPicture> {
     encode_picture_for(frame, opts, &opts.colr, extra)
 }
 
+/// The HEVC encoder options of an item coded in `coded` layout: the
+/// VUI colour signal, the quadtree coder's `ctb` / `rd` / `tiles` /
+/// `wpp`, the in-loop filters and the caller's extras.
+fn hevc_item_options(
+    coded: HeifPixelFormat,
+    width: u32,
+    height: u32,
+    colr: &Colr,
+    opts: &EncodeOptions,
+) -> Vec<(String, String)> {
+    let mut signal = hevc_signal_options(colr, opts);
+    let lossy = opts.hevc_mode != "pcm";
+    if lossy {
+        // `rd` / `tiles` ride the quadtree coder, which the encoder
+        // enables through `ctb` (and which every non-8-bit-4:2:0 layout
+        // runs on): supply it when the caller did not, and let the
+        // wavefront carry the thread budget on a single-tile picture
+        // (always on there, so the bytes never depend on the budget).
+        if opts.hevc_quadtree(coded) {
+            let ctb = opts
+                .hevc_ctb
+                .unwrap_or_else(|| auto_ctb(width, height, opts.hevc_tiles.as_deref()));
+            signal.push(("ctb".into(), ctb.to_string()));
+            if opts.hevc_tiles.is_none() {
+                signal.push(("wpp".into(), "1".into()));
+            }
+            // The coder's own still default is the full-RD level 2
+            // (~12x the level-0 CPU); a layout that merely needs the
+            // quadtree coder keeps the fast search unless `rd` asks.
+            if opts.hevc_rd.is_none() {
+                signal.push(("rd".into(), "0".into()));
+            }
+        }
+        if opts.hevc_filters.unwrap_or(HEVC_FILTERS_DEFAULT) {
+            signal.push(("deblock".into(), "1".into()));
+            signal.push(("sao".into(), "1".into()));
+        }
+    }
+    signal.extend(opts.hevc_options.iter().cloned());
+    signal
+}
+
 /// [`encode_picture_with`] for an item whose colour information is
 /// `colr` (the alpha auxiliary signals its own range).
 fn encode_picture_for(
-    frame: &HeifFrame,
+    frame: HeifFrame,
     opts: &EncodeOptions,
     colr: &Colr,
     extra: &[(&str, &str)],
 ) -> Result<CodedPicture> {
     match opts.codec {
         StillCodec::Hevc => {
-            let mut signal = hevc_signal_options(colr, opts);
-            // `rd` / `tiles` ride the quadtree coder, which the encoder
-            // enables through `ctb`: supply it when the caller did not.
-            let quadtree = opts.hevc_rd.is_some() || opts.hevc_tiles.is_some();
-            if opts.hevc_ctb.is_some() || quadtree {
-                let ctb = opts.hevc_ctb.unwrap_or_else(|| {
-                    auto_ctb(frame.width, frame.height, opts.hevc_tiles.as_deref())
-                });
-                signal.push(("ctb".into(), ctb.to_string()));
-            }
+            let signal = hevc_item_options(frame.format, frame.width, frame.height, colr, opts);
             let mut all: Vec<(&str, &str)> = signal
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
             all.extend_from_slice(extra);
-            encode_hevc_picture_with(frame, &opts.hevc_mode, opts.qp, &all)
+            encode_hevc_picture_owned(frame, &opts.hevc_mode, opts.qp, &all, opts.workers())
         }
-        StillCodec::Av1 => encode_av1_picture(frame, opts),
+        StillCodec::Av1 => encode_av1_picture_owned(frame, opts),
     }
 }
 
@@ -740,82 +1014,285 @@ fn coded_props(pic: &CodedPicture, colr: &Colr, icc: Option<&[u8]>) -> Vec<(Prop
     v
 }
 
-/// Encode a coded item for `frame` at the visible size `vis`, padding
-/// to the codec's alignment and attaching a `clap` when needed.
-fn add_picture_item(
-    w: &mut HeifWriter,
-    frame: &HeifFrame,
-    opts: &EncodeOptions,
-    extra: Vec<(Property, bool)>,
-) -> Result<u32> {
-    let a = alignment(opts);
+/// Production default of the HEVC in-loop filters on lossy items.
+pub const HEVC_FILTERS_DEFAULT: bool = true;
+
+/// Pad `frame` to the codec's block alignment, moving it when it is
+/// already aligned and tightly packed (no copy).
+fn pad_owned(frame: HeifFrame, a: u32) -> Result<HeifFrame> {
     let (pw, ph) = (
         align_up(frame.width, a).max(a),
         align_up(frame.height, a).max(a),
     );
-    let padded = pad_frame(frame, pw, ph)?;
-    let pic = encode_picture(&padded, opts)?;
-    let mut props = coded_props(&pic, &opts.colr, opts.icc_profile.as_deref());
-    props.extend(extra);
-    if (pic.coded_width, pic.coded_height) != (frame.width, frame.height) {
-        props.push((
+    let bps = frame.format.bytes_per_sample();
+    let tight = frame
+        .planes
+        .iter()
+        .enumerate()
+        .all(|(i, p)| p.stride == frame.plane_dims(i).0 as usize * bps);
+    if (pw, ph) == (frame.width, frame.height) && tight {
+        return Ok(frame);
+    }
+    pad_frame(&frame, pw, ph)
+}
+
+/// The `clap` restoring `vis` (the visible size) over a coded picture
+/// of `pic`'s size, when they differ.
+fn clap_for(pic: &CodedPicture, vis: (u32, u32)) -> Option<(Property, bool)> {
+    ((pic.coded_width, pic.coded_height) != vis).then(|| {
+        (
             Property::Clap(Clap::for_rect(
                 pic.coded_width,
                 pic.coded_height,
                 CropRect {
                     x: 0,
                     y: 0,
-                    width: frame.width,
-                    height: frame.height,
+                    width: vis.0,
+                    height: vis.1,
                 },
             )),
             true,
-        ));
-    }
+        )
+    })
+}
+
+/// Encode a coded item for `frame` at its visible size, padding to
+/// the codec's alignment and attaching a `clap` when needed.
+fn add_picture_item(
+    w: &mut HeifWriter,
+    frame: HeifFrame,
+    opts: &EncodeOptions,
+    extra: Vec<(Property, bool)>,
+) -> Result<u32> {
+    let vis = (frame.width, frame.height);
+    let padded = pad_owned(frame, alignment(opts))?;
+    let pic = encode_picture(padded, opts)?;
+    let mut props = coded_props(&pic, &opts.colr, opts.icc_profile.as_deref());
+    props.extend(extra);
+    props.extend(clap_for(&pic, vis));
     props.extend(transform_props(opts));
     Ok(w.add_coded_item(pic.item_type, pic.data, props))
 }
 
-/// Encode `frame` (any planar layout; converted to 8-bit 4:2:0) into a
-/// complete HEIF file per `opts`. Returns the file bytes.
+/// The colour-only picture `encode_still` codes for `frame`: AV1 keeps
+/// the source's (depth, chroma) pairing up to 12 bits, HEVC codes
+/// 4:2:0 at [`EncodeOptions::hevc_coded_format`]. One new allocation
+/// at most (the converted picture); an already-matching source is
+/// copied once without its alpha plane.
+fn coding_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<HeifFrame> {
+    let native_av1 = opts.codec == StillCodec::Av1 && frame.format.bit_depth <= 12;
+    if native_av1 {
+        Ok(frame.without_alpha().tight())
+    } else {
+        let coded = opts.hevc_coded_format(frame.format)?;
+        to_yuv420(frame, coded.bit_depth)
+    }
+}
+
+/// [`coding_picture`] over an owned frame: a frame already in the
+/// coding layout is split into its colour planes and alpha plane
+/// without a copy.
+fn coding_picture_owned(
+    frame: HeifFrame,
+    opts: &EncodeOptions,
+) -> Result<(HeifFrame, Option<HeifFrame>)> {
+    let coded = if native_av1(&frame, opts) {
+        frame.format.without_alpha()
+    } else {
+        opts.hevc_coded_format(frame.format)?
+    };
+    let bps = frame.format.bytes_per_sample();
+    let tight = frame
+        .planes
+        .iter()
+        .enumerate()
+        .all(|(i, p)| p.stride == frame.plane_dims(i).0 as usize * bps);
+    if frame.format.without_alpha() != coded || !tight {
+        let alpha = frame.alpha_as_frame();
+        return Ok((coding_picture(&frame, opts)?, alpha));
+    }
+    let (width, height, format) = (frame.width, frame.height, frame.format);
+    let mut planes = frame.planes;
+    let alpha = format.alpha_plane().map(|i| HeifFrame {
+        width,
+        height,
+        format: HeifPixelFormat {
+            chroma: Chroma::Mono,
+            bit_depth: format.bit_depth,
+            has_alpha: false,
+        },
+        planes: vec![planes.remove(i)],
+    });
+    Ok((
+        HeifFrame {
+            width,
+            height,
+            format: coded,
+            planes,
+        },
+        alpha,
+    ))
+}
+
+/// Whether AV1 codes `frame` natively (its own depth / chroma).
+fn native_av1(frame: &HeifFrame, opts: &EncodeOptions) -> bool {
+    opts.codec == StillCodec::Av1 && frame.format.bit_depth <= 12
+}
+
+/// Code the tiles of a `cols × rows` grid over `padded` (already a
+/// multiple of `tile` on both axes) on `opts.workers()` threads and
+/// hand them to the writer in row-major order as they complete —
+/// item ids and bytes are those of the serial encode. Returns the
+/// tile item ids.
+fn encode_grid_tiles(
+    w: &mut HeifWriter,
+    padded: &HeifFrame,
+    tile: u32,
+    cols: u32,
+    rows: u32,
+    opts: &EncodeOptions,
+) -> Result<Vec<u32>> {
+    let n = (rows * cols) as usize;
+    let tile_at = |i: usize| -> Result<HeifFrame> {
+        let (r, c) = ((i as u32) / cols, (i as u32) % cols);
+        crop(padded, c * tile, r * tile, tile, tile)
+    };
+    // Each tile's codec runs serial; the budget is spent across tiles.
+    let tile_opts = EncodeOptions {
+        threads: None,
+        ..opts.clone()
+    };
+    let mut ids = Vec::with_capacity(n);
+    let mut add = |w: &mut HeifWriter, pic: CodedPicture| {
+        let props = coded_props(&pic, &opts.colr, None);
+        let id = w.add_coded_item(pic.item_type, pic.data, props);
+        w.set_hidden(id, true);
+        ids.push(id);
+    };
+    let workers = oxideav_core::ExecutionContext::with_threads(opts.workers()).effective_workers(n);
+    if workers <= 1 {
+        for i in 0..n {
+            add(w, encode_picture(tile_at(i)?, &tile_opts)?);
+        }
+        return Ok(ids);
+    }
+    // Work-stealing over a shared counter; finished tiles come back
+    // over a channel and are reordered on the main thread, which hands
+    // each tile to the writer as soon as its predecessors are in — the
+    // side buffer holds only the out-of-order completions.
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (tx, rx) = std::sync::mpsc::channel::<(usize, Result<CodedPicture>)>();
+    let result: Result<()> = std::thread::scope(|s| {
+        for _ in 0..workers {
+            let tx = tx.clone();
+            let next = &next;
+            let tile_opts = &tile_opts;
+            let tile_at = &tile_at;
+            s.spawn(move || loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i >= n {
+                    break;
+                }
+                let coded = tile_at(i).and_then(|t| encode_picture(t, tile_opts));
+                if tx.send((i, coded)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(tx);
+        let mut pending: std::collections::BTreeMap<usize, CodedPicture> =
+            std::collections::BTreeMap::new();
+        let mut expect = 0usize;
+        while expect < n {
+            let (i, coded) = rx
+                .recv()
+                .map_err(|_| HeifError::invalid("grid: a tile worker stopped early"))?;
+            pending.insert(i, coded?);
+            while let Some(pic) = pending.remove(&expect) {
+                add(w, pic);
+                expect += 1;
+            }
+        }
+        Ok(())
+    });
+    result?;
+    Ok(ids)
+}
+
+/// Encode `frame` (any planar layout; converted to the codec's coding
+/// layout — see [`coding_picture`]) into a complete HEIF file per
+/// `opts`. Returns the file bytes.
 pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> {
     frame.validate()?;
-    // HEVC items are coded 8-bit 4:2:0; AV1 items keep the picture's
-    // own (depth, chroma) pairing up to 12 bits.
-    let native_av1 = opts.codec == StillCodec::Av1 && frame.format.bit_depth <= 12;
-    let colour = if native_av1 {
-        frame.without_alpha().tight()
-    } else {
-        to_yuv420_8(&frame.without_alpha())?
-    };
     let mut w = HeifWriter::new();
-    let master = match opts.grid_tile {
-        Some(tile) if tile > 0 && (colour.width > tile || colour.height > tile) => {
+    let colour = coding_picture(frame, opts)?;
+    let master = encode_still_planes(&mut w, colour, frame.alpha_as_frame(), opts)?;
+    w.set_primary(master);
+    w.write_to_vec()
+}
+
+/// [`encode_still`] over an owned frame: a picture already in the
+/// coding layout (4:2:0 at the coded depth for HEVC, its own layout
+/// for AV1) is coded in place — no copy of the input planes is made
+/// on this side; the codec's input is the frame's own planes.
+pub fn encode_still_owned(frame: HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> {
+    frame.validate()?;
+    let mut w = HeifWriter::new();
+    let (colour, alpha) = coding_picture_owned(frame, opts)?;
+    let master = encode_still_planes(&mut w, colour, alpha, opts)?;
+    w.set_primary(master);
+    w.write_to_vec()
+}
+
+/// [`encode_still`]'s item graph added to an existing writer: the
+/// primary (coded item or grid), its alpha auxiliary, thumbnail,
+/// metadata and gain map. Returns the primary's item id (the caller
+/// sets it as primary, or builds further on it).
+pub fn encode_still_into(
+    w: &mut HeifWriter,
+    frame: &HeifFrame,
+    opts: &EncodeOptions,
+) -> Result<u32> {
+    frame.validate()?;
+    let colour = coding_picture(frame, opts)?;
+    encode_still_planes(w, colour, frame.alpha_as_frame(), opts)
+}
+
+/// The item graph over an already-converted colour picture and its
+/// (source-depth, monochrome) alpha plane.
+fn encode_still_planes(
+    w: &mut HeifWriter,
+    colour: HeifFrame,
+    alpha: Option<HeifFrame>,
+    opts: &EncodeOptions,
+) -> Result<u32> {
+    let native_av1 = native_av1(&colour, opts);
+    let (cw, ch, cfmt) = (colour.width, colour.height, colour.format);
+    let (master, thumb) = match opts.effective_grid_tile(cw, ch) {
+        Some(tile) if cw > tile || ch > tile => {
             // MIAF §7.3.11.4.2: tiles are at least 64 pixels; keep them
             // aligned to the codec block size on both axes.
             let tile = align_up(tile.max(crate::miaf::MIN_TILE_EDGE), alignment(opts) * 2);
-            let cols = colour.width.div_ceil(tile);
-            let rows = colour.height.div_ceil(tile);
+            let cols = cw.div_ceil(tile);
+            let rows = ch.div_ceil(tile);
             if rows > 256 || cols > 256 {
                 return Err(HeifError::invalid("grid: more than 256 rows or columns"));
             }
-            let padded = pad_frame(&colour, cols * tile, rows * tile)?;
-            let mut tiles = Vec::with_capacity((rows * cols) as usize);
-            for r in 0..rows {
-                for c in 0..cols {
-                    let t = crop(&padded, c * tile, r * tile, tile, tile)?;
-                    let pic = encode_picture(&t, opts)?;
-                    let props = coded_props(&pic, &opts.colr, None);
-                    let id = w.add_coded_item(pic.item_type, pic.data, props);
-                    w.set_hidden(id, true);
-                    tiles.push(id);
-                }
-            }
+            // The thumbnail is cut from the unpadded picture below; the
+            // padded canvas replaces it (one picture held at a time).
+            let thumb = thumbnail_source(&colour, opts)?;
+            let padded = if (cols * tile, rows * tile) == (cw, ch) {
+                colour
+            } else {
+                pad_frame(&colour, cols * tile, rows * tile)?
+            };
+            let tiles = encode_grid_tiles(w, &padded, tile, cols, rows, opts)?;
+            drop(padded);
             let desc = GridDescriptor {
                 rows: rows as u16,
                 columns: cols as u16,
-                output_width: colour.width,
-                output_height: colour.height,
+                output_width: cw,
+                output_height: ch,
             };
             let mut gprops = vec![(
                 Property::Colr(nclx_for_icc(&opts.colr, opts.icc_profile.is_some())),
@@ -831,29 +1308,29 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
                 ));
             }
             gprops.extend(transform_props(opts));
-            w.add_grid(desc, &tiles, gprops)?
+            (w.add_grid(desc, &tiles, gprops)?, thumb)
         }
-        _ => add_picture_item(&mut w, &colour, opts, Vec::new())?,
+        _ => {
+            let thumb = thumbnail_source(&colour, opts)?;
+            (add_picture_item(w, colour, opts, Vec::new())?, thumb)
+        }
     };
     // Alpha auxiliary: the alpha plane as a picture — monochrome for
-    // AV1, monochrome-in-4:2:0 for HEVC (its encoder takes 4:2:0).
-    if let Some(alpha) = frame.alpha_as_frame() {
+    // AV1, monochrome-in-4:2:0 for HEVC (the layout every HEVC
+    // producer writes and every reader opens).
+    if let Some(alpha) = alpha {
         let a_src = if native_av1 {
-            alpha.tight()
+            mono_at_depth(alpha, cfmt.bit_depth)?
         } else {
-            to_yuv420_8(&alpha)?
+            to_yuv420(&alpha, cfmt.bit_depth)?
         };
-        let a = alignment(opts);
-        let (pw, ph) = (
-            align_up(a_src.width, a).max(a),
-            align_up(a_src.height, a).max(a),
-        );
+        let vis = (a_src.width, a_src.height);
         let extra: &[(&str, &str)] = if opts.codec == StillCodec::Hevc {
             ALPHA_HEVC_OPTIONS
         } else {
             &[]
         };
-        let padded = pad_frame(&a_src, pw, ph)?;
+        let padded = pad_owned(a_src, alignment(opts))?;
         // The alpha is an opacity: full range, no colour description.
         let alpha_colr = Colr::Nclx {
             primaries: 2,
@@ -861,7 +1338,7 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
             matrix: 2,
             full_range: true,
         };
-        let pic = encode_picture_for(&padded, opts, &alpha_colr, extra)?;
+        let pic = encode_picture_for(padded, opts, &alpha_colr, extra)?;
         // Alpha items carry no colour information (the plane is an
         // opacity, not a colour — the shape every third-party producer
         // writes), a single-channel `pixi` and an essential `auxC`.
@@ -895,54 +1372,13 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
             }),
             true,
         ));
-        if (pic.coded_width, pic.coded_height) != (a_src.width, a_src.height) {
-            props.push((
-                Property::Clap(Clap::for_rect(
-                    pic.coded_width,
-                    pic.coded_height,
-                    CropRect {
-                        x: 0,
-                        y: 0,
-                        width: a_src.width,
-                        height: a_src.height,
-                    },
-                )),
-                true,
-            ));
-        }
+        props.extend(clap_for(&pic, vis));
         props.extend(transform_props(opts));
         w.add_alpha(master, pic.item_type, pic.data, props, false);
     }
-    // Thumbnail.
-    if let Some(max_dim) = opts.thumbnail_max_dim {
-        let max_dim = max_dim.max(1);
-        if colour.width.max(colour.height) > max_dim {
-            let scale = colour.width.max(colour.height) as f64 / max_dim as f64;
-            let tw = ((colour.width as f64 / scale).round() as u32).max(1);
-            let th = ((colour.height as f64 / scale).round() as u32).max(1);
-            let small = crate::compose::resize_nearest(&colour, tw, th)?;
-            let a = alignment(opts);
-            let padded = pad_frame(&small, align_up(tw, a).max(a), align_up(th, a).max(a))?;
-            let pic = encode_picture(&padded, opts)?;
-            let mut props = coded_props(&pic, &opts.colr, None);
-            if (pic.coded_width, pic.coded_height) != (tw, th) {
-                props.push((
-                    Property::Clap(Clap::for_rect(
-                        pic.coded_width,
-                        pic.coded_height,
-                        CropRect {
-                            x: 0,
-                            y: 0,
-                            width: tw,
-                            height: th,
-                        },
-                    )),
-                    true,
-                ));
-            }
-            props.extend(transform_props(opts));
-            w.add_thumbnail(master, pic.item_type, pic.data, props);
-        }
+    // Thumbnail (cut from the coding picture before it was coded).
+    if let Some(small) = thumb {
+        add_thumbnail_item(w, master, small, opts)?;
     }
     // Metadata.
     if let Some(exif) = &opts.exif {
@@ -959,14 +1395,10 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
         let g_src = if native_av1 {
             gm.frame.without_alpha().tight()
         } else {
-            to_yuv420_8(&gm.frame.without_alpha())?
+            to_yuv420(&gm.frame, cfmt.bit_depth)?
         };
-        let a = alignment(opts);
-        let padded = pad_frame(
-            &g_src,
-            align_up(g_src.width, a).max(a),
-            align_up(g_src.height, a).max(a),
-        )?;
+        let vis = (g_src.width, g_src.height);
+        let padded = pad_owned(g_src, alignment(opts))?;
         let gain_colr = Colr::Nclx {
             primaries: 2,
             transfer: 2,
@@ -982,7 +1414,7 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
         } else {
             &[]
         };
-        let pic = encode_picture_for(&padded, opts, &gain_colr, extra)?;
+        let pic = encode_picture_for(padded, opts, &gain_colr, extra)?;
         let mut props = coded_props(&pic, &gain_colr, None);
         if gm.frame.format.chroma == Chroma::Mono && pic.layout.chroma != Chroma::Mono {
             // The map rides the luma plane: one channel of information.
@@ -994,27 +1426,13 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
                 }
             }
         }
-        if (pic.coded_width, pic.coded_height) != (g_src.width, g_src.height) {
-            props.push((
-                Property::Clap(Clap::for_rect(
-                    pic.coded_width,
-                    pic.coded_height,
-                    CropRect {
-                        x: 0,
-                        y: 0,
-                        width: g_src.width,
-                        height: g_src.height,
-                    },
-                )),
-                true,
-            ));
-        }
+        props.extend(clap_for(&pic, vis));
         let gain_id = w.add_coded_item(pic.item_type, pic.data, props);
         let mut tprops = vec![(
             Property::Pixi(Pixi {
                 bits_per_channel: vec![
                     gm.alternate_bit_depth.clamp(8, 16);
-                    colour.format.chroma.colour_planes()
+                    cfmt.chroma.colour_planes()
                 ],
             }),
             false,
@@ -1030,8 +1448,52 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
             tprops,
         )?;
     }
-    w.set_primary(master);
-    w.write_to_vec()
+    Ok(master)
+}
+
+/// A monochrome plane at `depth` bits (the coded depth of the item it
+/// accompanies): moved when it already is, else re-quantised.
+fn mono_at_depth(plane: HeifFrame, depth: u8) -> Result<HeifFrame> {
+    if plane.format.bit_depth == depth {
+        return Ok(plane);
+    }
+    let mut f = to_yuv420(&plane, depth)?;
+    f.planes.truncate(1);
+    f.format = HeifPixelFormat::new(Chroma::Mono, depth, false)?;
+    Ok(f)
+}
+
+/// The thumbnail picture `opts` asks for over `colour`, when the
+/// picture is larger than the requested size.
+fn thumbnail_source(colour: &HeifFrame, opts: &EncodeOptions) -> Result<Option<HeifFrame>> {
+    let Some(max_dim) = opts.thumbnail_max_dim else {
+        return Ok(None);
+    };
+    let max_dim = max_dim.max(1);
+    if colour.width.max(colour.height) <= max_dim {
+        return Ok(None);
+    }
+    let scale = colour.width.max(colour.height) as f64 / max_dim as f64;
+    let tw = ((colour.width as f64 / scale).round() as u32).max(1);
+    let th = ((colour.height as f64 / scale).round() as u32).max(1);
+    Ok(Some(crate::compose::resize_nearest(colour, tw, th)?))
+}
+
+/// Code `small` as the thumbnail of `master`.
+fn add_thumbnail_item(
+    w: &mut HeifWriter,
+    master: u32,
+    small: HeifFrame,
+    opts: &EncodeOptions,
+) -> Result<()> {
+    let vis = (small.width, small.height);
+    let padded = pad_owned(small, alignment(opts))?;
+    let pic = encode_picture(padded, opts)?;
+    let mut props = coded_props(&pic, &opts.colr, None);
+    props.extend(clap_for(&pic, vis));
+    props.extend(transform_props(opts));
+    w.add_thumbnail(master, pic.item_type, pic.data, props);
+    Ok(())
 }
 
 /// Encode a still as a low-overhead image file (ISO/IEC
@@ -1052,18 +1514,15 @@ pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> 
 pub fn encode_still_minimized(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> {
     use crate::mini::{MiniChroma, MiniGainMap, MiniHdrBoxes, MinimizedImage, SampleFormat};
     frame.validate()?;
-    if opts.grid_tile.is_some() || opts.thumbnail_max_dim.is_some() {
+    if opts.grid_tile.is_some_and(|t| t > 0) || opts.thumbnail_max_dim.is_some() {
         return Err(HeifError::unsupported(
             "low-overhead file: the MinimizedImageBox has no grid or thumbnail item",
         ));
     }
     let orientation = exif_orientation(&opts.transforms)?;
-    let native_av1 = opts.codec == StillCodec::Av1 && frame.format.bit_depth <= 12;
-    let colour = if native_av1 {
-        frame.without_alpha().tight()
-    } else {
-        to_yuv420_8(&frame.without_alpha())?
-    };
+    let native_av1 = native_av1(frame, opts);
+    let colour = coding_picture(frame, opts)?;
+    let (colour_w, colour_h, coded_depth) = (colour.width, colour.height, colour.format.bit_depth);
     let a = alignment(opts);
     let exact = |f: &HeifFrame, what: &str| -> Result<()> {
         if f.width % a != 0 || f.height % a != 0 {
@@ -1085,12 +1544,11 @@ pub fn encode_still_minimized(frame: &HeifFrame, opts: &EncodeOptions) -> Result
         horizontally_centered: false,
         vertically_centered: c == Chroma::Yuv420,
     };
-    let pic = encode_picture(&colour, opts)?;
+    let pic = encode_picture(colour, opts)?;
     let (cw, ch) = (pic.coded_width, pic.coded_height);
-    if (cw, ch) != (colour.width, colour.height) {
+    if (cw, ch) != (colour_w, colour_h) {
         return Err(HeifError::unsupported(format!(
-            "low-overhead file: coded picture {cw}x{ch} differs from the {}x{} image",
-            colour.width, colour.height
+            "low-overhead file: coded picture {cw}x{ch} differs from the {colour_w}x{colour_h} image"
         )));
     }
     let signalled = nclx_for_icc(&opts.colr, opts.icc_profile.is_some());
@@ -1153,9 +1611,9 @@ pub fn encode_still_minimized(frame: &HeifFrame, opts: &EncodeOptions) -> Result
     };
     if let Some(alpha) = frame.alpha_as_frame() {
         let a_src = if native_av1 {
-            alpha.tight()
+            alpha
         } else {
-            to_yuv420_8(&alpha)?
+            to_yuv420(&alpha, coded_depth)?
         };
         let extra: &[(&str, &str)] = if opts.codec == StillCodec::Hevc {
             ALPHA_HEVC_OPTIONS
@@ -1168,7 +1626,7 @@ pub fn encode_still_minimized(frame: &HeifFrame, opts: &EncodeOptions) -> Result
             matrix: 2,
             full_range: true,
         };
-        let apic = encode_picture_for(&a_src, opts, &alpha_colr, extra)?;
+        let apic = encode_picture_for(a_src, opts, &alpha_colr, extra)?;
         m.alpha = true;
         let cfg = config_body(&apic.config);
         if cfg != m.main_codec_config {
@@ -1181,7 +1639,7 @@ pub fn encode_still_minimized(frame: &HeifFrame, opts: &EncodeOptions) -> Result
         let g_src = if native_av1 {
             gm.frame.without_alpha().tight()
         } else {
-            to_yuv420_8(&gm.frame.without_alpha())?
+            to_yuv420(&gm.frame, coded_depth)?
         };
         exact(&g_src, "gain map")?;
         let gain_colr = Colr::Nclx {
@@ -1199,7 +1657,7 @@ pub fn encode_still_minimized(frame: &HeifFrame, opts: &EncodeOptions) -> Result
         } else {
             &[]
         };
-        let gpic = encode_picture_for(&g_src, opts, &gain_colr, extra)?;
+        let gpic = encode_picture_for(g_src, opts, &gain_colr, extra)?;
         if gm.frame.format.chroma == Chroma::Mono && gpic.layout.chroma != Chroma::Mono {
             // The box derives the gain map's pixi from its coded chroma
             // layout (O.4.7.4), so a luma-only map coded 4:2:0 would read
@@ -1345,7 +1803,8 @@ pub const ENCODER_PIXEL_FORMATS: &[oxideav_core::PixelFormat] = &[
 /// YCbCr (or monochrome for grey + alpha) at the source depth, through
 /// the H.273 matrix and range of `colr` (the MIAF default — BT.601,
 /// full range — for an ICC / absent one), with the alpha carried as a
-/// plane. Row-major, `stride` honoured.
+/// plane. Row-major, `stride` honoured. See [`packed_to_planar_for`]
+/// for a conversion straight into a coding layout.
 pub fn packed_to_planar(
     vf: &oxideav_core::VideoFrame,
     width: u32,
@@ -1353,9 +1812,20 @@ pub fn packed_to_planar(
     pf: oxideav_core::PixelFormat,
     colr: &Colr,
 ) -> Result<HeifFrame> {
+    let (_, _, wide, alpha, grey) = packed_layout(pf)?;
+    let target = HeifPixelFormat::new(
+        if grey { Chroma::Mono } else { Chroma::Yuv444 },
+        if wide { 16 } else { 8 },
+        alpha,
+    )?;
+    packed_to_planar_for(vf, width, height, pf, colr, target)
+}
+
+/// `(bytes per pixel, channel order into [r, g, b, a] / [y, a], 16-bit,
+/// alpha, grey)` of a packed framework layout.
+fn packed_layout(pf: oxideav_core::PixelFormat) -> Result<(usize, [usize; 4], bool, bool, bool)> {
     use oxideav_core::PixelFormat as P;
-    // (bytes per pixel, channel order indices into [r, g, b, a] or [y, a], 16-bit?, has alpha, grey)
-    let (bpp, order, wide, alpha, grey): (usize, [usize; 4], bool, bool, bool) = match pf {
+    Ok(match pf {
         P::Rgb24 => (3, [0, 1, 2, 0], false, false, false),
         P::Rgba => (4, [0, 1, 2, 3], false, true, false),
         P::Bgr24 => (3, [2, 1, 0, 0], false, false, false),
@@ -1369,7 +1839,35 @@ pub fn packed_to_planar(
                 "framework pixel format {other:?} is neither planar YCbCr / grey nor packed RGB(A)"
             )))
         }
-    };
+    })
+}
+
+/// Convert a packed frame (the layouts of [`packed_to_planar`])
+/// straight into `target` — 4:2:0 / 4:2:2 / 4:4:4 YCbCr or monochrome
+/// at any depth, with or without an alpha plane — row pair by row
+/// pair: no full-resolution 4:4:4 intermediate exists. The colour
+/// conversion is [`crate::compose::fill_to_ycbcr`] at the target
+/// depth (8-bit sources widen by bit replication to the 16-bit
+/// input of that conversion; 16-bit sources are used as they are),
+/// subsampled chroma is the rounded box average of the full-resolution
+/// chroma samples (as [`to_yuv420`] computes it), the alpha channel is
+/// rounded to the target depth. A monochrome target takes the
+/// luma of the conversion (grey sources through the same range
+/// mapping).
+pub fn packed_to_planar_for(
+    vf: &oxideav_core::VideoFrame,
+    width: u32,
+    height: u32,
+    pf: oxideav_core::PixelFormat,
+    colr: &Colr,
+    target: HeifPixelFormat,
+) -> Result<HeifFrame> {
+    let (bpp, order, wide, src_alpha, grey) = packed_layout(pf)?;
+    if target.has_alpha && !src_alpha {
+        return Err(HeifError::invalid(format!(
+            "packed {pf:?} has no alpha channel for the {target:?} target"
+        )));
+    }
     let planes = vf.image_planes();
     let src = planes
         .first()
@@ -1380,15 +1878,11 @@ pub fn packed_to_planar(
             "packed {pf:?} frame too small for {width}x{height}"
         )));
     }
-    let depth: u8 = if wide { 16 } else { 8 };
-    let max = (1u32 << depth) - 1;
-    let fmt = HeifPixelFormat::new(
-        if grey { Chroma::Mono } else { Chroma::Yuv444 },
-        depth,
-        alpha,
-    )?;
-    let mut out = HeifFrame::zeroed(width, height, fmt)?;
-    let alpha_plane = out.format.alpha_plane();
+    let depth = target.bit_depth;
+    let max = target.max_value() as u32;
+    let src_depth: u8 = if wide { 16 } else { 8 };
+    let mut out = HeifFrame::zeroed(width, height, target)?;
+    let alpha_plane = target.alpha_plane();
     let read = |px: &[u8], ch: usize| -> u16 {
         if wide {
             u16::from_le_bytes([px[2 * ch], px[2 * ch + 1]])
@@ -1396,7 +1890,7 @@ pub fn packed_to_planar(
             px[ch] as u16
         }
     };
-    // 16-bit scale for the H.273 conversion, then back to `depth`.
+    // 16-bit scale for the H.273 conversion.
     let to16 = |v: u16| -> u16 {
         if wide {
             v
@@ -1404,30 +1898,88 @@ pub fn packed_to_planar(
             (v as u32 * 257) as u16
         }
     };
+    // Alpha to the target depth (round to nearest; replicate upwards).
+    let alpha_to = |v: u16| -> u16 {
+        let v = v as u32;
+        if src_depth == depth {
+            v as u16
+        } else if src_depth > depth {
+            let s = src_depth - depth;
+            ((v + (1 << (s - 1))) >> s).min(max) as u16
+        } else {
+            let s = depth - src_depth;
+            ((v << s) | (v >> (src_depth - s))).min(max) as u16
+        }
+    };
+    let (sx, sy) = target.chroma.shift();
+    let chroma = target.chroma != Chroma::Mono;
+    let (cw, chh) = out.plane_dims(if chroma { 1 } else { 0 });
+    let bps = target.bytes_per_sample();
+    // One row of full-resolution Cb / Cr, accumulated per chroma row
+    // group (two luma rows at 4:2:0).
+    let mut cb_acc: Vec<u32> = vec![0; if chroma { cw as usize } else { 0 }];
+    let mut cr_acc: Vec<u32> = vec![0; cb_acc.len()];
+    let mut cnt: Vec<u32> = vec![0; cb_acc.len()];
+    let flush_chroma =
+        |out: &mut HeifFrame, cy: u32, cb_acc: &mut [u32], cr_acc: &mut [u32], cnt: &mut [u32]| {
+            for (cx, ((cb, cr), n)) in cb_acc
+                .iter_mut()
+                .zip(cr_acc.iter_mut())
+                .zip(cnt.iter_mut())
+                .enumerate()
+            {
+                let n0 = (*n).max(1);
+                out.set_sample(1, cx as u32, cy, ((*cb + n0 / 2) / n0) as u16);
+                out.set_sample(2, cx as u32, cy, ((*cr + n0 / 2) / n0) as u16);
+                *cb = 0;
+                *cr = 0;
+                *n = 0;
+            }
+        };
+    let luma_stride = out.planes[0].stride;
     for y in 0..height {
         let row = &src.data[y as usize * src.stride..y as usize * src.stride + row_bytes];
+        let cy = y >> sy;
         for (x, px) in row.chunks_exact(bpp).enumerate() {
-            let x = x as u32;
-            if grey {
-                // Luma through the same range mapping as colour.
+            let ycc = if grey {
                 let g = to16(read(px, order[0]));
-                let ycc = crate::compose::fill_to_ycbcr([g, g, g], depth, Some(colr));
-                out.set_sample(0, x, y, ycc[0]);
+                crate::compose::fill_to_ycbcr([g, g, g], depth, Some(colr))
             } else {
-                let rgb16 = [
-                    to16(read(px, order[0])),
-                    to16(read(px, order[1])),
-                    to16(read(px, order[2])),
-                ];
-                let ycc = crate::compose::fill_to_ycbcr(rgb16, depth, Some(colr));
-                out.set_sample(0, x, y, ycc[0]);
-                out.set_sample(1, x, y, ycc[1]);
-                out.set_sample(2, x, y, ycc[2]);
+                crate::compose::fill_to_ycbcr(
+                    [
+                        to16(read(px, order[0])),
+                        to16(read(px, order[1])),
+                        to16(read(px, order[2])),
+                    ],
+                    depth,
+                    Some(colr),
+                )
+            };
+            let off = y as usize * luma_stride + x * bps;
+            if bps == 1 {
+                out.planes[0].data[off] = ycc[0] as u8;
+            } else {
+                out.planes[0].data[off..off + 2].copy_from_slice(&ycc[0].to_le_bytes());
+            }
+            if chroma {
+                let cx = x >> sx;
+                cb_acc[cx] += ycc[1] as u32;
+                cr_acc[cx] += ycc[2] as u32;
+                cnt[cx] += 1;
             }
             if let Some(ap) = alpha_plane {
-                let a = read(px, order[3]) as u32;
-                out.set_sample(ap, x, y, a.min(max) as u16);
+                let a = alpha_to(read(px, order[3]));
+                let aoff = y as usize * out.planes[ap].stride + x * bps;
+                if bps == 1 {
+                    out.planes[ap].data[aoff] = a as u8;
+                } else {
+                    out.planes[ap].data[aoff..aoff + 2].copy_from_slice(&a.to_le_bytes());
+                }
             }
+        }
+        // The chroma row completes with the last luma row it covers.
+        if chroma && (y + 1 == height || ((y + 1) >> sy) != cy) && cy < chh {
+            flush_chroma(&mut out, cy, &mut cb_acc, &mut cr_acc, &mut cnt);
         }
     }
     Ok(out)
@@ -1437,7 +1989,8 @@ pub fn packed_to_planar(
 /// `oxideav info heif` lists them; unknown keys are refused). The
 /// enum fields' listed default is empty because a `const` schema can
 /// only hold `String::new()`; the effective defaults are `hevc`,
-/// `intra` and `full` (see [`Default`] and the `help` text).
+/// `intra`, `full`, `auto`, `on` and `420` (see [`Default`] and the
+/// `help` text).
 #[derive(Clone, Debug)]
 pub struct HeifEncoderOptions {
     /// `codec`: `hevc` (alias `h265`) or `av1`.
@@ -1446,8 +1999,9 @@ pub struct HeifEncoderOptions {
     pub mode: String,
     /// `qp` (HEVC intra), 0..=51.
     pub qp: u32,
-    /// `grid`: tile size for a `grid` primary (0 = none).
-    pub grid: u32,
+    /// `grid`: `auto` (512-px tiles above 4 MP), `none`, or a tile
+    /// size in pixels.
+    pub grid: String,
     /// `thumbnail`: largest thumbnail dimension (0 = none).
     pub thumbnail: u32,
     /// `range`: `full` or `limited` sample range of the written `nclx`.
@@ -1457,13 +2011,26 @@ pub struct HeifEncoderOptions {
     /// `speed` (AV1): `fast` / `balanced` / `thorough`.
     pub speed: String,
     /// `rd` (HEVC intra): mode-decision effort 0..=2 (255 = the
-    /// encoder's still default).
+    /// historical coder for 8-bit 4:2:0, level 0 of the quadtree coder
+    /// for every other layout).
     pub rd: u32,
     /// `tiles` (HEVC): `CxR` tile layout (empty = none).
     pub tiles: String,
     /// `ctb` (HEVC): coding-tree block size 16 / 32 / 64 of the
     /// quadtree coder (0 = automatic when `rd` / `tiles` need it).
     pub ctb: u32,
+    /// `threads`: `auto` (the host's parallelism), a worker count, or
+    /// empty = the budget of `set_execution_context` (serial until
+    /// one is given).
+    pub threads: String,
+    /// `depth`: coded bit depth 8 / 10 / 12 (0 = follow the source;
+    /// [`coded_depth`]).
+    pub depth: u32,
+    /// `filters` (HEVC intra): `on` / `off` — deblocking + SAO.
+    pub filters: String,
+    /// `chroma`: `420` / `444` — the chroma layout packed RGB sources
+    /// are converted to (planar sources keep their own).
+    pub chroma: String,
 }
 
 impl Default for HeifEncoderOptions {
@@ -1471,8 +2038,8 @@ impl Default for HeifEncoderOptions {
         Self {
             codec: "hevc".into(),
             mode: "intra".into(),
-            qp: 26,
-            grid: 0,
+            qp: DEFAULT_QP as u32,
+            grid: "auto".into(),
             thumbnail: 0,
             range: "full".into(),
             quality: 60,
@@ -1480,6 +2047,10 @@ impl Default for HeifEncoderOptions {
             rd: 255,
             tiles: String::new(),
             ctb: 0,
+            threads: String::new(),
+            depth: 0,
+            filters: "on".into(),
+            chroma: "420".into(),
         }
     }
 }
@@ -1490,7 +2061,7 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             name: "codec",
             kind: oxideav_core::OptionKind::Enum(&["hevc", "h265", "av1"]),
             default: oxideav_core::OptionValue::String(String::new()),
-            help: "Coded item codec: hevc (heic file) or av1 (avif file, lossless)",
+            help: "Coded item codec: hevc (heic file) or av1 (avif file)",
         },
         oxideav_core::OptionField {
             name: "mode",
@@ -1501,14 +2072,14 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
         oxideav_core::OptionField {
             name: "qp",
             kind: oxideav_core::OptionKind::U32,
-            default: oxideav_core::OptionValue::U32(26),
-            help: "HEVC intra quantiser 0..=51 (lower = better)",
+            default: oxideav_core::OptionValue::U32(DEFAULT_QP as u32),
+            help: "HEVC intra quantiser 0..=51 (lower = better; 18 matches the OS encoder's default quality)",
         },
         oxideav_core::OptionField {
             name: "grid",
-            kind: oxideav_core::OptionKind::U32,
-            default: oxideav_core::OptionValue::U32(0),
-            help: "Tile the picture into a grid of this size (0 = single item; MIAF 64-px floor)",
+            kind: oxideav_core::OptionKind::String,
+            default: oxideav_core::OptionValue::String(String::new()),
+            help: "Grid tiling: auto (512-px tiles above 4 MP; default), none, or a tile size (MIAF 64-px floor)",
         },
         oxideav_core::OptionField {
             name: "thumbnail",
@@ -1538,7 +2109,7 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             name: "rd",
             kind: oxideav_core::OptionKind::U32,
             default: oxideav_core::OptionValue::U32(255),
-            help: "HEVC intra mode-decision effort 0..=2 (255 = encoder's still default)",
+            help: "HEVC intra mode-decision effort 0..=2 on the quadtree coder (255 = historical coder for 8-bit 4:2:0; level 2 lands ~5% under the OS encoder's size at ~12x the CPU)",
         },
         oxideav_core::OptionField {
             name: "tiles",
@@ -1552,6 +2123,30 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             default: oxideav_core::OptionValue::U32(0),
             help: "HEVC coding-tree block size 16 / 32 / 64 (0 = automatic: chosen when rd / tiles need the quadtree coder)",
         },
+        oxideav_core::OptionField {
+            name: "threads",
+            kind: oxideav_core::OptionKind::String,
+            default: oxideav_core::OptionValue::String(String::new()),
+            help: "Thread budget: auto, a worker count, or empty = the execution context's (serial until one is given); spent on grid tiles, the HEVC wavefront / tiles and the AV1 tile search",
+        },
+        oxideav_core::OptionField {
+            name: "depth",
+            kind: oxideav_core::OptionKind::U32,
+            default: oxideav_core::OptionValue::U32(0),
+            help: "Coded bit depth 8 / 10 / 12 (0 = follow the source: 8-bit stays 8, 16-bit codes Main 10)",
+        },
+        oxideav_core::OptionField {
+            name: "filters",
+            kind: oxideav_core::OptionKind::Enum(&["on", "off"]),
+            default: oxideav_core::OptionValue::String(String::new()),
+            help: "HEVC in-loop filters (deblocking + SAO) on lossy items (default on)",
+        },
+        oxideav_core::OptionField {
+            name: "chroma",
+            kind: oxideav_core::OptionKind::Enum(&["420", "444"]),
+            default: oxideav_core::OptionValue::String(String::new()),
+            help: "Chroma layout packed RGB sources are coded in (default 420; planar sources keep their own)",
+        },
     ];
 
     fn apply(&mut self, key: &str, value: &oxideav_core::OptionValue) -> CoreResult<()> {
@@ -1559,7 +2154,7 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             "codec" => self.codec = value.as_str()?.to_string(),
             "mode" => self.mode = value.as_str()?.to_string(),
             "qp" => self.qp = value.as_u32()?,
-            "grid" => self.grid = value.as_u32()?,
+            "grid" => self.grid = value.as_str()?.to_string(),
             "thumbnail" => self.thumbnail = value.as_u32()?,
             "range" => self.range = value.as_str()?.to_string(),
             "quality" => self.quality = value.as_u32()?,
@@ -1567,6 +2162,10 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             "rd" => self.rd = value.as_u32()?,
             "tiles" => self.tiles = value.as_str()?.to_string(),
             "ctb" => self.ctb = value.as_u32()?,
+            "threads" => self.threads = value.as_str()?.to_string(),
+            "depth" => self.depth = value.as_u32()?,
+            "filters" => self.filters = value.as_str()?.to_string(),
+            "chroma" => self.chroma = value.as_str()?.to_string(),
             other => {
                 return Err(CoreError::invalid(format!(
                     "heif: unknown option '{other}'"
@@ -1580,6 +2179,20 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
 impl HeifEncoderOptions {
     /// The `EncodeOptions` these settings describe.
     pub fn to_encode_options(&self) -> CoreResult<EncodeOptions> {
+        let grid_tile = match self.grid.trim() {
+            "" | "auto" => None,
+            "none" | "0" => Some(0),
+            n => Some(n.parse::<u32>().map_err(|_| {
+                CoreError::invalid(format!("heif: grid '{n}' (auto, none or a tile size)"))
+            })?),
+        };
+        let threads = match self.threads.trim() {
+            "" => None,
+            "auto" => Some(oxideav_core::ExecutionContext::auto().threads),
+            n => Some(n.parse::<usize>().map_err(|_| {
+                CoreError::invalid(format!("heif: threads '{n}' (auto or a worker count)"))
+            })?),
+        };
         let mut opts = EncodeOptions {
             codec: match self.codec.as_str() {
                 "hevc" | "h265" => StillCodec::Hevc,
@@ -1592,7 +2205,7 @@ impl HeifEncoderOptions {
             },
             hevc_mode: self.mode.clone(),
             qp: u8::try_from(self.qp.min(51)).unwrap_or(51),
-            grid_tile: (self.grid > 0).then_some(self.grid),
+            grid_tile,
             thumbnail_max_dim: (self.thumbnail > 0).then_some(self.thumbnail),
             // AV1: `mode=pcm` is lossless, `mode=intra` codes at `quality`.
             av1_quality: (self.mode != "pcm").then_some(self.quality.min(100) as u8),
@@ -1608,12 +2221,32 @@ impl HeifEncoderOptions {
                     )))
                 }
             },
+            threads,
+            hevc_depth: match self.depth {
+                0 => None,
+                8 | 10 | 12 => Some(self.depth as u8),
+                other => {
+                    return Err(CoreError::invalid(format!(
+                        "heif: depth {other} (8, 10 or 12; 0 = follow the source)"
+                    )))
+                }
+            },
+            hevc_filters: Some(self.filters != "off"),
             ..EncodeOptions::default()
         };
         if let Colr::Nclx { full_range, .. } = &mut opts.colr {
             *full_range = self.range != "limited";
         }
         Ok(opts)
+    }
+
+    /// The chroma layout packed RGB sources are converted to.
+    pub fn packed_chroma(&self) -> Chroma {
+        if self.chroma == "444" {
+            Chroma::Yuv444
+        } else {
+            Chroma::Yuv420
+        }
     }
 }
 
@@ -1622,6 +2255,10 @@ impl HeifEncoderOptions {
 pub struct HeifEncoder {
     params: CodecParameters,
     opts: EncodeOptions,
+    /// `threads` was given explicitly (the execution context then
+    /// does not override it).
+    explicit_threads: bool,
+    packed_chroma: Chroma,
     queue: std::collections::VecDeque<Packet>,
     flushed: bool,
 }
@@ -1629,16 +2266,42 @@ pub struct HeifEncoder {
 impl HeifEncoder {
     /// Construct from stream parameters; the options are the declared
     /// [`HeifEncoderOptions`] schema (`codec`, `mode`, `qp`, `grid`,
-    /// `thumbnail`, `range`); unknown keys are refused.
+    /// `thumbnail`, `range`, `threads`, …); unknown keys are refused.
     pub fn new(params: &CodecParameters) -> CoreResult<Self> {
-        let opts = oxideav_core::parse_options::<HeifEncoderOptions>(&params.options)?
-            .to_encode_options()?;
+        let typed = oxideav_core::parse_options::<HeifEncoderOptions>(&params.options)?;
+        let opts = typed.to_encode_options()?;
         Ok(Self {
             params: params.clone(),
+            explicit_threads: opts.threads.is_some(),
+            packed_chroma: typed.packed_chroma(),
             opts,
             queue: std::collections::VecDeque::new(),
             flushed: false,
         })
+    }
+
+    /// The effective encode options (after `set_execution_context`).
+    pub fn options(&self) -> &EncodeOptions {
+        &self.opts
+    }
+
+    /// The coding layout a packed source of `depth` bits is converted
+    /// to for the configured codec: the chosen chroma (monochrome for
+    /// grey sources) at the coded depth, with the source's alpha.
+    fn packed_target(&self, grey: bool, depth: u8, alpha: bool) -> Result<HeifPixelFormat> {
+        let coded = coded_depth(depth, self.opts.hevc_depth)?;
+        let chroma = if grey {
+            Chroma::Mono
+        } else {
+            self.packed_chroma
+        };
+        // HEVC items are 4:2:0 (monochrome rides 4:2:0 too); AV1 keeps
+        // the chosen layout.
+        let chroma = match self.opts.codec {
+            StillCodec::Hevc => Chroma::Yuv420,
+            StillCodec::Av1 => chroma,
+        };
+        HeifPixelFormat::new(chroma, coded, alpha)
     }
 }
 
@@ -1649,6 +2312,12 @@ impl Encoder for HeifEncoder {
 
     fn output_params(&self) -> &CodecParameters {
         &self.params
+    }
+
+    fn set_execution_context(&mut self, ctx: &oxideav_core::ExecutionContext) {
+        if !self.explicit_threads {
+            self.opts.threads = (ctx.threads > 1).then_some(ctx.threads);
+        }
     }
 
     fn send_frame(&mut self, frame: &Frame) -> CoreResult<()> {
@@ -1688,11 +2357,13 @@ impl Encoder for HeifEncoder {
                     colr: identity,
                     ..self.opts.clone()
                 };
-                encode_still(&planar, &opts)?
+                encode_still_owned(planar, &opts)?
             } else {
                 let rgb = crate::rgb::to_rgb(&planar, Some(&identity))?;
+                drop(planar);
                 let ycc = crate::rgb::from_rgb(&rgb, Some(&self.opts.colr), Chroma::Yuv444)?;
-                encode_still(&ycc, &self.opts)?
+                drop(rgb);
+                encode_still_owned(ycc, &self.opts)?
             };
             let pkt = Packet::new(0, TimeBase::new(1, 1), bytes)
                 .with_pts(vf.pts.unwrap_or(0))
@@ -1702,9 +2373,15 @@ impl Encoder for HeifEncoder {
         }
         let hf = match HeifFrame::from_core(vf, w, h, pf) {
             Ok(f) => f,
-            Err(_) => packed_to_planar(vf, w, h, pf, &self.opts.colr)?,
+            Err(_) => {
+                // Packed RGB(A) / grey(+alpha): straight into the coding
+                // layout, row pair by row pair.
+                let (_, _, wide, alpha, grey) = packed_layout(pf)?;
+                let target = self.packed_target(grey, if wide { 16 } else { 8 }, alpha)?;
+                packed_to_planar_for(vf, w, h, pf, &self.opts.colr, target)?
+            }
         };
-        let bytes = encode_still(&hf, &self.opts)?;
+        let bytes = encode_still_owned(hf, &self.opts)?;
         let pkt = Packet::new(0, TimeBase::new(1, 1), bytes)
             .with_pts(vf.pts.unwrap_or(0))
             .with_keyframe(true);

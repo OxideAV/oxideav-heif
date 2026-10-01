@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Encode path budgeted and optimised (round 464; every written file
+  decodes byte-identically for every thread budget — pinned by
+  `tests/encode_budget.rs`). `EncodeOptions::threads` carries the
+  thread budget: the tiles of a `grid` are coded as independent jobs
+  on that many workers and handed to the writer in row-major order as
+  they complete (ids and bytes those of the serial encode), the HEVC
+  quadtree coder gets `wpp` (always on there, so the bytes never
+  depend on the budget) or its `tiles` fan-out through
+  `set_execution_context`, and the AV1 still search runs on it over a
+  tile layout derived from the picture size alone
+  (`AV1_TILE_LAYOUT_THREADS`). The framework `"heif"` encoder takes
+  the budget from `Encoder::set_execution_context` or the new
+  `threads` option (`auto` / a count; explicit wins).
+- Memory: coded pictures are moved into the codecs (no clone on this
+  side — `encode_hevc_picture_owned` / `encode_av1_picture_owned`,
+  `encode_still_owned` for a frame already in the coding layout),
+  padding and alpha / thumbnail cuts only allocate when they change
+  something, packed RGB / RGBA / grey(+alpha) frames convert straight
+  into the coding layout row pair by row pair (`packed_to_planar_for`:
+  no full-resolution 4:4:4 intermediate), `HeifWriter::write_to`
+  streams the `mdat` from the item bodies (no assembled payload copy)
+  and the muxer validates a still packet with the borrowing parser.
+  12 MP 8-bit HEVC through the CLI: 627 → 97 MiB peak (grid) / 504
+  MiB single item; see the README's encode budget table.
+- Production defaults: `qp` 18 (the size / PSNR of the OS encoder's
+  default on a 12 MP photograph — README), HEVC deblocking + SAO on
+  lossy items (`EncodeOptions::hevc_filters`, option `filters`),
+  automatic 512-px `grid` tiling above 4 MP (`grid_tile == None`;
+  `Some(0)` / option `grid=none` forces a single item), 4:2:0 for
+  packed RGB sources (option `chroma=444` keeps 4:4:4 for AV1), and
+  deeper-than-8-bit sources coded as Main 10 (`hevc_depth` / option
+  `depth`; 12-bit sources at 12; `to_yuv420` converts to any depth;
+  `coded_depth` is the rule). A layout that merely needs the quadtree
+  coder runs its level-0 search unless `rd` asks for more.
+- `examples/heifencbench`: the stage-timed encode bench (wall, CPU,
+  peak RSS from `getrusage`; library and framework paths).
+- oxideav-h265 0.0.13 is the minimum pin (wavefront, `cqpoffset`,
+  lossy intra in every layout).
+
 ## [0.0.5](https://github.com/OxideAV/oxideav-heif/compare/v0.0.4...v0.0.5) - 2026-09-29
 
 ### Other

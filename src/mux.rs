@@ -115,7 +115,7 @@ impl HeifSequenceMuxer {
                     ));
                 }
                 // The packet must be a HEIF file this crate can read.
-                crate::file::HeifFile::parse(&packet.data).map_err(|e| {
+                crate::file::HeifFile::parse_borrowed(&packet.data).map_err(|e| {
                     HeifError::invalid(format!("heif muxer: still packet is not a HEIF file: {e}"))
                 })?;
                 self.still = Some(packet.data.clone());

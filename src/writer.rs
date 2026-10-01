@@ -772,6 +772,28 @@ impl HeifWriter {
 
     /// Serialize the file.
     pub fn write_to_vec(&self) -> Result<Vec<u8>> {
+        let mut out = Vec::with_capacity(self.payload_len() as usize + 4096);
+        self.write_to(&mut out)?;
+        Ok(out)
+    }
+
+    /// The bytes every item body contributes to `mdat` (a sizing hint).
+    fn payload_len(&self) -> u64 {
+        self.items
+            .iter()
+            .map(|it| match &it.body {
+                ItemBody::Coded(d) | ItemBody::Metadata(d) => d.len() as u64,
+                ItemBody::CodedExtents(tiles) => tiles.iter().map(|t| t.len() as u64).sum(),
+                ItemBody::Tiled { data, .. } => data.len() as u64,
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// Serialize the file to a sink: `ftyp`, `meta`, then `mdat` with
+    /// every item body written straight from the queued items (no
+    /// assembled copy of the payload exists on this side).
+    pub fn write_to<W: std::io::Write>(&self, out: &mut W) -> Result<()> {
         self.validate()?;
         let primary = self.primary.expect("validated");
         let large_ids = self.items.iter().any(|i| i.id > 0xffff)
@@ -972,10 +994,13 @@ impl HeifWriter {
             boxed(b"grpl", &body)
         };
 
-        // ── idat + mdat bodies, in the MIAF §7.2.1.13 order.
+        // ── idat + mdat bodies, in the MIAF §7.2.1.13 order. The mdat
+        // is laid out as a sequence of borrowed slices and written
+        // last, straight from the items.
         let mut idat = Vec::new();
         let mut idat_spans: Vec<(u32, u64, u64)> = Vec::new();
-        let mut mdat = Vec::new();
+        let mut mdat_len = 0u64;
+        let mut mdat_pieces: Vec<&[u8]> = Vec::new();
         // (item, extents as (offset in mdat, length)).
         let mut mdat_spans: Vec<(u32, Vec<(u64, u64)>)> = Vec::new();
         let is_thumb_or_meta = |it: &WriterItem| {
@@ -1004,20 +1029,23 @@ impl HeifWriter {
         for it in order {
             match &it.body {
                 ItemBody::Coded(d) | ItemBody::Metadata(d) => {
-                    mdat_spans.push((it.id, vec![(mdat.len() as u64, d.len() as u64)]));
-                    mdat.extend_from_slice(d);
+                    mdat_spans.push((it.id, vec![(mdat_len, d.len() as u64)]));
+                    mdat_len += d.len() as u64;
+                    mdat_pieces.push(d);
                 }
                 ItemBody::CodedExtents(tiles) => {
                     let mut spans = Vec::with_capacity(tiles.len());
                     for t in tiles {
-                        spans.push((mdat.len() as u64, t.len() as u64));
-                        mdat.extend_from_slice(t);
+                        spans.push((mdat_len, t.len() as u64));
+                        mdat_len += t.len() as u64;
+                        mdat_pieces.push(t);
                     }
                     mdat_spans.push((it.id, spans));
                 }
                 ItemBody::Tiled { data, deti, .. } => {
-                    mdat_spans.push((it.id, vec![(mdat.len() as u64, data.len() as u64)]));
-                    mdat.extend_from_slice(data);
+                    mdat_spans.push((it.id, vec![(mdat_len, data.len() as u64)]));
+                    mdat_len += data.len() as u64;
+                    mdat_pieces.push(data);
                     dref_entries.push((it.id, deti.clone()));
                 }
                 ItemBody::Grid(g) => {
@@ -1125,18 +1153,27 @@ impl HeifWriter {
         }
         .to_box();
         let meta_len = meta_with(&iloc_for(0)).len() as u64;
-        let mdat_header = if mdat.len() as u64 + 8 > u32::MAX as u64 {
-            16
-        } else {
-            8
-        };
+        let large = mdat_len + 8 > u32::MAX as u64;
+        let mdat_header = if large { 16 } else { 8 };
         let mdat_base = ftyp.len() as u64 + meta_len + mdat_header;
         let meta = meta_with(&iloc_for(mdat_base));
         debug_assert_eq!(meta.len() as u64, meta_len);
-        let mut out = ftyp;
-        out.extend_from_slice(&meta);
-        push_box(&mut out, b"mdat", &mdat);
-        Ok(out)
+        let io = |e: std::io::Error| HeifError::invalid(format!("writer: output: {e}"));
+        out.write_all(&ftyp).map_err(io)?;
+        out.write_all(&meta).map_err(io)?;
+        if large {
+            out.write_all(&1u32.to_be_bytes()).map_err(io)?;
+            out.write_all(b"mdat").map_err(io)?;
+            out.write_all(&(mdat_len + 16).to_be_bytes()).map_err(io)?;
+        } else {
+            out.write_all(&((mdat_len + 8) as u32).to_be_bytes())
+                .map_err(io)?;
+            out.write_all(b"mdat").map_err(io)?;
+        }
+        for piece in mdat_pieces {
+            out.write_all(piece).map_err(io)?;
+        }
+        Ok(())
     }
 
     /// Items reachable from `id` through `dimg` / `auxl` (as targets).
