@@ -46,12 +46,13 @@ one stream per image-sequence track (`"h265"` / `"av1"` packets with
 | Transforms | `clap` → `irot` → `imir` → `iscl` in `ipma` order; `iscl` (§6.5.13) resizes by the exact ceil-ratio with an area/bilinear resampler; sub-sample chroma positions promote to 4:4:4 (MIAF §7.3.6.7) |
 | Auxiliaries | alpha (`urn:mpeg:mpegB:cicp:systems:auxiliary:alpha` and `urn:mpeg:hevc:2015:auxid:1`, resized / depth-matched, `prem`), depth (both URN families, surfaced as a frame); alpha *tracks* (§7.5.3 `auxv` + `auxl` + `auxi`, plain-Box `auxi` tolerated) composed into a `"heif"` stream of frames with alpha by the demuxer, written by `SequenceWriter::alpha` |
 | Metadata | thumbnails (`thmb`), Exif (offset word resolved), XMP, ICC, effective `nclx` (MIAF default when absent), `pixi` / `clli` / `mdcv` / … via the typed property list |
+| Entity groups | `altr` (display order), `ster` / `stem` (stereo, monoscopic fallback), `pymd` (pyramids), `rgpa` (region partitions), `brst` / `eqiv` surfaced; Amd 2:2026 §11.3.5 `unrg` (union of regions) / `corg` (compound region: main + the regions it logically includes) with `Meta::region_items_of` / `region_groups_of` (the `rgan` items with a `cdsc` to an image and the groups over them), writer helpers, `check` rules (`"HEIF-A2 11.3.5.x"`) |
 | MIAF | `MiafProfile` + `check`: §7 general requirements, §8 shared constraints, Annex A HEVC / AV1 codec limits, the HEIF Amd 1 `tmap` / `cfen` shalls (`"HEIF-A1 …"`), MIAF Amd 1:2025 §7.3.11.5 (`tmap` in an `altr` with a master image, `"MIAF-A1 …"`), Amd 2 `pixi` / `mif3` / `tili` rules (`"HEIF-A2 …"`) — typed `MiafViolation`s with clause numbers, should-level rules as `advisories`; MIAF Amd 1 Annex A practices: `Meta::display_order` (`altr` collapse), `Track::loop_behaviour` (`elst` `RepeatEdits`) |
 | Image sequences | `moov` / `trak` / `stbl` (`stts` `ctts` `stsc` `stsz` `stz2` `stco` `co64` `stss` `sbgp` `csgp` `sgpd` `tref` `elst`), top-level `prft` / `ssix`, visual sample entries (`hvcC` `av1C` `avcC` `lhvC` `ccst` `auxi` `colr` `clap` `pasp` `clli` `mdcv` `cclv` `amve`; QuickTime zero terminators tolerated), `elst` `RepeatEdits` + `tkhd` duration, §7.2.1 matrix → rotation / mirror; framework `Demuxer` with pts / dts / sync / seek |
 | Writer | `HeifWriter` (coded / grid / overlay / identity / `tmap` / `cfen` / `tili` / `cexg` items, thumbnails, alpha / depth, Exif / XMP (raw bodies, any encoding) / arbitrary `cdsc` items, item names, entity groups with flags and payloads (`pymd` pyramids, `stem` stereo with fallback), de-duplicated `ipco`, MIAF `mdat` order, `deti` data references, brand auto-selection); `SequenceWriter` (`msf1` / `hevc`, brand override, `pict` track + `ccst`, HDR sample-entry boxes, `stco` / `co64` per §8.7.5, looping via `elst`, cover-image `meta` that can alias a track sample; opens in libheif / ImageMagick / ffmpeg / Apple ImageIO) |
 | Gain maps | ISO 21496-1 + HEIF Amd 1:2025 §6.6.2.4 (the published text; "fully applied" = weight ±1.0): `ToneMapImage` body (`version` 0 + C.2 `GainMapMetadata`), `dimg` = [base, gain map] (count 2 enforced), the three `colr` placements and the `tmap` brand (§10.2.6) checked; `DecodedImage::gain_map` (decoded gain-map item + metadata + alternate `colr`), `apply_gain_map(h_target)` → linear RGB in the application space (Formulas 1–3, §6.2.2 resampling, Annex B primaries conversion, single↔multi-channel rules, limited-range clip); `ItemDecoder::tone_mapped()` → the reconstruction in the `tmap` item's `colr` at its `pixi` depth (alpha carried over); writer authors `tmap` items (`HeifWriter::add_tone_map`, `EncodeOptions::gain_map`) with the hidden map, the brand and the `altr` [tmap, base] fallback; matches a black-box tone-mapper within 1 code at every headroom (2 on the half-size map, 7 after a BT.2020→709 conversion of the 16-bit PQ reconstruction), and the tool tone-maps our authored file identically to its own |
 | Colour | `rgb::to_rgb`: YCbCr → RGB(A) with the item `colr` matrix / range (H.273), identity (GBR), monochrome, alpha carried; the renderer step over the composed frame. Framework: the effective `nclx` rides as the core `ColorSignal` on streams and frames; identity-matrix 4:4:4 items are planar RGB (`Gbrp*` / `Gbrap*`) end to end |
-| Encoder (`registry`) | `encode_still`: HEVC (lossless `pcm` or CABAC `intra` at a QP; VUI range + colour description, Main Still Picture, `rd` / `tiles`) or AV1 stills (lossless or quality 0..=100, `speed`, native 8/10/12-bit 4:0:0–4:4:4, `av1C` from the codec configuration) items, padding + `clap`, grid tiling (MIAF 64-px floor), thumbnails, alpha (per-codec `auxC` URN, single-channel `pixi`, own parameter-set ids; AV1 alpha as a monochrome still), Exif / XMP / ICC, transforms as essential properties on the coded item; `rd` / `tiles` pick the HEVC quadtree coder's CTB size automatically (`auto_ctb`, or `hevc_ctb`); `"heif"` framework `Encoder` (frame in — planar YCbCr / grey / planar RGB (`Gbrp*`, coded identity-matrix 4:4:4 by AV1) or packed RGB / RGBA / BGR(A) / 16-bit / grey+alpha — file out; declared options `codec` / `mode` / `qp` / `grid` / `thumbnail` / `range` / `quality` / `speed` / `rd` / `tiles` / `ctb`); the `"heif"` muxer passes its whole-file packets through, so `oxideav convert in.png out.heic` writes a HEIC |
+| Encoder (`registry`) | `encode_still` / `encode_still_owned` / `encode_still_into`: HEVC (lossless `pcm` or CABAC `intra` at a QP; 4:2:0 at 8 / 10 / 12 bits — deeper sources code Main 10 (`hevc_depth`), in-loop filters on by default (`hevc_filters`), VUI range + colour description, Main Still Picture, `rd` / `tiles` / `ctb` and the wavefront) or AV1 stills (lossless or quality 0..=100, `speed`, native 8/10/12-bit 4:0:0–4:4:4, a size-derived tile layout, `av1C` from the codec configuration) items, padding + `clap`, grid tiling (automatic 512-px tiles above 4 MP, MIAF 64-px floor; tiles coded in parallel under `threads`, bytes identical to serial), thumbnails, alpha (per-codec `auxC` URN, single-channel `pixi`, own parameter-set ids; AV1 alpha as a monochrome still), Exif / XMP / ICC, transforms as essential properties on the coded item; `"heif"` framework `Encoder` (frame in — planar YCbCr / grey / planar RGB (`Gbrp*`, coded identity-matrix 4:4:4 by AV1) or packed RGB / RGBA / BGR(A) / 16-bit / grey+alpha converted straight into the coding layout — file out; `set_execution_context` or the `threads` option; declared options `codec` / `mode` / `qp` / `grid` / `thumbnail` / `range` / `quality` / `speed` / `rd` / `tiles` / `ctb` / `threads` / `depth` / `filters` / `chroma`); the `"heif"` muxer passes its whole-file packets through, so `oxideav convert in.png out.heic` writes a HEIC (see Production defaults) |
 | Fuzz | `fuzz/`: `heif_parse`, `heif_compose`, `heif_sequence`, `heif_records` (standalone build; `mini`, `deti`, `cfen` and every typed property with round-trip oracles), daily workflow |
 
 `iscl` is applied at composition (§6.5.13); `tmap` gain maps are
@@ -177,13 +178,14 @@ absolute luminance for a PQ alternate; the reconstruction uses
 overrides it, and relative transfers put the peak signal at
 2^H_alternate × reference white (3.6 / 3.10).
 
-## Conformance matrix (r462, this machine: macOS 26.6 / Apple M4 Max)
+## Conformance matrix (r464, this machine: macOS 26.6 / Apple M4 Max)
 
 Generated by `tests/conformance_matrix.rs` (every cell is a
 measurement from that run; rerun it with `OXIDEAV_HEIF_MATRIX_12MP=1`
-in a release build to refresh — it prints both tables and writes
+in a release build to refresh — it prints the three tables and writes
 `matrix.md` to its scratch directory; CI runs it without the 12 MP
-rows, which take a 12 MP encode per codec). Producers: Apple
+rows, which take a 12 MP encode per codec; `OXIDEAV_CLI=/path/to/oxideav`
+routes the round-trip table through the real binary). Producers: Apple
 ImageIO `sips`, libheif 1.23.4 `heif-enc` with x265 4.3 and with aom
 3.15, ImageMagick 7 (libheif 1.23.1), ffmpeg 8 with libsvtav1 4.2
 (AVIF only — it has no HEIF muxer). The black-box reference for the
@@ -260,7 +262,7 @@ by up to 5). `heif-enc -L` writes RGB (matrix 0) items, compared as
 | av1 lossless | Δ max 1 mean 0.25 | exact | exact | exact | opens |
 | hevc 4:0:0 (grey) | exact | exact | exact | exact | opens |
 | av1 4:0:0 (grey) | exact | exact | exact | exact | opens |
-| av1 4:4:4 10-bit | Δ max 94 mean 1.44 | Δ max 1 mean 0.03 | Δ max 1 mean 0.03 | Δ max 1 mean 0.07 | opens |
+| av1 4:4:4 10-bit | exact | Δ max 0 mean 0.12 | Δ max 1 mean 0.27 | Δ max 1 mean 0.44 | opens |
 | hevc alpha | Δ max 90 mean 1.53 | Δ max 1 mean 0.03 | Δ max 1 mean 0.03 | Δ max 1 mean 0.07 | opens |
 | av1 alpha | Δ max 1 mean 0.25 | exact | exact | exact | opens |
 | hevc thumbnail | Δ max 94 mean 1.43 | Δ max 1 mean 0.03 | Δ max 1 mean 0.03 | Δ max 1 mean 0.07 | opens |
@@ -269,7 +271,24 @@ by up to 5). `heif-enc -L` writes RGB (matrix 0) items, compared as
 | hevc imir | Δ max 254 mean 86.60 | Δ max 1 mean 0.03 | Δ max 1 mean 0.03 | Δ max 1 mean 0.07 | opens |
 | hevc clap | Δ max 92 mean 1.37 | Δ max 1 mean 0.02 | Δ max 1 mean 0.02 | Δ max 1 mean 0.06 | opens |
 
-Every reader-direction cell that is not `exact` is explained by the
+#### Round trip at the production defaults (PNG → file → PNG; PSNR vs the source, 8-bit RGB)
+
+`oxideav convert src.png out.heic` / `out.avif` with no options (the
+real binary, `OXIDEAV_CLI`), the file decoded back by this crate and
+rendered by every reader; the 96×80 rows are bounded by the
+picture's own 4:2:0 chroma (its lossless 4:2:0 coding is ~35 dB).
+
+| File | bytes | this crate | sips | heif-convert | magick | ffmpeg | heif-info |
+|---|---|---|---|---|---|---|---|
+| HEIC 96×80 | 1517 | 33.82 dB | 32.83 dB | 33.82 dB | 33.82 dB | 33.81 dB | opens |
+| AVIF 96×80 | 763 | 33.01 dB | 32.28 dB | 33.01 dB | 33.01 dB | 33.00 dB | opens |
+| HEIC 4032×3024 (12 MP) | 90131 | 47.69 dB | 46.84 dB | 47.69 dB | 47.69 dB | 47.57 dB | opens |
+| AVIF 4032×3024 (12 MP) | 28066 | 47.35 dB | 46.62 dB | 47.34 dB | 47.34 dB | 47.23 dB | opens |
+
+The `av1 4:4:4 10-bit` row is a real 10-bit 4:4:4 item since r464 (a
+16-bit source used to drop to 8-bit 4:2:0 on the AV1 path; Apple
+ImageIO renders the 4:4:4 item exactly). Every reader-direction cell
+that is not `exact` is explained by the
 producer (`no producer`, `dropped`) or by the reference decoder (the
 1×1 refusals; the 63×61 4:4:4 HEIC files, where ffmpeg's even-cropped
 output differs from ours by up to 50 codes at scattered pixels while
@@ -287,7 +306,171 @@ writer round-trips (`tests/gainmap.rs`, `tests/avc_lhevc.rs`,
 `tests/writer.rs`) and, for gain maps, the vendored oracle files.
 
 
-## Performance (r463; baseline r462)
+## Production defaults (r464)
+
+`oxideav convert in.png out.heic` with no flags — equally
+`EncodeOptions::default()` / the `"heif"` encoder with no options —
+writes:
+
+* **HEVC Main / Main Still Picture, 4:2:0 8-bit, `qp` 18, CABAC intra
+  with deblocking + SAO** (`DEFAULT_QP`, `HEVC_FILTERS_DEFAULT`) —
+  the historical one-CU-per-CTB coder for 8-bit 4:2:0 (the fast one);
+  a source deeper than 8 bits codes **Main 10** (16-bit PNG → 10-bit
+  4:2:0; `depth=8|10|12` overrides, `coded_depth` is the rule) on the
+  quadtree coder at its level-0 search (`rd=1|2` buys bytes for CPU,
+  see below).
+* **Full-range `nclx`** (BT.709 primaries, sRGB transfer, BT.601
+  matrix — the MIAF default) in the `colr` and in the VUI
+  (`range=limited` flips both).
+* **Automatic 512-px `grid` above 4 MP** (`GRID_AUTO_TILE` /
+  `GRID_AUTO_MIN_PIXELS`; the tile the OS producer uses for a 12 MP
+  picture): the codec's working set scales with a tile, not the
+  picture (501 → 114 MiB for 12 MP), and the tiles are the parallel
+  unit. `grid=none` forces a single item, `grid=N` a tile size.
+* **Thumbnail off**, **4:2:0 for packed RGB sources** (`chroma=444`
+  keeps 4:4:4 on AV1; HEVC items are always 4:2:0), **Exif / ICC
+  carried when the caller supplies them** (`EncodeOptions::exif` /
+  `icc_profile` — the framework frame has no side-channel for either:
+  core carries palette / significant-bits / colour-signal / layer
+  records only, so the PNG decoder's `iCCP` / `eXIf` cannot reach
+  this encoder through `oxideav convert` today; a core ask).
+* `.avif` → **AV1 quality 60, `fast`**, the same grid rule (reported
+  as measured; the AV1 encoder is its own crate's work).
+
+**Measured against the OS encoder** (Apple ImageIO through `sips -s
+format heic`, default quality) on a 3024×4032 iPhone photograph (PNG
+source, PSNR in 8-bit RGB / luma against it, rendered through
+`heif-convert`):
+
+| Encoder | bytes | RGB PSNR | Y PSNR | wall (8 threads) | CPU |
+|---|---|---|---|---|---|
+| sips (default) | 1 251 803 | 44.98 dB | 47.40 dB | 0.17 s | — |
+| this crate, defaults (`qp` 18, filters, 512 grid) | 1 429 494 (+14 %) | 45.07 dB | 47.66 dB | 0.96 s | 5.1 s |
+| `qp=19` | 1 319 243 (+5 %) | 44.61 dB | 47.12 dB | 0.9 s | 5 s |
+| `qp=20` | 1 178 719 (−6 %) | 43.90 dB | 46.33 dB | 0.9 s | 5 s |
+| `qp=19 rd=1` (quadtree + wavefront) | 1 191 453 (−5 %) | 45.07 dB | 47.35 dB | 4.7 s | 26 s |
+| `qp=19 rd=2` | 1 183 626 (−5 %) | 45.12 dB | 47.42 dB | 6.7 s | 42 s |
+| `qp=18 filters=off` | 1 414 377 (+13 %) | 44.91 dB | 47.58 dB | 0.7 s | 3.4 s |
+
+`qp` 18 is the lowest QP of the fast coder that is at or above the
+OS encoder's PSNR (RGB and luma); it costs +14 % bytes, one QP step
+more lands −6 % bytes at −1.1 dB. The quadtree coder's mode decision
+(`rd=1`) reaches the OS encoder's size at its PSNR for 5× the CPU —
+it is one option away, not the default. On a smooth 4032×3024
+wallpaper the same defaults write 117 KB where the OS encoder writes
+361 KB (−0.4 dB): its default is a quality factor, not a QP. AV1 at
+the `quality` dial on the same photograph (8 threads): 60 → 512 KB /
+39.25 dB in 5.9 s, 70 → 693 KB / 40.67 dB, 80 → 936 KB / 42.36 dB,
+88 → 1 282 KB / 44.28 dB (~13 s each).
+
+## Encode budget (r464; r463 baseline)
+
+`examples/heifencbench` (`cargo run --release --example heifencbench
+-- --raw in.rgb --size WxH [--fmt rgb24|rgb48le] [--threads N|auto]
+[--framework] …`), same machine as the decode table (Apple M4 Max, 16
+cores, macOS 26.6, rustc 1.98.1, release). Source: the 3024×4032
+iPhone photograph as packed RGB (8-bit) and RGB48 (the 10-bit rows:
+a 16-bit source coded Main 10). **library** = `packed_to_planar_for`
++ `encode_still` (the conversion is 0.07 s / 54 MiB of every row);
+**framework** = the registry `"heif"` encoder's `send_frame` (what
+the CLI runs). Wall and CPU are the process's (`getrusage`), peak RSS
+its `ru_maxrss`. Every row's FNV-1a moved with the thread budget for
+no configuration.
+
+| configuration | wall | CPU | peak RSS | bytes |
+|---|---|---|---|---|
+| 8-bit hevc intra (defaults) library t1 | 4.76 s | 4.76 s | 114 MiB | 1 429 494 |
+| 8-bit hevc intra (defaults) library t4 | 1.50 s | 5.65 s | 157 MiB | = |
+| 8-bit hevc intra (defaults) library t8 | 0.96 s | 5.93 s | 177 MiB | = |
+| 8-bit hevc intra (defaults) framework t1 | 5.08 s | 5.06 s | 97 MiB | = |
+| 8-bit hevc intra (defaults) framework t4 | 1.68 s | 5.98 s | 134 MiB | = |
+| 8-bit hevc intra (defaults) framework t8 | 1.09 s | 6.26 s | 157 MiB | = |
+| 8-bit hevc intra grid=none t1 (library / framework) | 4.76 / 5.10 s | 4.75 / 5.09 s | 501 / 504 MiB | 1 414 606 |
+| 8-bit hevc intra grid=1024 t8 (library / framework) | 1.27 / 1.22 s | 6.21 / 6.23 s | 374 / 359 MiB | 1 422 653 |
+| 8-bit hevc pcm t1 (library / framework) | 0.51 / 0.52 s | 0.51 / 0.52 s | 116 / 113 MiB | 18 981 202 |
+| 8-bit hevc pcm t8 (library / framework) | 0.22 / 0.16 s | 0.57 / 0.56 s | 134 / 131 MiB | = |
+| 10-bit hevc intra (defaults) library t1 | 17.3 s | 17.3 s | 209 MiB | 1 308 705 |
+| 10-bit hevc intra (defaults) library t4 | 4.67 s | 18.2 s | 245 MiB | = |
+| 10-bit hevc intra (defaults) library t8 | 2.91 s | 20.9 s | 280 MiB | = |
+| 10-bit hevc intra (defaults) framework t1 / t4 / t8 | 17.2 / 5.10 / 3.08 s | 17.2 / 19.9 / 21.8 s | 173 / 214 / 248 MiB | 1 307 995 |
+| 10-bit hevc intra grid=none t1 (library / framework) | 16.5 / 17.0 s | 16.5 / 17.0 s | 602 / 614 MiB | 1 290 413 / 1 290 172 |
+| 10-bit hevc intra grid=1024 t8 (library / framework) | 3.32 / 3.58 s | 19.6 / 21.4 s | 523 / 428 MiB | 1 299 052 / 1 298 228 |
+| 10-bit hevc pcm t1 / t8 (library) | 0.64 / 0.19 s | 0.64 / 0.69 s | 208 / 222 MiB | 23 699 842 |
+| 8-bit av1 quality 60 (defaults) library t1 / t4 / t8 | 86.5 / 21.7 / 11.4 s | 86.5 / 86.4 / 89.7 s | 137 / 208 / 263 MiB | 512 724 |
+| 8-bit av1 quality 60 (defaults) framework t8 | 11.6 s | 91.5 s | 227 MiB | = |
+| 8-bit av1 grid=none t8 (library) | 62.3 s | 91.8 s | 1 576 MiB | 484 692 |
+| 10-bit av1 quality 60 (defaults) t8 (library / framework) | 11.6 / 11.6 s | 90.5 / 90.8 s | 364 / 303 MiB | 523 554 / 523 527 |
+
+The AV1 rows run the published oxideav-av1 0.1.19 (the standalone
+build); the CLI below is the umbrella build on the av1 sibling's
+current master, which is ~2× faster on the same picture (37.6 s
+serial) — the still encoder is that crate's work this round. A
+single-item 12 MP AV1 still is 1.6 GB of the codec's state and 62 s
+on 8 threads; the automatic grid is what makes the AVIF default
+usable (263 MiB, 11 s).
+
+(The 10-bit framework bytes differ from the library's by design: the
+direct packed → 10-bit conversion rounds the 10-bit result of the
+H.273 matrix, the bench's library path rounds a 16-bit result to 10
+bits — one code apart on a few samples, pinned within 1 in
+`tests/encode_budget.rs`.)
+
+**Through the CLI** (`oxideav convert photo.png out.heic`, built
+from the umbrella root in release; `/usr/bin/time -l`, the PNG
+decode included):
+
+| command | r463 | r464 serial (`--opt threads=1`) | r464 default (the executor's budget) | r464 `--opt threads=8` |
+|---|---|---|---|---|
+| PNG → HEIC (12 MP) | 3.4 s / 627 MiB | 4.45 s / 166 MiB | 1.74 s / 243 MiB | 0.96 s / 215 MiB |
+| HEIC → PNG | — | — | 0.17 s / 162 MiB | — |
+| PNG → AVIF (12 MP, quality 60) | ≈90 s | 37.6 s / 177 MiB | 37.6 s / 177 MiB (serial: see below) | 5.9 s / 247 MiB |
+| AVIF → PNG | — | — | 0.21 s / 219 MiB | — |
+
+The r463 wall was the unfiltered `qp` 26 single-item encode; the
+r464 serial number is the production default (filters on, `qp` 18,
+48 tiles) and the memory is the point: **627 → 166 MiB serial, 243
+MiB at the executor's default budget** (the 16-thread auto budget
+holds more tiles in flight; 8 threads 215 MiB), against the ≤ 250
+MiB target. The `.heic` job goes through the pipeline executor,
+which hands the encoder `ExecutionContext::auto`; the `.avif` job
+carries an implied `codec=av1` option and runs through
+`oxideav-cli-convert`'s frame tap, which builds the encoder without
+an execution context — so AVIF is serial unless `--opt threads=N`
+is given (a cli-convert ask; the encoder side is ready: the `--opt
+threads=8` file is byte-identical to the serial one).
+
+**Where the time and memory go** (12 MP 8-bit HEVC, defaults,
+serial, library path): packed RGB → 4:2:0 conversion 0.07 s, +18
+MiB (the coding picture; the packed source is 35 MiB); grid cut +
+pad: one 512×512 tile at a time (0.4 MiB); the HEVC encoder 4.5 s of
+the 4.8 s and ~60 MiB of working set per instance (the historical
+coder's per-picture state; one instance per worker, which is the
+t1 → t8 RSS growth: 114 → 177 MiB); the writer: the coded tiles
+(1.4 MB) + the `ftyp` / `meta` bytes, streamed into one output
+buffer — no assembled `mdat` copy. Single-item (`grid=none`) is the
+same encoder over the whole 12 MP picture: 501 MiB, all of it the
+codec's state. 10-bit sources run the quadtree coder (3.6× the CPU
+at level 0; ~150 MiB per instance), AV1 its tile search (the
+sibling crate's cost; the rows above).
+
+What changed on this side (r464): coding pictures are moved into
+the codecs instead of cloned (`encode_still_owned`, the alpha plane
+split off without a copy), padding / thumbnail / alpha cuts
+allocate only when they change something, packed RGB(A) converts
+straight into the coding layout row pair by row pair
+(`packed_to_planar_for` — the r463 path built a full-resolution
+4:4:4 16-bit intermediate then converted again: 36 + 108 + 18 MiB
+for 12 MP), the writer streams `mdat` from the item bodies
+(`HeifWriter::write_to`), the muxer validates a still packet with
+the borrowing parser, and the thread budget reaches the grid tiles
+(independent jobs, handed to the writer in order as they complete —
+the side buffer holds only out-of-order completions), the HEVC
+wavefront / tile fan-out (`wpp` is always on when the quadtree coder
+runs without tiles, so the bytes never depend on the budget) and the
+AV1 tile search (over a layout derived from the picture size for
+`AV1_TILE_LAYOUT_THREADS` workers — likewise budget-independent).
+
+## Decode performance (r463; baseline r462)
 
 `examples/heifbench` (`cargo run --release --example heifbench --
 [--threads N|auto] <files>`), reference machine: Apple M4 Max (16
@@ -307,7 +490,7 @@ did not move between r462 and any r463 configuration.
 | single-item HEIC | 0.294 s / 290 MiB | 0.298 s / 290 MiB | — | — | — | — |
 | single-item AVIF | 0.778 s / 229 MiB | 0.709 s / 226 MiB | — | — | — | — |
 
-What changed (phase 1, container side): grid / `tili` / `cexg` tiles
+Decode, phase 1 (r463, container side): grid / `tili` / `cexg` tiles
 decode as independent jobs on up to `effective_workers` threads (codec
 instances made on the workers, each serial) and are written straight
 into an output-size canvas as they complete; reconstructions move out
@@ -319,9 +502,7 @@ buffers (a 12 MP HEVC still decodes in 0.30 s with a 290 MiB peak
 inside oxideav-h265, AVIF 0.71 s / 226 MiB inside oxideav-av1) — the
 container adds no copies any more. Handing a single still's codec the
 thread budget measured slower (HEVC 0.30 → 0.34 s), so the budget is
-spent on independent items only. Encoding is unchanged from r462: the
-HEVC intra encoder ~2.7 s, the AV1 still encoder ~90 s at `fast` for
-12 MP (codec-crate items).
+spent on independent items only.
 
 ## Standalone build
 
