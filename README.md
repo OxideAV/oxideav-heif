@@ -325,7 +325,7 @@ writes:
 * **Automatic 512-px `grid` above 4 MP** (`GRID_AUTO_TILE` /
   `GRID_AUTO_MIN_PIXELS`; the tile the OS producer uses for a 12 MP
   picture): the codec's working set scales with a tile, not the
-  picture (501 → 114 MiB for 12 MP), and the tiles are the parallel
+  picture (501 → 95 MiB for 12 MP), and the tiles are the parallel
   unit. `grid=none` forces a single item, `grid=N` a tile size.
 * **Thumbnail off**, **4:2:0 for packed RGB sources** (`chroma=444`
   keeps 4:4:4 on AV1; HEVC items are always 4:2:0), **Exif / ICC
@@ -345,7 +345,7 @@ source, PSNR in 8-bit RGB / luma against it, rendered through
 | Encoder | bytes | RGB PSNR | Y PSNR | wall (8 threads) | CPU |
 |---|---|---|---|---|---|
 | sips (default) | 1 251 803 | 44.98 dB | 47.40 dB | 0.17 s | — |
-| this crate, defaults (`qp` 18, filters, 512 grid) | 1 429 494 (+14 %) | 45.07 dB | 47.66 dB | 0.96 s | 5.1 s |
+| this crate, defaults (`qp` 18, filters, 512 grid) | 1 429 494 (+14 %) | 45.07 dB | 47.66 dB | 0.71 s | 5.1 s |
 | `qp=19` | 1 319 243 (+5 %) | 44.61 dB | 47.12 dB | 0.9 s | 5 s |
 | `qp=20` | 1 178 719 (−6 %) | 43.90 dB | 46.33 dB | 0.9 s | 5 s |
 | `qp=19 rd=1` (quadtree + wavefront) | 1 191 453 (−5 %) | 45.07 dB | 47.35 dB | 4.7 s | 26 s |
@@ -379,23 +379,23 @@ no configuration.
 
 | configuration | wall | CPU | peak RSS | bytes |
 |---|---|---|---|---|
-| 8-bit hevc intra (defaults) library t1 | 4.76 s | 4.76 s | 114 MiB | 1 429 494 |
-| 8-bit hevc intra (defaults) library t4 | 1.50 s | 5.65 s | 157 MiB | = |
-| 8-bit hevc intra (defaults) library t8 | 0.96 s | 5.93 s | 177 MiB | = |
-| 8-bit hevc intra (defaults) framework t1 | 5.08 s | 5.06 s | 97 MiB | = |
-| 8-bit hevc intra (defaults) framework t4 | 1.68 s | 5.98 s | 134 MiB | = |
-| 8-bit hevc intra (defaults) framework t8 | 1.09 s | 6.26 s | 157 MiB | = |
-| 8-bit hevc intra grid=none t1 (library / framework) | 4.76 / 5.10 s | 4.75 / 5.09 s | 501 / 504 MiB | 1 414 606 |
-| 8-bit hevc intra grid=1024 t8 (library / framework) | 1.27 / 1.22 s | 6.21 / 6.23 s | 374 / 359 MiB | 1 422 653 |
-| 8-bit hevc pcm t1 (library / framework) | 0.51 / 0.52 s | 0.51 / 0.52 s | 116 / 113 MiB | 18 981 202 |
-| 8-bit hevc pcm t8 (library / framework) | 0.22 / 0.16 s | 0.57 / 0.56 s | 134 / 131 MiB | = |
-| 10-bit hevc intra (defaults) library t1 | 17.3 s | 17.3 s | 209 MiB | 1 308 705 |
-| 10-bit hevc intra (defaults) library t4 | 4.67 s | 18.2 s | 245 MiB | = |
-| 10-bit hevc intra (defaults) library t8 | 2.91 s | 20.9 s | 280 MiB | = |
-| 10-bit hevc intra (defaults) framework t1 / t4 / t8 | 17.2 / 5.10 / 3.08 s | 17.2 / 19.9 / 21.8 s | 173 / 214 / 248 MiB | 1 307 995 |
-| 10-bit hevc intra grid=none t1 (library / framework) | 16.5 / 17.0 s | 16.5 / 17.0 s | 602 / 614 MiB | 1 290 413 / 1 290 172 |
-| 10-bit hevc intra grid=1024 t8 (library / framework) | 3.32 / 3.58 s | 19.6 / 21.4 s | 523 / 428 MiB | 1 299 052 / 1 298 228 |
-| 10-bit hevc pcm t1 / t8 (library) | 0.64 / 0.19 s | 0.64 / 0.69 s | 208 / 222 MiB | 23 699 842 |
+| 8-bit hevc intra (defaults) library t1 | 4.58 s | 4.58 s | 95 MiB | 1 429 494 |
+| 8-bit hevc intra (defaults) library t4 | 1.27 s | 4.86 s | 135 MiB | = |
+| 8-bit hevc intra (defaults) library t8 | 0.71 s | 5.08 s | 159 MiB | = |
+| 8-bit hevc intra (defaults) framework t1 | 4.56 s | 4.56 s | 77 MiB | = |
+| 8-bit hevc intra (defaults) framework t4 | 1.25 s | 4.79 s | 127 MiB | = |
+| 8-bit hevc intra (defaults) framework t8 | 0.68 s | 4.92 s | 148 MiB | = |
+| 8-bit hevc intra grid=none t1 (library / framework) | 4.45 / 4.39 s | 4.45 / 4.38 s | 501 / 504 MiB | 1 414 606 |
+| 8-bit hevc intra grid=1024 t8 (library / framework) | 0.86 / 0.87 s | 4.90 / 4.96 s | 351 / 335 MiB | 1 422 653 |
+| 8-bit hevc pcm t1 (library / framework) | 0.47 / 0.47 s | 0.47 / 0.47 s | 95 / 95 MiB | 18 981 202 |
+| 8-bit hevc pcm t8 (library / framework) | 0.12 / 0.12 s | 0.49 / 0.49 s | 116 / 114 MiB | = |
+| 10-bit hevc intra (defaults) library t1 | 16.2 s | 16.2 s | 173 MiB | 1 308 705 |
+| 10-bit hevc intra (defaults) library t4 | 4.36 s | 17.1 s | 231 MiB | = |
+| 10-bit hevc intra (defaults) library t8 | 2.32 s | 17.7 s | 272 MiB | = |
+| 10-bit hevc intra (defaults) framework t1 / t4 / t8 | 16.7 / 4.41 / 2.33 s | 16.6 / 17.4 / 18.0 s | 140 / 185 / 222 MiB | 1 307 995 |
+| 10-bit hevc intra grid=none t1 (library / framework) | 15.9 / 16.0 s | 15.9 / 16.0 s | 602 / 613 MiB | 1 290 413 / 1 290 172 |
+| 10-bit hevc intra grid=1024 t8 (library / framework) | 2.99 / 2.96 s | 17.6 / 17.5 s | 477 / 448 MiB | 1 299 052 / 1 298 228 |
+| 10-bit hevc pcm t1 / t8 (library) | 0.61 / 0.17 s | 0.61 / 0.63 s | 169 / 185 MiB | 23 699 842 |
 | 8-bit av1 quality 60 (defaults) library t1 / t4 / t8 | 86.5 / 21.7 / 11.4 s | 86.5 / 86.4 / 89.7 s | 137 / 208 / 263 MiB | 512 724 |
 | 8-bit av1 quality 60 (defaults) framework t8 | 11.6 s | 91.5 s | 227 MiB | = |
 | 8-bit av1 grid=none t8 (library) | 62.3 s | 91.8 s | 1 576 MiB | 484 692 |
@@ -442,10 +442,11 @@ threads=8` file is byte-identical to the serial one).
 **Where the time and memory go** (12 MP 8-bit HEVC, defaults,
 serial, library path): packed RGB → 4:2:0 conversion 0.07 s, +18
 MiB (the coding picture; the packed source is 35 MiB); grid cut +
-pad: one 512×512 tile at a time (0.4 MiB); the HEVC encoder 4.5 s of
-the 4.8 s and ~60 MiB of working set per instance (the historical
+pad: one 512×512 tile at a time, cut straight from the picture with
+edge replication (0.4 MiB; no padded canvas); the HEVC encoder 4.4 s
+of the 4.6 s and ~40 MiB of working set per instance (the historical
 coder's per-picture state; one instance per worker, which is the
-t1 → t8 RSS growth: 114 → 177 MiB); the writer: the coded tiles
+t1 → t8 RSS growth: 95 → 159 MiB); the writer: the coded tiles
 (1.4 MB) + the `ftyp` / `meta` bytes, streamed into one output
 buffer — no assembled `mdat` copy. Single-item (`grid=none`) is the
 same encoder over the whole 12 MP picture: 501 MiB, all of it the

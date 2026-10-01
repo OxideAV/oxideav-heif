@@ -25,9 +25,11 @@ All notable changes to this project will be documented in this file.
   into the coding layout row pair by row pair (`packed_to_planar_for`:
   no full-resolution 4:4:4 intermediate), `HeifWriter::write_to`
   streams the `mdat` from the item bodies (no assembled payload copy)
-  and the muxer validates a still packet with the borrowing parser.
-  12 MP 8-bit HEVC through the CLI: 627 → 97 MiB peak (grid) / 504
-  MiB single item; see the README's encode budget table.
+  and the muxer validates a still packet with the borrowing parser;
+  grid tiles are cut straight from the coding picture with edge
+  replication (no padded canvas). 12 MP 8-bit HEVC through the
+  framework path: 627 → 77 MiB peak serial (grid) / 504 MiB single
+  item; see the README's encode budget table.
 - Production defaults: `qp` 18 (the size / PSNR of the OS encoder's
   default on a 12 MP photograph — README), HEVC deblocking + SAO on
   lossy items (`EncodeOptions::hevc_filters`, option `filters`),

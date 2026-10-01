@@ -19,7 +19,6 @@ use oxideav_core::{
 };
 
 use crate::av1c::Av1Config;
-use crate::compose::crop;
 use crate::derived::GridDescriptor;
 use crate::error::{HeifError, Result};
 use crate::hvcc::{join_length_prefixed, HevcConfig, NalArray, NAL_PPS, NAL_SPS, NAL_VPS};
@@ -1179,14 +1178,51 @@ fn native_av1(_frame: &HeifFrame, opts: &EncodeOptions) -> bool {
     opts.codec == StillCodec::Av1
 }
 
-/// Code the tiles of a `cols × rows` grid over `padded` (already a
-/// multiple of `tile` on both axes) on `opts.workers()` threads and
-/// hand them to the writer in row-major order as they complete —
-/// item ids and bytes are those of the serial encode. Returns the
-/// tile item ids.
+/// The `tile × tile` tile at `(x, y)` of `f` (both multiples of the
+/// codec alignment, so the chroma planes cut on sample boundaries):
+/// the inside part copied plane by plane, the samples beyond the
+/// picture's right / bottom edge replicated from the last column /
+/// row — no padded copy of the whole picture is ever made.
+fn tile_from(f: &HeifFrame, x: u32, y: u32, tile: u32) -> Result<HeifFrame> {
+    let mut out = HeifFrame::zeroed(tile, tile, f.format)?;
+    let bps = f.format.bytes_per_sample();
+    for p in 0..f.format.plane_count() {
+        let (sx, sy) = if p == 0 || Some(p) == f.format.alpha_plane() {
+            (0, 0)
+        } else {
+            f.format.chroma.shift()
+        };
+        let (spw, sph) = f.plane_dims(p);
+        let (pw, ph) = out.plane_dims(p);
+        let (x0, y0) = (x >> sx, y >> sy);
+        let run = (spw.saturating_sub(x0)).min(pw) as usize;
+        let src = &f.planes[p];
+        let dst_stride = out.planes[p].stride;
+        let dst = &mut out.planes[p].data;
+        for row in 0..ph {
+            let sy_ = (y0 + row).min(sph - 1) as usize;
+            let s = &src.data[sy_ * src.stride + x0 as usize * bps..];
+            let d = &mut dst[row as usize * dst_stride..(row as usize + 1) * dst_stride];
+            if run > 0 {
+                d[..run * bps].copy_from_slice(&s[..run * bps]);
+                let last = &s[(run - 1) * bps..run * bps].to_vec();
+                for px in d[run * bps..].chunks_exact_mut(bps) {
+                    px.copy_from_slice(last);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Code the tiles of a `cols × rows` grid over `colour` (the tiles
+/// beyond its edges are edge-replicated per tile) on `opts.workers()`
+/// threads and hand them to the writer in row-major order as they
+/// complete — item ids and bytes are those of the serial encode.
+/// Returns the tile item ids.
 fn encode_grid_tiles(
     w: &mut HeifWriter,
-    padded: &HeifFrame,
+    colour: &HeifFrame,
     tile: u32,
     cols: u32,
     rows: u32,
@@ -1195,7 +1231,7 @@ fn encode_grid_tiles(
     let n = (rows * cols) as usize;
     let tile_at = |i: usize| -> Result<HeifFrame> {
         let (r, c) = ((i as u32) / cols, (i as u32) % cols);
-        crop(padded, c * tile, r * tile, tile, tile)
+        tile_from(colour, c * tile, r * tile, tile)
     };
     // Each tile's codec runs serial; the budget is spent across tiles.
     let tile_opts = EncodeOptions {
@@ -1318,16 +1354,9 @@ fn encode_still_planes(
             if rows > 256 || cols > 256 {
                 return Err(HeifError::invalid("grid: more than 256 rows or columns"));
             }
-            // The thumbnail is cut from the unpadded picture below; the
-            // padded canvas replaces it (one picture held at a time).
             let thumb = thumbnail_source(&colour, opts)?;
-            let padded = if (cols * tile, rows * tile) == (cw, ch) {
-                colour
-            } else {
-                pad_frame(&colour, cols * tile, rows * tile)?
-            };
-            let tiles = encode_grid_tiles(w, &padded, tile, cols, rows, opts)?;
-            drop(padded);
+            let tiles = encode_grid_tiles(w, &colour, tile, cols, rows, opts)?;
+            drop(colour);
             let desc = GridDescriptor {
                 rows: rows as u16,
                 columns: cols as u16,
