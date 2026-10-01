@@ -407,8 +407,9 @@ no configuration.
 
 The AV1 rows run the published oxideav-av1 0.1.19 (the standalone
 build); the CLI below is the umbrella build on the av1 sibling's
-current master, which is ~2× faster on the same picture (37.6 s
-serial) — the still encoder is that crate's work this round. A
+current master, which is 3–8× faster on the same picture (37.6 then
+10.7 s serial during the round) — the still encoder is that crate's
+work this round. A
 single-item 12 MP AV1 still is 1.6 GB of the codec's state and 62 s
 on 8 threads; the automatic grid is what makes the AVIF default
 usable (263 MiB, 11 s).
@@ -425,17 +426,19 @@ decode included):
 
 | command | r463 | r464 serial (`--opt threads=1`) | r464 default (the executor's budget) | r464 `--opt threads=8` |
 |---|---|---|---|---|
-| PNG → HEIC (12 MP) | 3.4 s / 627 MiB | 4.45 s / 166 MiB | 1.74 s / 243 MiB | 0.96 s / 215 MiB |
+| PNG → HEIC (12 MP) | 3.4 s / 627 MiB | 4.30 s / 148 MiB | 1.63 s / 239 MiB | 0.92 s / 199 MiB |
 | HEIC → PNG | — | — | 0.17 s / 162 MiB | — |
-| PNG → AVIF (12 MP, quality 60) | ≈90 s | 37.6 s / 177 MiB | 37.6 s / 177 MiB (serial: see below) | 5.9 s / 247 MiB |
+| PNG → AVIF (12 MP, quality 60) | ≈90 s | 10.7 s / 157 MiB | 10.7 s / 157 MiB (serial: see below) | 1.85 s / 222 MiB |
 | AVIF → PNG | — | — | 0.21 s / 219 MiB | — |
 
 The r463 wall was the unfiltered `qp` 26 single-item encode; the
 r464 serial number is the production default (filters on, `qp` 18,
-48 tiles) and the memory is the point: **627 → 166 MiB serial, 243
+48 tiles) and the memory is the point: **627 → 148 MiB serial, 239
 MiB at the executor's default budget** (the 16-thread auto budget
-holds more tiles in flight; 8 threads 215 MiB), against the ≤ 250
-MiB target. The `.heic` job goes through the pipeline executor,
+holds more tiles in flight; 8 threads 199 MiB), against the ≤ 250
+MiB target. (The AVIF wall is the av1 sibling's master on the day —
+it moved twice during this round, 37.6 → 10.7 s serial; the bytes
+are identical for every budget on each build.) The `.heic` job goes through the pipeline executor,
 which hands the encoder `ExecutionContext::auto`; the `.avif` job
 carries an implied `codec=av1` option and runs through
 `oxideav-cli-convert`'s frame tap, which builds the encoder without
