@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "oxideav-heif"
-version = "0.0.3"
+version = "0.0.5"
 
 [[package]]
 name = "oxideav-heif-fuzz"

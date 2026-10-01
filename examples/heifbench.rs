@@ -12,8 +12,8 @@
 //!   resident set size of a child process that decodes the file once
 //!   (`/usr/bin/time -l` on macOS, `-v` on Linux; `n/a` without it).
 //! * encode: the decoded picture re-encoded with `EncodeOptions`
-//!   defaults for HEVC (`intra` at QP 26) and for AV1 (quality 60,
-//!   `fast`), median of N runs; the AV1 run is skipped for pictures
+//!   defaults for HEVC (`intra` at QP 18, filters, the automatic grid) and for AV1 (quality 60,
+//!   `fast`) under the same thread budget, median of N runs; the AV1 run is skipped for pictures
 //!   above 4 MP unless `--all-encodes` is given (it is slow).
 //!
 //! * hash: FNV-1a 64 over the decoded output planes (the byte-identity
@@ -165,7 +165,11 @@ fn main() {
             let mut t = Vec::new();
             for _ in 0..runs {
                 let s = Instant::now();
-                let out = encode_still(&img.frame, &EncodeOptions::default()).expect("hevc encode");
+                let opts = EncodeOptions {
+                    threads: Some(threads),
+                    ..EncodeOptions::default()
+                };
+                let out = encode_still(&img.frame, &opts).expect("hevc encode");
                 t.push(s.elapsed());
                 if t.len() == 1 {
                     enc_hevc = format!("{:.2} s ({} KiB)", 0.0, out.len() / 1024);
@@ -183,6 +187,7 @@ fn main() {
                 let opts = EncodeOptions {
                     codec: StillCodec::Av1,
                     av1_quality: Some(60),
+                    threads: Some(threads),
                     ..EncodeOptions::default()
                 };
                 let mut size = 0;
