@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-heif/compare/v0.0.5...v0.0.6) - 2026-10-01
+
+### Other
+
+- CLI budget rows re-measured on the final binary
+- honour the source's colour signal in the written colr (frame record, else stream; range unless given; RGB sources keep the derived matrix)
+- the encode runs take the --threads budget; doc names the r464 defaults
+- cut grid tiles straight from the coding picture (edge-replicated per tile, no padded canvas); README budget table re-measured
+- r464 — production defaults with the OS-encoder comparison, the encode budget table (library / CLI, 1/4/8 threads, where the time and memory go), the round-trip table, region groups
+- unrg / corg groups of regions (HEIF Amd 2 §11.3.5) — accessors, image association, writer helpers, check rules
+- round trip at the production defaults through the CLI path; AV1 keeps the chroma layout of deep sources
+- thread budget through grid tiles / wavefront / AV1 tiles, owned coding frames, direct packed conversion, streamed mdat, production defaults
+
 - Encode path budgeted and optimised (round 464; every written file
   decodes byte-identically for every thread budget — pinned by
   `tests/encode_budget.rs`). `EncodeOptions::threads` carries the
