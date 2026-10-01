@@ -59,6 +59,15 @@ All notable changes to this project will be documented in this file.
   rules under `HEIF-A2 11.3.5.x` (region items only, one image per
   group, a `corg` names a main region and at least one part).
   `ITEM_TYPE_RGAN`.
+- The framework encoder honours the colour signal: a frame's
+  `ColorSignal` record (else the stream's
+  `CodecParameters::color_signal`) refines the written `colr` — H.273
+  code points that are not unspecified replace the MIAF defaults, a
+  signalled range replaces the default range unless `range` was given
+  (a limited-range YCbCr source is no longer labelled full), and for
+  packed / planar RGB sources only the primaries / transfer / range
+  are taken (the signal's matrix describes RGB, not the derived
+  YCbCr).
 - `examples/heifencbench`: the stage-timed encode bench (wall, CPU,
   peak RSS from `getrusage`; library and framework paths).
 - oxideav-h265 0.0.13 is the minimum pin (wavefront, `cqpoffset`,

@@ -502,3 +502,106 @@ fn writer_streams_the_same_bytes_it_builds() {
     assert!(img.exif.is_some());
     assert_eq!(img.thumbnail_ids.len(), 1);
 }
+
+#[test]
+fn framework_encoder_honours_the_colour_signal() {
+    use oxideav_core::{ColorSignal, VideoFrame, VideoPlane};
+    let (w, h) = (64u32, 48u32);
+    let planar = |signal: Option<ColorSignal>| -> VideoFrame {
+        let src = picture(w, h, 8, Chroma::Yuv420, false);
+        let mut vf = VideoFrame {
+            pts: Some(0),
+            planes: src
+                .planes
+                .iter()
+                .map(|p| VideoPlane {
+                    stride: p.stride,
+                    data: p.data.clone(),
+                })
+                .collect(),
+        };
+        if let Some(s) = signal {
+            vf.set_color_signal(s);
+        }
+        vf
+    };
+    let encode =
+        |vf: VideoFrame, pf: PixelFormat, opts: CodecOptions, stream: Option<ColorSignal>| {
+            let mut params = CodecParameters::video(CodecId::new("heif"));
+            params.width = Some(w);
+            params.height = Some(h);
+            params.pixel_format = Some(pf);
+            params.options = opts;
+            if let Some(s) = stream {
+                params.color_signal = s;
+            }
+            let mut enc = oxideav_heif::encode::make_encoder(&params).unwrap();
+            enc.send_frame(&Frame::Video(vf)).unwrap();
+            enc.flush().unwrap();
+            decode(&enc.receive_packet().unwrap().data).nclx
+        };
+    let bt2020 = ColorSignal::from_code_points(9, 16, 9, false);
+    // A frame record: BT.2020 / PQ / limited lands in the colr.
+    let nclx = encode(
+        planar(Some(bt2020)),
+        PixelFormat::Yuv420P,
+        CodecOptions::new(),
+        None,
+    );
+    assert_eq!(
+        nclx,
+        Colr::Nclx {
+            primaries: 9,
+            transfer: 16,
+            matrix: 9,
+            full_range: false
+        }
+    );
+    // The stream-level signal applies when the frame carries none; an
+    // explicit `range` option wins over the signalled range.
+    let nclx = encode(
+        planar(None),
+        PixelFormat::Yuv420P,
+        CodecOptions::new().set("range", "full"),
+        Some(bt2020),
+    );
+    assert_eq!(
+        nclx,
+        Colr::Nclx {
+            primaries: 9,
+            transfer: 16,
+            matrix: 9,
+            full_range: true
+        }
+    );
+    // No signal at all: the MIAF default.
+    let nclx = encode(
+        planar(None),
+        PixelFormat::Yuv420P,
+        CodecOptions::new(),
+        None,
+    );
+    assert_eq!(nclx, Colr::MIAF_DEFAULT);
+    // Unspecified code points keep the defaults they stand for.
+    let nclx = encode(
+        planar(Some(ColorSignal::from_code_points(2, 2, 2, true))),
+        PixelFormat::Yuv420P,
+        CodecOptions::new(),
+        None,
+    );
+    assert_eq!(nclx, Colr::MIAF_DEFAULT);
+    // A packed RGB source: the signal's matrix describes RGB (identity),
+    // the conversion matrix stays the default; primaries follow.
+    let (mut rgb, pf) = packed_rgb(w, h, false, false);
+    rgb.set_color_signal(ColorSignal::from_code_points(12, 13, 0, true));
+    let nclx = encode(rgb, pf, CodecOptions::new(), None);
+    assert_eq!(
+        nclx,
+        Colr::Nclx {
+            primaries: 12,
+            transfer: 13,
+            matrix: 6,
+            full_range: true
+        }
+    );
+}

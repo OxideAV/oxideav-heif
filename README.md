@@ -321,7 +321,11 @@ writes:
   see below).
 * **Full-range `nclx`** (BT.709 primaries, sRGB transfer, BT.601
   matrix — the MIAF default) in the `colr` and in the VUI
-  (`range=limited` flips both).
+  (`range=limited` flips both), refined by the source's colour
+  signal when it carries one (a frame `ColorSignal` record, else the
+  stream's: BT.2020 / PQ / limited-range YCbCr sources are labelled
+  as such; an RGB source's matrix is not taken — the encoder derives
+  the YCbCr itself).
 * **Automatic 512-px `grid` above 4 MP** (`GRID_AUTO_TILE` /
   `GRID_AUTO_MIN_PIXELS`; the tile the OS producer uses for a 12 MP
   picture): the codec's working set scales with a tile, not the

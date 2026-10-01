@@ -2328,6 +2328,9 @@ pub struct HeifEncoder {
     /// `threads` was given explicitly (the execution context then
     /// does not override it).
     explicit_threads: bool,
+    /// `range` was given explicitly (the stream's / frame's colour
+    /// signal then does not override it).
+    explicit_range: bool,
     packed_chroma: Chroma,
     queue: std::collections::VecDeque<Packet>,
     flushed: bool,
@@ -2343,6 +2346,7 @@ impl HeifEncoder {
         Ok(Self {
             params: params.clone(),
             explicit_threads: opts.threads.is_some(),
+            explicit_range: params.options.get("range").is_some(),
             packed_chroma: typed.packed_chroma(),
             opts,
             queue: std::collections::VecDeque::new(),
@@ -2353,6 +2357,50 @@ impl HeifEncoder {
     /// The effective encode options (after `set_execution_context`).
     pub fn options(&self) -> &EncodeOptions {
         &self.opts
+    }
+
+    /// The `colr` for a frame: the configured one (the MIAF default
+    /// unless `range` was set) refined by the frame's colour-signal
+    /// record, else the stream's `CodecParameters::color_signal` —
+    /// H.273 code points that are not "unspecified" (2) replace the
+    /// defaults, and a signalled range replaces the default range
+    /// unless `range` was given explicitly. For packed / planar RGB
+    /// sources the signal's matrix describes RGB, not the YCbCr this
+    /// encoder derives, so only the primaries / transfer / range are
+    /// taken (`rgb_source`).
+    fn colr_for(&self, vf: &oxideav_core::VideoFrame, rgb_source: bool) -> Colr {
+        let signal = vf.color_signal().unwrap_or(self.params.color_signal);
+        let Colr::Nclx {
+            primaries,
+            transfer,
+            matrix,
+            full_range,
+        } = &self.opts.colr
+        else {
+            return self.opts.colr.clone();
+        };
+        let (p, tr, m) = (
+            signal.primaries.code_point(),
+            signal.transfer.code_point(),
+            signal.matrix.code_point(),
+        );
+        let pick = |code: u8, default: u16| if code == 2 { default } else { code as u16 };
+        let range = match signal.range {
+            _ if self.explicit_range => *full_range,
+            oxideav_core::ColorRange::Full => true,
+            oxideav_core::ColorRange::Limited => false,
+            _ => *full_range,
+        };
+        Colr::Nclx {
+            primaries: pick(p, *primaries),
+            transfer: pick(tr, *transfer),
+            matrix: if rgb_source || m == 0 {
+                *matrix
+            } else {
+                pick(m, *matrix)
+            },
+            full_range: range,
+        }
     }
 
     /// The coding layout a packed source of `depth` bits is converted
@@ -2408,7 +2456,8 @@ impl Encoder for HeifEncoder {
             // conversion — lossless stays lossless); the HEVC path, which
             // codes 4:2:0, converts through the configured matrix first.
             let planar = HeifFrame::from_core_gbr(vf, w, h, pf)?;
-            let (p, t) = match &self.opts.colr {
+            let colr = self.colr_for(vf, true);
+            let (p, t) = match &colr {
                 Colr::Nclx {
                     primaries,
                     transfer,
@@ -2429,11 +2478,15 @@ impl Encoder for HeifEncoder {
                 };
                 encode_still_owned(planar, &opts)?
             } else {
+                let opts = EncodeOptions {
+                    colr,
+                    ..self.opts.clone()
+                };
                 let rgb = crate::rgb::to_rgb(&planar, Some(&identity))?;
                 drop(planar);
-                let ycc = crate::rgb::from_rgb(&rgb, Some(&self.opts.colr), Chroma::Yuv444)?;
+                let ycc = crate::rgb::from_rgb(&rgb, Some(&opts.colr), Chroma::Yuv444)?;
                 drop(rgb);
-                encode_still_owned(ycc, &self.opts)?
+                encode_still_owned(ycc, &opts)?
             };
             let pkt = Packet::new(0, TimeBase::new(1, 1), bytes)
                 .with_pts(vf.pts.unwrap_or(0))
@@ -2441,17 +2494,22 @@ impl Encoder for HeifEncoder {
             self.queue.push_back(pkt);
             return Ok(());
         }
-        let hf = match HeifFrame::from_core(vf, w, h, pf) {
-            Ok(f) => f,
+        let (hf, colr) = match HeifFrame::from_core(vf, w, h, pf) {
+            Ok(f) => (f, self.colr_for(vf, false)),
             Err(_) => {
                 // Packed RGB(A) / grey(+alpha): straight into the coding
                 // layout, row pair by row pair.
                 let (_, _, wide, alpha, grey) = packed_layout(pf)?;
                 let target = self.packed_target(grey, if wide { 16 } else { 8 }, alpha)?;
-                packed_to_planar_for(vf, w, h, pf, &self.opts.colr, target)?
+                let colr = self.colr_for(vf, true);
+                (packed_to_planar_for(vf, w, h, pf, &colr, target)?, colr)
             }
         };
-        let bytes = encode_still_owned(hf, &self.opts)?;
+        let opts = EncodeOptions {
+            colr,
+            ..self.opts.clone()
+        };
+        let bytes = encode_still_owned(hf, &opts)?;
         let pkt = Packet::new(0, TimeBase::new(1, 1), bytes)
             .with_pts(vf.pts.unwrap_or(0))
             .with_keyframe(true);
