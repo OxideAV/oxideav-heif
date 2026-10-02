@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OxideAV/oxideav-heif/compare/v0.0.6...v0.0.7) - 2026-10-02
+
+### Other
+
+- #[non_exhaustive] on every public record and growing enum, new(...) constructors, with_* setters on the option records
+
 ### Changed (API hygiene — a minor bump; every public record gains an additive-friendly shape)
 
 - **`#[non_exhaustive]` on every public record struct** that callers
