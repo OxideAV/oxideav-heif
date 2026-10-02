@@ -116,7 +116,7 @@ pub mod reference {
 
 /// `hdlr` box contents.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct Handler {
     /// `handler_type` (`pict` for HEIF image collections).
     pub handler_type: FourCc,
@@ -124,9 +124,7 @@ pub struct Handler {
     pub name: String,
 }
 impl Handler {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(handler_type: FourCc, name: String) -> Self {
         Self { handler_type, name }
     }
@@ -243,7 +241,7 @@ impl ItemInfo {
 
 /// One `iloc` extent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct Extent {
     /// `extent_index` (only meaningful for construction method 2; 0
     /// when the box carried `index_size == 0`, which implies 1).
@@ -254,9 +252,7 @@ pub struct Extent {
     pub length: u64,
 }
 impl Extent {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(index: u64, offset: u64, length: u64) -> Self {
         Self {
             index,
@@ -268,7 +264,7 @@ impl Extent {
 
 /// One `iloc` item record.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct ItemLocation {
     /// `item_ID`.
     pub item_id: u32,
@@ -282,9 +278,7 @@ pub struct ItemLocation {
     pub extents: Vec<Extent>,
 }
 impl ItemLocation {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(
         item_id: u32,
         construction_method: u8,
@@ -313,7 +307,7 @@ impl ItemLocation {
 
 /// One property box from `ipco`, kept raw.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct RawProperty {
     /// Box type.
     pub box_type: FourCc,
@@ -326,9 +320,7 @@ pub struct RawProperty {
     pub box_size: usize,
 }
 impl RawProperty {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(
         box_type: FourCc,
         user_type: Option<[u8; 16]>,
@@ -346,7 +338,7 @@ impl RawProperty {
 
 /// One entry of an `ipma` association list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct PropertyAssociation {
     /// 1-based index into `ipco`.
     pub index: u16,
@@ -354,9 +346,7 @@ pub struct PropertyAssociation {
     pub essential: bool,
 }
 impl PropertyAssociation {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(index: u16, essential: bool) -> Self {
         Self { index, essential }
     }
@@ -364,7 +354,7 @@ impl PropertyAssociation {
 
 /// The association list of one item.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct ItemPropertyAssociations {
     /// `item_ID`.
     pub item_id: u32,
@@ -373,9 +363,7 @@ pub struct ItemPropertyAssociations {
     pub entries: Vec<PropertyAssociation>,
 }
 impl ItemPropertyAssociations {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(item_id: u32, entries: Vec<PropertyAssociation>) -> Self {
         Self { item_id, entries }
     }
@@ -383,7 +371,7 @@ impl ItemPropertyAssociations {
 
 /// One `SingleItemTypeReferenceBox` from `iref`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct ItemReference {
     /// The reference type (box type of the child box).
     pub reference_type: FourCc,
@@ -393,9 +381,7 @@ pub struct ItemReference {
     pub to_item_ids: Vec<u32>,
 }
 impl ItemReference {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(reference_type: FourCc, from_item_id: u32, to_item_ids: Vec<u32>) -> Self {
         Self {
             reference_type,
@@ -449,7 +435,7 @@ impl EntityGroup {
 
 /// `pymd` image pyramid tile information (HEIF Amd 1:2025 §6.8.12).
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct PyramidInfo {
     /// `(tile_size_x, tile_size_y)`: one entry for every layer (lowest
     /// resolution first, the base image last) when
@@ -459,9 +445,7 @@ pub struct PyramidInfo {
     pub tile_sizes: Vec<(u32, u32)>,
 }
 impl PyramidInfo {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(tile_sizes: Vec<(u32, u32)>) -> Self {
         Self { tile_sizes }
     }
@@ -487,7 +471,7 @@ impl PyramidInfo {
 /// `rgpa` region partition group area (HEIF Amd 1:2025 §6.8.13), when
 /// `area_info_present`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct RegionPartitionArea {
     /// `reference_width`.
     pub reference_width: u32,
@@ -503,9 +487,7 @@ pub struct RegionPartitionArea {
     pub height: u32,
 }
 impl RegionPartitionArea {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(
         reference_width: u32,
         reference_height: u32,
@@ -648,7 +630,7 @@ impl EntityGroup {
 
 /// One `dref` entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct DataReference {
     /// Entry box type (`url ` / `urn ` / `deti`).
     pub entry_type: FourCc,
@@ -667,9 +649,7 @@ pub struct DataReference {
     pub payload: Vec<u8>,
 }
 impl DataReference {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(
         entry_type: FourCc,
         self_contained: bool,

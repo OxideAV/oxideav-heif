@@ -47,7 +47,7 @@ pub const HEVC_CONFIG_HEAD_LEN: usize = 23;
 
 /// One parameter-set / SEI array of the record.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct NalArray {
     /// `array_completeness`.
     pub complete: bool,
@@ -61,9 +61,7 @@ pub struct NalArray {
     pub nal_units: Vec<Vec<u8>>,
 }
 impl NalArray {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(
         complete: bool,
         reserved_bit: bool,

@@ -393,7 +393,7 @@ impl TiledItem {
 
 /// One node of a derivation graph.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct ImageNode {
     /// The item.
     pub item: ItemInfo,
@@ -419,9 +419,7 @@ pub struct ImageNode {
     pub depth_in_chain: usize,
 }
 impl ImageNode {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         item: ItemInfo,

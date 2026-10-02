@@ -1288,7 +1288,6 @@ fn ensure_ispe(props: &mut Vec<(Property, bool)>, w: u32, h: u32) {
 #[doc(hidden)]
 /// One sample queued for an image-sequence track.
 #[derive(Clone, Debug)]
-#[non_exhaustive]
 pub struct SequenceSample {
     /// Coded sample bytes (length-prefixed NAL units / an AV1 TU).
     pub data: Vec<u8>,
@@ -1298,9 +1297,7 @@ pub struct SequenceSample {
     pub sync: bool,
 }
 impl SequenceSample {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(data: Vec<u8>, duration: u32, sync: bool) -> Self {
         Self {
             data,

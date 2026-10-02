@@ -89,7 +89,7 @@ impl SampleFormat {
 /// Chroma layout of an image in the box (Table O.4 plus the centring
 /// bits).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct MiniChroma {
     /// `chroma_subsampling`: 0 = 4:0:0, 1 = 4:2:0, 2 = 4:2:2, 3 = 4:4:4.
     pub subsampling: u8,
@@ -99,9 +99,7 @@ pub struct MiniChroma {
     pub vertically_centered: bool,
 }
 impl MiniChroma {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(subsampling: u8, horizontally_centered: bool, vertically_centered: bool) -> Self {
         Self {
             subsampling,
@@ -114,7 +112,7 @@ impl MiniChroma {
 /// The HDR signalling blocks (`clli` / `mdcv` / `cclv` / `amve` /
 /// `reve` / `ndwt` box *bodies*, O.3.3) attached to one image.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct MiniHdrBoxes {
     /// `ContentLightLevelBox` body (4 bytes).
     pub clli: Option<Vec<u8>>,
@@ -131,9 +129,7 @@ pub struct MiniHdrBoxes {
     pub ndwt: Option<Vec<u8>>,
 }
 impl MiniHdrBoxes {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(
         clli: Option<Vec<u8>>,
         mdcv: Option<Vec<u8>>,
@@ -166,7 +162,7 @@ impl MiniHdrBoxes {
 
 /// The gain map of a `mini` box (`gainmap_flag` = 1).
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct MiniGainMap {
     /// `gainmap_width_minus1 + 1`.
     pub width: u32,
@@ -198,9 +194,7 @@ pub struct MiniGainMap {
     pub data: Vec<u8>,
 }
 impl MiniGainMap {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         width: u32,
@@ -235,7 +229,7 @@ impl MiniGainMap {
 
 /// A parsed `MinimizedImageBox` (O.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct MinimizedImage {
     /// `infe_type` + `codec_config_type` when
     /// `explicit_codec_types_flag` (else inferred from the brand in
@@ -284,9 +278,7 @@ pub struct MinimizedImage {
     pub xmp: Option<Vec<u8>>,
 }
 impl MinimizedImage {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         explicit_codec_types: Option<(FourCc, FourCc)>,

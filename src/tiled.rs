@@ -28,7 +28,7 @@ pub type PackedTiles = (Vec<u8>, DataEntryTiledItem, (u32, Vec<u8>));
 
 /// A parsed `DataEntryTiledItemBox` (§6.11.5).
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct DataEntryTiledItem {
     /// Bits of a `tile_start_offset` (32 / 40 / 48 / 64).
     pub offset_bits: u8,
@@ -46,9 +46,7 @@ pub struct DataEntryTiledItem {
     pub offset_table: Option<(u64, u32)>,
 }
 impl DataEntryTiledItem {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(
         offset_bits: u8,
         size_bits: u8,
@@ -70,7 +68,7 @@ impl DataEntryTiledItem {
 
 /// The URL construction fields of an external-tile `deti`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct ExternalTiles {
     /// `directoryIDstart` / `directoryIDend` when `directory_ID_flag`.
     pub directory_ids: Option<(u16, u16)>,
@@ -84,9 +82,7 @@ pub struct ExternalTiles {
     pub request_template: String,
 }
 impl ExternalTiles {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(
         directory_ids: Option<(u16, u16)>,
         tile_id_start: u64,

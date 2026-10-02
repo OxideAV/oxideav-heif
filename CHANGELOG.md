@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (API hygiene, pass 2 — plumbing records leave the documented surface)
+
+- `#[doc(hidden)]` (and no longer `#[non_exhaustive]` — hidden items
+  are outside the semver contract) on the records that exist only
+  because a module boundary needed them: `meta::{Extent, ItemLocation,
+  Handler, DataReference, PropertyAssociation,
+  ItemPropertyAssociations, ItemReference, RawProperty, PyramidInfo,
+  RegionPartitionArea}`, `props::PropertyEntry`, `hvcc::NalArray`,
+  `lhvc::{OperatingPointPtl, OperatingPointLayer, OperatingPoint,
+  LayerDependency}`, `mini::{MiniChroma, MiniHdrBoxes, MiniGainMap,
+  MinimizedImage}`, `tiled::{DataEntryTiledItem, ExternalTiles}`,
+  `gainmap::LinearRgbImage`, `derived::ImageNode`, `ftyp::BrandClass`,
+  `writer::SequenceSample`. They stay `pub` (public signatures —
+  `Meta` / `Property::Unknown` / `LhevcConfig` / `HevcConfig` fields,
+  `build_graph`, `apply_gain_map` — name them) and keep their `new`.
+- Kept `#[non_exhaustive]` + constructors (deliberately constructed or
+  read): the typed properties, `ItemInfo` / `ItemProperties` / `Meta` /
+  `EntityGroup`, the codec configurations, `DecodedImage` and its
+  `LayerFrame` / `GainMapAttachment`, the derived descriptors
+  (`GridDescriptor`, `OverlayDescriptor`, `ColourFormatEnhancement`,
+  `TiledItem`), `compose::OverlayInput`, `rgb::RgbImage`, gain-map
+  metadata, MIAF report / violation, `EncodeOptions` / `GainMapSpec` /
+  `HeifEncoderOptions`, `FileType`, the sequence views (`Track`,
+  `Movie`, `SampleEntry`, `Sample`, `Edit`, `TrackOrientation`,
+  `CodingConstraints`, sample groups, `prft`, `ssix`), the writer
+  specs, `HeifFile`.
+- Doc links: `lhvc` module → `HeifError::layered_hevc`; `encode_still`
+  no longer links a private item.
+
 ## [0.0.7](https://github.com/OxideAV/oxideav-heif/compare/v0.0.6...v0.0.7) - 2026-10-02
 
 ### Other

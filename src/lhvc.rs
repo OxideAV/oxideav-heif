@@ -7,7 +7,7 @@
 //! coded pictures of several layers; its `tols` names the output layer
 //! set to decode. This crate types the layer structure and decodes the
 //! base layer (`nuh_layer_id` 0) through the HEVC decoder; enhancement
-//! layers are a typed refusal ([`crate::HeifError::LayeredHevc`]).
+//! layers are a typed refusal ([`crate::HeifError::layered_hevc`]).
 //!
 //! ```text
 //! LHEVCDecoderConfigurationRecord {
@@ -156,7 +156,7 @@ impl LhevcConfig {
 
 /// One profile / tier / level entry of an `oinf` record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct OperatingPointPtl {
     /// `general_profile_space`.
     pub profile_space: u8,
@@ -172,9 +172,7 @@ pub struct OperatingPointPtl {
     pub level_idc: u8,
 }
 impl OperatingPointPtl {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(
         profile_space: u8,
         tier_flag: bool,
@@ -196,7 +194,7 @@ impl OperatingPointPtl {
 
 /// One layer of an operating point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct OperatingPointLayer {
     /// `ptl_idx` (1-based into the PTL list; 0 = none).
     pub ptl_idx: u8,
@@ -208,9 +206,7 @@ pub struct OperatingPointLayer {
     pub is_alternate_output_layer: bool,
 }
 impl OperatingPointLayer {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(
         ptl_idx: u8,
         layer_id: u8,
@@ -228,7 +224,7 @@ impl OperatingPointLayer {
 
 /// One operating point of an `oinf` record.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct OperatingPoint {
     /// `output_layer_set_idx`.
     pub output_layer_set_idx: u16,
@@ -250,9 +246,7 @@ pub struct OperatingPoint {
     pub bit_rate: Option<(u32, u32)>,
 }
 impl OperatingPoint {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         output_layer_set_idx: u16,
@@ -281,7 +275,7 @@ impl OperatingPoint {
 
 /// One layer's dependency entry of an `oinf` record.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct LayerDependency {
     /// `layerID`.
     pub layer_id: u8,
@@ -291,9 +285,7 @@ pub struct LayerDependency {
     pub dimension_identifiers: Vec<(u8, u8)>,
 }
 impl LayerDependency {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(
         layer_id: u8,
         direct_ref_layer_ids: Vec<u8>,

@@ -241,7 +241,7 @@ impl FileType {
 
 /// What the declared brands say about the file layout.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct BrandClass {
     /// `mif1` / `heic` / `avif` / … — a `meta`-box image collection.
     pub image_collection: bool,
@@ -257,9 +257,7 @@ pub struct BrandClass {
     pub predictive_items: bool,
 }
 impl BrandClass {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(
         image_collection: bool,
         image_sequence: bool,

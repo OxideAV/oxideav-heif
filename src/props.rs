@@ -1222,7 +1222,7 @@ pub fn is_transformative_type(t: &FourCc) -> bool {
 /// One resolved association: the property, its 1-based `ipco` index and
 /// its `essential` flag.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct PropertyEntry {
     /// 1-based index into `ipco`.
     pub index: u16,
@@ -1232,9 +1232,7 @@ pub struct PropertyEntry {
     pub property: Property,
 }
 impl PropertyEntry {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(index: u16, essential: bool, property: Property) -> Self {
         Self {
             index,

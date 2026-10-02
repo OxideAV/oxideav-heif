@@ -492,7 +492,7 @@ pub fn primaries_conversion(from: u16, to: u16) -> Result<Mat3> {
 /// A linear-light RGB picture (three `f32` per pixel, row-major) in a
 /// given set of primaries; values may exceed 1 (HDR headroom).
 #[derive(Clone, Debug, PartialEq)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct LinearRgbImage {
     /// Width in pixels.
     pub width: u32,
@@ -504,9 +504,7 @@ pub struct LinearRgbImage {
     pub data: Vec<f32>,
 }
 impl LinearRgbImage {
-    /// Every field as a positional argument, in declaration order
-    /// (the struct is `#[non_exhaustive]`: build it here or from
-    /// `Default` where one exists, then read / assign its public fields).
+    /// Every field as a positional argument, in declaration order.
     pub fn new(width: u32, height: u32, primaries: u16, data: Vec<f32>) -> Self {
         Self {
             width,

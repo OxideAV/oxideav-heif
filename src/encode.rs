@@ -1536,7 +1536,7 @@ fn encode_grid_tiles(
 }
 
 /// Encode `frame` (any planar layout; converted to the codec's coding
-/// layout — see [`coding_picture`]) into a complete HEIF file per
+/// layout — 4:2:0 at the coded depth for HEVC, its own layout for AV1) into a complete HEIF file per
 /// `opts`. Returns the file bytes.
 pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> {
     frame.validate()?;
