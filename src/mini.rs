@@ -57,6 +57,7 @@ pub mod item_id {
 
 /// Pixel sample format of an image in the box.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SampleFormat {
     /// Unsigned integer samples of `bits` (8..=16).
     Integer {
@@ -88,6 +89,7 @@ impl SampleFormat {
 /// Chroma layout of an image in the box (Table O.4 plus the centring
 /// bits).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MiniChroma {
     /// `chroma_subsampling`: 0 = 4:0:0, 1 = 4:2:0, 2 = 4:2:2, 3 = 4:4:4.
     pub subsampling: u8,
@@ -96,10 +98,23 @@ pub struct MiniChroma {
     /// `chroma_is_vertically_centered` (4:2:0 only).
     pub vertically_centered: bool,
 }
+impl MiniChroma {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(subsampling: u8, horizontally_centered: bool, vertically_centered: bool) -> Self {
+        Self {
+            subsampling,
+            horizontally_centered,
+            vertically_centered,
+        }
+    }
+}
 
 /// The HDR signalling blocks (`clli` / `mdcv` / `cclv` / `amve` /
 /// `reve` / `ndwt` box *bodies*, O.3.3) attached to one image.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MiniHdrBoxes {
     /// `ContentLightLevelBox` body (4 bytes).
     pub clli: Option<Vec<u8>>,
@@ -115,6 +130,28 @@ pub struct MiniHdrBoxes {
     /// `NominalDiffuseWhiteBox` body (4 bytes, no FullBox header).
     pub ndwt: Option<Vec<u8>>,
 }
+impl MiniHdrBoxes {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        clli: Option<Vec<u8>>,
+        mdcv: Option<Vec<u8>>,
+        cclv: Option<Vec<u8>>,
+        amve: Option<Vec<u8>>,
+        reve: Option<Vec<u8>>,
+        ndwt: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            clli,
+            mdcv,
+            cclv,
+            amve,
+            reve,
+            ndwt,
+        }
+    }
+}
 
 impl MiniHdrBoxes {
     fn is_empty(&self) -> bool {
@@ -129,6 +166,7 @@ impl MiniHdrBoxes {
 
 /// The gain map of a `mini` box (`gainmap_flag` = 1).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MiniGainMap {
     /// `gainmap_width_minus1 + 1`.
     pub width: u32,
@@ -159,9 +197,45 @@ pub struct MiniGainMap {
     /// item" case).
     pub data: Vec<u8>,
 }
+impl MiniGainMap {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        width: u32,
+        height: u32,
+        matrix_coefficients: u8,
+        full_range: bool,
+        chroma: MiniChroma,
+        format: SampleFormat,
+        tmap_cicp: Option<(u8, u8, u8, bool)>,
+        tmap_icc: Option<Vec<u8>>,
+        tmap_hdr: MiniHdrBoxes,
+        metadata: Vec<u8>,
+        codec_config: Option<Vec<u8>>,
+        data: Vec<u8>,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            matrix_coefficients,
+            full_range,
+            chroma,
+            format,
+            tmap_cicp,
+            tmap_icc,
+            tmap_hdr,
+            metadata,
+            codec_config,
+            data,
+        }
+    }
+}
 
 /// A parsed `MinimizedImageBox` (O.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MinimizedImage {
     /// `infe_type` + `codec_config_type` when
     /// `explicit_codec_types_flag` (else inferred from the brand in
@@ -208,6 +282,59 @@ pub struct MinimizedImage {
     pub exif: Option<Vec<u8>>,
     /// XMP chunk.
     pub xmp: Option<Vec<u8>>,
+}
+impl MinimizedImage {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        explicit_codec_types: Option<(FourCc, FourCc)>,
+        format: SampleFormat,
+        full_range: bool,
+        chroma: MiniChroma,
+        orientation: u8,
+        width: u32,
+        height: u32,
+        explicit_cicp: Option<(u8, u8, u8)>,
+        icc: Option<Vec<u8>>,
+        alpha: bool,
+        alpha_premultiplied: bool,
+        hdr: bool,
+        hdr_boxes: MiniHdrBoxes,
+        gain_map: Option<MiniGainMap>,
+        main_codec_config: Vec<u8>,
+        main_data: Vec<u8>,
+        alpha_codec_config: Option<Vec<u8>>,
+        alpha_data: Vec<u8>,
+        exif_xmp_compressed: bool,
+        exif: Option<Vec<u8>>,
+        xmp: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            explicit_codec_types,
+            format,
+            full_range,
+            chroma,
+            orientation,
+            width,
+            height,
+            explicit_cicp,
+            icc,
+            alpha,
+            alpha_premultiplied,
+            hdr,
+            hdr_boxes,
+            gain_map,
+            main_codec_config,
+            main_data,
+            alpha_codec_config,
+            alpha_data,
+            exif_xmp_compressed,
+            exif,
+            xmp,
+        }
+    }
 }
 
 /// MSB-first bit reader over the `mini` payload.

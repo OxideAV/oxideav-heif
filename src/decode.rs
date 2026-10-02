@@ -45,6 +45,7 @@ pub const MAX_ITEM_DECODES: usize = 4096;
 /// What a `tmap` (tone-map) derived image item decodes to when it is
 /// the item being decoded (HEIF Amd 1 §6.6.2.4).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ToneMapOutput {
     /// The base input image (the SDR rendition an `altr`-aware reader
     /// without tone-map support displays); the decoded gain map rides
@@ -309,11 +310,20 @@ impl<'r> ItemDecoder<'r> {
 /// One reconstructed image of a coded item with the layer it belongs
 /// to (single-layer items: layer 0).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LayerFrame {
     /// `nuh_layer_id` of the output layer.
     pub layer_id: u8,
     /// The reconstructed (or, on [`DecodedImage::layers`], output) image.
     pub frame: HeifFrame,
+}
+impl LayerFrame {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(layer_id: u8, frame: HeifFrame) -> Self {
+        Self { layer_id, frame }
+    }
 }
 
 /// How an `lhv1` item decodes (HEIF B.2.2.1.3 / §6.5.11 / §6.5.29).
@@ -688,6 +698,7 @@ fn frame_from_planes(
 /// alpha auxiliary attached, plus the descriptive metadata a renderer
 /// needs.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct DecodedImage {
     /// The item that was decoded.
     pub item_id: u32,
@@ -728,9 +739,47 @@ pub struct DecodedImage {
     /// §6.5.11: the selected layer is the item's one image).
     pub layers: Vec<LayerFrame>,
 }
+impl DecodedImage {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        item_id: u32,
+        frame: HeifFrame,
+        premultiplied_alpha: bool,
+        depth: Option<HeifFrame>,
+        nclx: Colr,
+        nclx_explicit: bool,
+        icc_profile: Option<Vec<u8>>,
+        exif: Option<Vec<u8>>,
+        xmp: Option<String>,
+        thumbnail_ids: Vec<u32>,
+        properties: ItemProperties,
+        gain_map: Option<GainMapAttachment>,
+        layers: Vec<LayerFrame>,
+    ) -> Self {
+        Self {
+            item_id,
+            frame,
+            premultiplied_alpha,
+            depth,
+            nclx,
+            nclx_explicit,
+            icc_profile,
+            exif,
+            xmp,
+            thumbnail_ids,
+            properties,
+            gain_map,
+            layers,
+        }
+    }
+}
 
 /// A decoded gain map and its metadata (see [`DecodedImage::gain_map`]).
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct GainMapAttachment {
     /// The `tmap` item.
     pub tmap_item_id: u32,
@@ -745,6 +794,28 @@ pub struct GainMapAttachment {
     /// The alternate image's colour information (the `tmap` item's
     /// `nclx`), when any.
     pub alternate_colr: Option<Colr>,
+}
+impl GainMapAttachment {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        tmap_item_id: u32,
+        gain_map_item_id: u32,
+        metadata: crate::gainmap::GainMapMetadata,
+        frame: HeifFrame,
+        colr: Option<Colr>,
+        alternate_colr: Option<Colr>,
+    ) -> Self {
+        Self {
+            tmap_item_id,
+            gain_map_item_id,
+            metadata,
+            frame,
+            colr,
+            alternate_colr,
+        }
+    }
 }
 
 impl DecodedImage {

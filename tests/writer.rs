@@ -38,10 +38,7 @@ fn picture(w: u32, h: u32) -> HeifFrame {
 }
 
 fn lossless() -> EncodeOptions {
-    EncodeOptions {
-        hevc_mode: "pcm".into(),
-        ..EncodeOptions::default()
-    }
+    EncodeOptions::default().with_hevc_mode("pcm".into())
 }
 
 #[test]
@@ -94,13 +91,11 @@ fn grid_thumbnail_alpha_metadata_round_trip() {
         }
     }
     src = src.with_alpha_plane(&alpha).unwrap();
-    let opts = EncodeOptions {
-        grid_tile: Some(32),
-        thumbnail_max_dim: Some(20),
-        exif: Some(b"II*\0\x08\0\0\0\0\0".to_vec()),
-        xmp: Some("<x:xmpmeta>t</x:xmpmeta>".into()),
-        ..lossless()
-    };
+    let opts = lossless()
+        .with_grid_tile(Some(32))
+        .with_thumbnail_max_dim(Some(20))
+        .with_exif(Some(b"II*\0\x08\0\0\0\0\0".to_vec()))
+        .with_xmp(Some("<x:xmpmeta>t</x:xmpmeta>".into()));
     let bytes = encode_still(&src, &opts).unwrap();
     let f = HeifFile::parse(&bytes).unwrap();
     let meta = f.meta().unwrap();
@@ -128,13 +123,10 @@ fn grid_thumbnail_alpha_metadata_round_trip() {
 #[test]
 fn transforms_are_written_as_essential_properties_on_the_coded_item() {
     let src = picture(48, 32);
-    let opts = EncodeOptions {
-        transforms: vec![
-            Property::Irot(Irot { angle: 1 }),
-            Property::Imir(Imir { axis: 1 }),
-        ],
-        ..lossless()
-    };
+    let opts = lossless().with_transforms(vec![
+        Property::Irot(Irot::new(1)),
+        Property::Imir(Imir::new(1)),
+    ]);
     let bytes = encode_still(&src, &opts).unwrap();
     let f = HeifFile::parse(&bytes).unwrap();
     // The transforms ride on the coded item itself (essential
@@ -153,8 +145,8 @@ fn transforms_are_written_as_essential_properties_on_the_coded_item() {
     assert!(rep.is_conformant(), "{:#?}", rep.violations);
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     let expect = oxideav_heif::compose::apply_imir(
-        &oxideav_heif::compose::apply_irot(&src, &Irot { angle: 1 }).unwrap(),
-        &Imir { axis: 1 },
+        &oxideav_heif::compose::apply_irot(&src, &Irot::new(1)).unwrap(),
+        &Imir::new(1),
     )
     .unwrap();
     assert_eq!(img.frame, expect);
@@ -170,10 +162,7 @@ fn transforms_are_written_as_essential_properties_on_the_coded_item() {
         vec![
             (pic.config.clone(), true),
             (
-                Property::Ispe(oxideav_heif::props::Ispe {
-                    width: 48,
-                    height: 32,
-                }),
+                Property::Ispe(oxideav_heif::props::Ispe::new(48, 32)),
                 false,
             ),
             (
@@ -187,13 +176,10 @@ fn transforms_are_written_as_essential_properties_on_the_coded_item() {
         base,
         vec![
             (
-                Property::Ispe(oxideav_heif::props::Ispe {
-                    width: 48,
-                    height: 32,
-                }),
+                Property::Ispe(oxideav_heif::props::Ispe::new(48, 32)),
                 false,
             ),
-            (Property::Irot(Irot { angle: 1 }), true),
+            (Property::Irot(Irot::new(1)), true),
         ],
     );
     w.set_primary(iden);
@@ -205,10 +191,7 @@ fn transforms_are_written_as_essential_properties_on_the_coded_item() {
 #[test]
 fn av1_round_trip_is_exact() {
     let src = picture(64, 32);
-    let opts = EncodeOptions {
-        codec: StillCodec::Av1,
-        ..EncodeOptions::default()
-    };
+    let opts = EncodeOptions::default().with_codec(StillCodec::Av1);
     let bytes = encode_still(&src, &opts).unwrap();
     let f = HeifFile::parse(&bytes).unwrap();
     assert!(f.file_type.has_brand(b"avif"));
@@ -310,10 +293,7 @@ fn av1_native_layouts_and_quality() {
             }
         }
     }
-    let av1 = EncodeOptions {
-        codec: StillCodec::Av1,
-        ..EncodeOptions::default()
-    };
+    let av1 = EncodeOptions::default().with_codec(StillCodec::Av1);
     let f = HeifFile::from_vec(encode_still(&ten, &av1).unwrap()).unwrap();
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     assert_eq!(img.frame, ten, "10-bit 4:2:0 lossless");
@@ -352,10 +332,7 @@ fn av1_native_layouts_and_quality() {
     let lossless = encode_still(&src.without_alpha(), &av1).unwrap();
     let lossy = encode_still(
         &src.without_alpha(),
-        &EncodeOptions {
-            av1_quality: Some(40),
-            ..av1.clone()
-        },
+        &av1.clone().with_av1_quality(Some(40)),
     )
     .unwrap();
     assert!(
@@ -379,14 +356,7 @@ fn av1_native_layouts_and_quality() {
     let psnr = 10.0 * (255.0f64 * 255.0 / mse).log10();
     assert!(psnr >= 30.0, "quality 40 PSNR {psnr:.1} dB");
     // quality 100 through the dial is lossless too.
-    let q100 = encode_still(
-        &src.without_alpha(),
-        &EncodeOptions {
-            av1_quality: Some(100),
-            ..av1
-        },
-    )
-    .unwrap();
+    let q100 = encode_still(&src.without_alpha(), &av1.with_av1_quality(Some(100))).unwrap();
     let img = decode_primary(&HeifFile::parse(&q100).unwrap(), ItemDecoder::direct()).unwrap();
     assert_eq!(img.frame, src.without_alpha());
 }
@@ -407,58 +377,22 @@ fn amd1_entity_groups_and_properties_round_trip() {
         let mut props = vec![
             (pic.config.clone(), true),
             (
-                Property::Ispe(oxideav_heif::props::Ispe {
-                    width: 64,
-                    height: 48,
-                }),
+                Property::Ispe(oxideav_heif::props::Ispe::new(64, 48)),
                 false,
             ),
         ];
         if i == 0 {
             props.push((
-                Property::Reve(Reve {
-                    surround_luminance: 50_000,
-                    surround_light_x: 3127,
-                    surround_light_y: 3290,
-                    periphery_luminance: 10_000,
-                    periphery_light_x: 3127,
-                    periphery_light_y: 3290,
-                }),
+                Property::Reve(Reve::new(50_000, 3127, 3290, 10_000, 3127, 3290)),
                 false,
             ));
+            props.push((Property::Ndwt(Ndwt::new(2_030_000)), false));
+            props.push((Property::Dadj(Dadj::new(-25)), false));
             props.push((
-                Property::Ndwt(Ndwt {
-                    diffuse_white_luminance: 2_030_000,
-                }),
+                Property::Stag(Stag::new(vec![StereoAggressor::new(4, 90, None)])),
                 false,
             ));
-            props.push((
-                Property::Dadj(Dadj {
-                    disparity_adjustment: -25,
-                }),
-                false,
-            ));
-            props.push((
-                Property::Stag(Stag {
-                    aggressors: vec![StereoAggressor {
-                        aggressor_type: 4,
-                        severity: 90,
-                        sub_type_uri: None,
-                    }],
-                }),
-                false,
-            ));
-            props.push((
-                Property::Cexg(Cexg {
-                    rows: 1,
-                    columns: 1,
-                    tile_width: 64,
-                    tile_height: 48,
-                    large_fields: false,
-                    extent_config: None,
-                }),
-                false,
-            ));
+            props.push((Property::Cexg(Cexg::new(1, 1, 64, 48, false, None)), false));
         }
         ids.push(w.add_coded_item(*b"hvc1", pic.data.clone(), props));
     }
@@ -546,12 +480,10 @@ fn hevc_rd_and_tiles_choose_the_ctb_automatically() {
         (Some(1), Some("4x2"), None),
         (Some(0), Some("2x2"), Some(16)),
     ] {
-        let opts = EncodeOptions {
-            hevc_rd: rd,
-            hevc_tiles: tiles.map(str::to_string),
-            hevc_ctb: ctb,
-            ..EncodeOptions::default()
-        };
+        let opts = EncodeOptions::default()
+            .with_hevc_rd(rd)
+            .with_hevc_tiles(tiles.map(str::to_string))
+            .with_hevc_ctb(ctb);
         let bytes = encode_still(&src, &opts).unwrap_or_else(|e| panic!("{rd:?} {tiles:?}: {e}"));
         let img = decode_primary(&HeifFile::parse(&bytes).unwrap(), ItemDecoder::direct()).unwrap();
         assert_eq!((img.width(), img.height()), (128, 96));
@@ -656,10 +588,7 @@ fn region_groups_round_trip_and_are_checked() {
         let other = w.add_identity(
             master,
             vec![(
-                Property::Ispe(oxideav_heif::props::Ispe {
-                    width: 64,
-                    height: 48,
-                }),
+                Property::Ispe(oxideav_heif::props::Ispe::new(64, 48)),
                 false,
             )],
         );

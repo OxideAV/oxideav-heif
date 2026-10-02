@@ -18,6 +18,7 @@ use crate::props::Colr;
 /// An interleaved RGB / RGBA picture, one `u16` per sample holding
 /// `bit_depth` significant bits.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RgbImage {
     /// Width in pixels.
     pub width: u32,
@@ -29,6 +30,20 @@ pub struct RgbImage {
     pub bit_depth: u8,
     /// `width × height × channels` samples, row-major.
     pub data: Vec<u16>,
+}
+impl RgbImage {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(width: u32, height: u32, channels: usize, bit_depth: u8, data: Vec<u16>) -> Self {
+        Self {
+            width,
+            height,
+            channels,
+            bit_depth,
+            data,
+        }
+    }
 }
 
 impl RgbImage {

@@ -29,6 +29,7 @@ pub const MAX_WALK_BOXES: usize = 1 << 20;
 /// payloads are borrowed from the bytes wherever an item is one
 /// contiguous span.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct HeifFile<D = Vec<u8>> {
     data: D,
     /// The equivalent file of a low-overhead (`mini`) input.

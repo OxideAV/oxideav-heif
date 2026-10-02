@@ -57,12 +57,12 @@ fn main() {
             "--thumb" => opts.thumbnail_max_dim = Some(next(&mut i).parse().unwrap()),
             "--alpha" => alpha = true,
             "--gray" => gray = true,
-            "--irot" => opts.transforms.push(Property::Irot(Irot {
-                angle: next(&mut i).parse().unwrap(),
-            })),
-            "--imir" => opts.transforms.push(Property::Imir(Imir {
-                axis: next(&mut i).parse().unwrap(),
-            })),
+            "--irot" => opts
+                .transforms
+                .push(Property::Irot(Irot::new(next(&mut i).parse().unwrap()))),
+            "--imir" => opts
+                .transforms
+                .push(Property::Imir(Imir::new(next(&mut i).parse().unwrap()))),
             "--clap" => clap = true,
             "--exif" => {
                 // Minimal little-endian TIFF header + one IFD with an
@@ -136,11 +136,7 @@ fn main() {
         let entries: Vec<oxideav_heif::props::PropertyEntry> = opts
             .transforms
             .iter()
-            .map(|t| oxideav_heif::props::PropertyEntry {
-                property: t.clone(),
-                essential: true,
-                index: 0,
-            })
+            .map(|t| oxideav_heif::props::PropertyEntry::new(0, true, t.clone()))
             .collect();
         let shown = oxideav_heif::compose::apply_transforms(&conv, entries.iter(), false).unwrap();
         let rgb = oxideav_heif::rgb::to_rgb(&shown, Some(&opts.colr)).unwrap();
@@ -180,8 +176,8 @@ fn encode_via_framework(src: &HeifFrame, opts: &EncodeOptions) -> Vec<u8> {
         .set(
             "codec",
             match opts.codec {
-                StillCodec::Hevc => "hevc",
                 StillCodec::Av1 => "av1",
+                _ => "hevc",
             },
         )
         .set("mode", opts.hevc_mode.as_str())

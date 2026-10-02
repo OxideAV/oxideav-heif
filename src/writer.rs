@@ -1288,6 +1288,7 @@ fn ensure_ispe(props: &mut Vec<(Property, bool)>, w: u32, h: u32) {
 #[doc(hidden)]
 /// One sample queued for an image-sequence track.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SequenceSample {
     /// Coded sample bytes (length-prefixed NAL units / an AV1 TU).
     pub data: Vec<u8>,
@@ -1296,12 +1297,25 @@ pub struct SequenceSample {
     /// Sync sample.
     pub sync: bool,
 }
+impl SequenceSample {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(data: Vec<u8>, duration: u32, sync: bool) -> Self {
+        Self {
+            data,
+            duration,
+            sync,
+        }
+    }
+}
 
 /// An alpha auxiliary track for [`SequenceWriter`] (HEIF §7.5.3): a
 /// second `pict`-timed track with handler `auxv`, an `auxl` track
 /// reference to the master, and an `auxi` in its sample entry; sample
 /// `i` is time-parallel to the master's sample `i` (same durations).
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SequenceAlphaTrack {
     /// Sample entry type (`hvc1` / `av01` / `avc1`).
     pub entry_type: FourCc,
@@ -1318,9 +1332,34 @@ pub struct SequenceAlphaTrack {
     /// Extra sample-entry children.
     pub entry_properties: Vec<Property>,
 }
+impl SequenceAlphaTrack {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        entry_type: FourCc,
+        config: Property,
+        width: u16,
+        height: u16,
+        aux_type: String,
+        samples: Vec<SequenceSample>,
+        entry_properties: Vec<Property>,
+    ) -> Self {
+        Self {
+            entry_type,
+            config,
+            width,
+            height,
+            aux_type,
+            samples,
+            entry_properties,
+        }
+    }
+}
 
 /// Builder for an image-sequence file (`msf1`).
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SequenceWriter {
     /// Media timescale.
     pub timescale: u32,
@@ -1361,6 +1400,7 @@ pub struct SequenceWriter {
     /// with the all-ones (indefinite) track duration.
     pub looping: Option<crate::sequence::LoopBehaviour>,
 }
+impl SequenceWriter {}
 
 impl SequenceWriter {
     /// New sequence writer; `config` must be an `HvcC` or `Av1C` property.

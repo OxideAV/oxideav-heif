@@ -166,17 +166,9 @@ fn avc1_items_decode_byte_exact_against_the_black_box_decoder() {
             data,
             vec![
                 (Property::AvcC(cfg.clone()), true),
+                (Property::Ispe(Ispe::new(w, h)), false),
                 (
-                    Property::Ispe(Ispe {
-                        width: w,
-                        height: h,
-                    }),
-                    false,
-                ),
-                (
-                    Property::Pixi(Pixi {
-                        bits_per_channel: vec![depth; chroma.colour_planes()],
-                    }),
+                    Property::Pixi(Pixi::new(vec![depth; chroma.colour_planes()])),
                     false,
                 ),
                 (Property::Colr(Colr::MIAF_DEFAULT), false),
@@ -255,10 +247,7 @@ fn avc1_items_decode_byte_exact_against_the_black_box_decoder() {
 #[test]
 fn lhv1_base_layer_decodes_and_enhancement_layers_refuse_typed() {
     let src = picture(64, 48, Chroma::Yuv420, 8);
-    let opts = EncodeOptions {
-        hevc_mode: "pcm".into(),
-        ..EncodeOptions::default()
-    };
+    let opts = EncodeOptions::default().with_hevc_mode("pcm".into());
     let hevc = HeifFile::from_vec(encode_still(&src, &opts).unwrap()).unwrap();
     let base = decode_primary(&hevc, ItemDecoder::direct()).unwrap();
     let meta = hevc.meta().unwrap();
@@ -275,61 +264,31 @@ fn lhv1_base_layer_decodes_and_enhancement_layers_refuse_typed() {
     layered.push(enh);
     let refs: Vec<&[u8]> = layered.iter().map(Vec::as_slice).collect();
     let au_layered = oxideav_heif::hvcc::join_length_prefixed(&refs, 4).unwrap();
-    let lhvc = LhevcConfig {
-        configuration_version: 1,
-        min_spatial_segmentation_idc: 0,
-        parallelism_type: 0,
-        num_temporal_layers: 1,
-        temporal_id_nested: true,
-        length_size: 4,
-        arrays: hvcc.arrays.clone(),
-        raw: Vec::new(),
+    let lhvc = LhevcConfig::new(1, 0, 0, 1, true, 4, hvcc.arrays.clone(), Vec::new());
+    let layer = |id: u8, out: bool| OperatingPointLayer::new(1, id, out, false);
+    let op = |ols: u16, layers: Vec<OperatingPointLayer>| {
+        OperatingPoint::new(ols, 0, layers, (64, 48), (64, 48), 1, 0, None, None)
     };
-    let layer = |id: u8, out: bool| OperatingPointLayer {
-        ptl_idx: 1,
-        layer_id: id,
-        is_output_layer: out,
-        is_alternate_output_layer: false,
-    };
-    let op = |ols: u16, layers: Vec<OperatingPointLayer>| OperatingPoint {
-        output_layer_set_idx: ols,
-        max_temporal_id: 0,
-        layers,
-        min_pic_size: (64, 48),
-        max_pic_size: (64, 48),
-        max_chroma_format: 1,
-        max_bit_depth_minus8: 0,
-        frame_rate: None,
-        bit_rate: None,
-    };
-    let oinf = OperatingPoints {
-        scalability_mask: 0b100,
-        ptls: vec![OperatingPointPtl {
-            profile_space: 0,
-            tier_flag: false,
-            profile_idc: hvcc.general_profile_idc,
-            profile_compatibility_flags: hvcc.general_profile_compatibility_flags,
-            constraint_indicator_flags: hvcc.general_constraint_indicator_flags,
-            level_idc: hvcc.general_level_idc,
-        }],
-        operating_points: vec![
+    let oinf = OperatingPoints::new(
+        0b100,
+        vec![OperatingPointPtl::new(
+            0,
+            false,
+            hvcc.general_profile_idc,
+            hvcc.general_profile_compatibility_flags,
+            hvcc.general_constraint_indicator_flags,
+            hvcc.general_level_idc,
+        )],
+        vec![
             op(0, vec![layer(0, true)]),
             op(1, vec![layer(0, false), layer(1, true)]),
         ],
-        layers: vec![
-            LayerDependency {
-                layer_id: 0,
-                direct_ref_layer_ids: vec![],
-                dimension_identifiers: vec![(2, 0)],
-            },
-            LayerDependency {
-                layer_id: 1,
-                direct_ref_layer_ids: vec![0],
-                dimension_identifiers: vec![(2, 1)],
-            },
+        vec![
+            LayerDependency::new(0, vec![], vec![(2, 0)]),
+            LayerDependency::new(1, vec![0], vec![(2, 1)]),
         ],
-        raw: Vec::new(),
-    };
+        Vec::new(),
+    );
     let build = |tols: u16| {
         let mut w = HeifWriter::new();
         let id = w.add_coded_item(
@@ -339,19 +298,8 @@ fn lhv1_base_layer_decodes_and_enhancement_layers_refuse_typed() {
                 (Property::LhvC(lhvc.clone()), true),
                 (Property::Oinf(oinf.clone()), false),
                 (Property::Tols(tols), true),
-                (
-                    Property::Ispe(Ispe {
-                        width: 64,
-                        height: 48,
-                    }),
-                    false,
-                ),
-                (
-                    Property::Pixi(Pixi {
-                        bits_per_channel: vec![8, 8, 8],
-                    }),
-                    false,
-                ),
+                (Property::Ispe(Ispe::new(64, 48)), false),
+                (Property::Pixi(Pixi::new(vec![8, 8, 8])), false),
                 (Property::Colr(Colr::MIAF_DEFAULT), false),
             ],
         );

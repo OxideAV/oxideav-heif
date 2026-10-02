@@ -33,18 +33,36 @@ pub const AUX_URN_DEPTH_HEVC: &str = "urn:mpeg:hevc:2015:auxid:2";
 
 /// `ispe` (§6.5.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Ispe {
     /// `image_width` of the reconstructed image.
     pub width: u32,
     /// `image_height` of the reconstructed image.
     pub height: u32,
 }
+impl Ispe {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+}
 
 /// `pixi` (§6.5.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Pixi {
     /// `bits_per_channel[]`.
     pub bits_per_channel: Vec<u8>,
+}
+impl Pixi {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(bits_per_channel: Vec<u8>) -> Self {
+        Self { bits_per_channel }
+    }
 }
 
 impl Pixi {
@@ -61,6 +79,7 @@ impl Pixi {
 
 /// `colr` (§6.5.5; ISO/IEC 14496-12 §12.1.5).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Colr {
     /// `nclx`: CICP code points (ISO/IEC 23091-2 / H.273).
     Nclx {
@@ -107,11 +126,23 @@ impl Colr {
 
 /// `pasp` (§6.5.4; ISO/IEC 14496-12 §12.1.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Pasp {
     /// `hSpacing`.
     pub h_spacing: u32,
     /// `vSpacing`.
     pub v_spacing: u32,
+}
+impl Pasp {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(h_spacing: u32, v_spacing: u32) -> Self {
+        Self {
+            h_spacing,
+            v_spacing,
+        }
+    }
 }
 
 impl Pasp {
@@ -125,6 +156,7 @@ impl Pasp {
 /// 32-bit fields interpreted as two's complement (a centre offset can
 /// be negative).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Clap {
     /// `cleanApertureWidthN`.
     pub width_n: u32,
@@ -142,6 +174,33 @@ pub struct Clap {
     pub vert_off_n: i32,
     /// `vertOffD`.
     pub vert_off_d: u32,
+}
+impl Clap {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        width_n: u32,
+        width_d: u32,
+        height_n: u32,
+        height_d: u32,
+        horiz_off_n: i32,
+        horiz_off_d: u32,
+        vert_off_n: i32,
+        vert_off_d: u32,
+    ) -> Self {
+        Self {
+            width_n,
+            width_d,
+            height_n,
+            height_d,
+            horiz_off_n,
+            horiz_off_d,
+            vert_off_n,
+            vert_off_d,
+        }
+    }
 }
 
 /// A resolved clean-aperture rectangle in pixels of the input image.
@@ -266,21 +325,40 @@ impl Clap {
 
 /// `irot` (§6.5.10): `angle × 90°` anti-clockwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Irot {
     /// `angle` in `0..=3`.
     pub angle: u8,
+}
+impl Irot {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(angle: u8) -> Self {
+        Self { angle }
+    }
 }
 
 /// `imir` (§6.5.12): `axis` 0 = vertical mirror (top/bottom exchanged),
 /// 1 = horizontal mirror (left/right exchanged).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Imir {
     /// `axis`.
     pub axis: u8,
 }
+impl Imir {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(axis: u8) -> Self {
+        Self { axis }
+    }
+}
 
 /// `iscl` (§6.5.13).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Iscl {
     /// `target_width_numerator`.
     pub width_num: u16,
@@ -290,6 +368,19 @@ pub struct Iscl {
     pub height_num: u16,
     /// `target_height_denominator`.
     pub height_den: u16,
+}
+impl Iscl {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(width_num: u16, width_den: u16, height_num: u16, height_den: u16) -> Self {
+        Self {
+            width_num,
+            width_den,
+            height_num,
+            height_den,
+        }
+    }
 }
 
 impl Iscl {
@@ -314,6 +405,7 @@ impl Iscl {
 
 /// Kind of an auxiliary image, from its `auxC` URN.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AuxKind {
     /// Alpha plane (either URN family).
     Alpha,
@@ -325,11 +417,23 @@ pub enum AuxKind {
 
 /// `auxC` (§6.5.8).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AuxC {
     /// `aux_type` URN.
     pub aux_type: String,
     /// `aux_subtype` bytes (HEVC: `HEVCAuxConfigSubType`, Annex B.2.4).
     pub aux_subtype: Vec<u8>,
+}
+impl AuxC {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(aux_type: String, aux_subtype: Vec<u8>) -> Self {
+        Self {
+            aux_type,
+            aux_subtype,
+        }
+    }
 }
 
 impl AuxC {
@@ -346,11 +450,23 @@ impl AuxC {
 /// `clli` — content light level (ISO/IEC 14496-12 §12.1.6, a plain
 /// 4-byte Box; H.265 D.3.35 semantics, CTA-861-G zero = unknown).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Clli {
     /// `max_content_light_level` (MaxCLL, cd/m²).
     pub max_content_light_level: u16,
     /// `max_pic_average_light_level` (MaxFALL, cd/m²).
     pub max_pic_average_light_level: u16,
+}
+impl Clli {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(max_content_light_level: u16, max_pic_average_light_level: u16) -> Self {
+        Self {
+            max_content_light_level,
+            max_pic_average_light_level,
+        }
+    }
 }
 
 /// `mdcv` — mastering display colour volume (ISO/IEC 14496-12 §12.1.7:
@@ -358,6 +474,7 @@ pub struct Clli {
 /// pairs, chromaticity in 0.00002 steps, luminance in 0.0001 cd/m²;
 /// semantics of the H.265 D.3.28 SEI, primaries in G, B, R order).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Mdcv {
     /// `(display_primaries_x, display_primaries_y)[c]`, `c` = 0..3 in
     /// file order (G, B, R).
@@ -369,6 +486,24 @@ pub struct Mdcv {
     /// `min_display_mastering_luminance`.
     pub min_luminance: u32,
 }
+impl Mdcv {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        display_primaries: [(u16, u16); 3],
+        white_point: (u16, u16),
+        max_luminance: u32,
+        min_luminance: u32,
+    ) -> Self {
+        Self {
+            display_primaries,
+            white_point,
+            max_luminance,
+            min_luminance,
+        }
+    }
+}
 
 /// `cclv` — content colour volume (ISO/IEC 14496-12 §12.1.8: one flag
 /// byte — `ccv_cancel_flag`, `ccv_persistence_flag`, three presence
@@ -376,6 +511,7 @@ pub struct Mdcv {
 /// and the present luminance values; semantics of the H.265 D.3.40
 /// SEI, where in a sample entry the two leading flags are 0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Cclv {
     /// `ccv_cancel_flag`.
     pub cancel: bool,
@@ -390,10 +526,33 @@ pub struct Cclv {
     /// `ccv_avg_luminance_value` when present.
     pub avg_luminance: Option<u32>,
 }
+impl Cclv {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        cancel: bool,
+        persistence: bool,
+        primaries: Option<[(i32, i32); 3]>,
+        min_luminance: Option<u32>,
+        max_luminance: Option<u32>,
+        avg_luminance: Option<u32>,
+    ) -> Self {
+        Self {
+            cancel,
+            persistence,
+            primaries,
+            min_luminance,
+            max_luminance,
+            avg_luminance,
+        }
+    }
+}
 
 /// `amve` — ambient viewing environment (HEIF §6.5.36 / ISO/IEC
 /// 14496-12 §12.1.9: a plain 8-byte Box; H.265 D.3.39 semantics).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Amve {
     /// `ambient_illuminance` (0.0001 lux).
     pub ambient_illuminance: u32,
@@ -402,56 +561,129 @@ pub struct Amve {
     /// `ambient_light_y` (× 50000).
     pub ambient_light_y: u16,
 }
+impl Amve {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(ambient_illuminance: u32, ambient_light_x: u16, ambient_light_y: u16) -> Self {
+        Self {
+            ambient_illuminance,
+            ambient_light_x,
+            ambient_light_y,
+        }
+    }
+}
 
 /// `rloc` (§6.5.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Rloc {
     /// `horizontal_offset`.
     pub horizontal_offset: u32,
     /// `vertical_offset`.
     pub vertical_offset: u32,
 }
+impl Rloc {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(horizontal_offset: u32, vertical_offset: u32) -> Self {
+        Self {
+            horizontal_offset,
+            vertical_offset,
+        }
+    }
+}
 
 /// `lsel` (§6.5.11).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Lsel {
     /// `layer_id`.
     pub layer_id: u16,
 }
+impl Lsel {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(layer_id: u16) -> Self {
+        Self { layer_id }
+    }
+}
 
 /// `a1op` — AV1 operating point selector (AVIF §4.3.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct A1op {
     /// `op_index`.
     pub op_index: u8,
 }
+impl A1op {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(op_index: u8) -> Self {
+        Self { op_index }
+    }
+}
 
 /// `a1lx` — AV1 layered image indexing (AVIF §4.3.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct A1lx {
     /// `large_size` flag (32-bit sizes).
     pub large_size: bool,
     /// `layer_size[3]` in bytes (0 = layer absent / last).
     pub layer_size: [u32; 3],
 }
+impl A1lx {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(large_size: bool, layer_size: [u32; 3]) -> Self {
+        Self {
+            large_size,
+            layer_size,
+        }
+    }
+}
 
 /// `rref` (§6.5.17).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Rref {
     /// `reference_type[]`.
     pub reference_types: Vec<FourCc>,
+}
+impl Rref {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(reference_types: Vec<FourCc>) -> Self {
+        Self { reference_types }
+    }
 }
 
 /// `crtt` / `mdft` (§6.5.18 / §6.5.19): a time in microseconds since
 /// 1904-01-01T00:00:00Z when `version == 0`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TimeInfo {
     /// The 64-bit timestamp field.
     pub time: u64,
 }
+impl TimeInfo {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(time: u64) -> Self {
+        Self { time }
+    }
+}
 
 /// `udes` (§6.5.20).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Udes {
     /// `lang`.
     pub lang: String,
@@ -462,20 +694,43 @@ pub struct Udes {
     /// `tags` (comma separated per the spec).
     pub tags: String,
 }
+impl Udes {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(lang: String, name: String, description: String, tags: String) -> Self {
+        Self {
+            lang,
+            name,
+            description,
+            tags,
+        }
+    }
+}
 
 /// `altt` (§6.5.21).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Altt {
     /// `alt_text`.
     pub alt_text: String,
     /// `alt_lang`.
     pub alt_lang: String,
 }
+impl Altt {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(alt_text: String, alt_lang: String) -> Self {
+        Self { alt_text, alt_lang }
+    }
+}
 
 /// `reve` — reference viewing environment (HEIF Amd 1:2025 §6.5.44):
 /// luminance (0.0001 cd/m²) and CIE 1931 chromaticity (0.0001 steps,
 /// 0..=10000) of the display's surround and periphery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Reve {
     /// `surround_luminance`.
     pub surround_luminance: u32,
@@ -490,19 +745,53 @@ pub struct Reve {
     /// `periphery_light_y`.
     pub periphery_light_y: u16,
 }
+impl Reve {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        surround_luminance: u32,
+        surround_light_x: u16,
+        surround_light_y: u16,
+        periphery_luminance: u32,
+        periphery_light_x: u16,
+        periphery_light_y: u16,
+    ) -> Self {
+        Self {
+            surround_luminance,
+            surround_light_x,
+            surround_light_y,
+            periphery_luminance,
+            periphery_light_x,
+            periphery_light_y,
+        }
+    }
+}
 
 /// `ndwt` — nominal diffuse white (HEIF Amd 1:2025 §6.5.45).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Ndwt {
     /// `diffuse_white_luminance` in 0.0001 cd/m²; 0 = the ISO/TS
     /// 22028-5 default.
     pub diffuse_white_luminance: u32,
+}
+impl Ndwt {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(diffuse_white_luminance: u32) -> Self {
+        Self {
+            diffuse_white_luminance,
+        }
+    }
 }
 
 /// `cexg` — constrained extents grid (HEIF Amd 1:2025 §6.5.41): every
 /// `iloc` extent of the item is one independently decodable tile of a
 /// `rows × columns` grid in row-major order.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Cexg {
     /// `rows_minus_one + 1`.
     pub rows: u32,
@@ -518,6 +807,28 @@ pub struct Cexg {
     /// `tile_config_info_present_flag` is set (codec-specific, raw).
     pub extent_config: Option<Vec<u8>>,
 }
+impl Cexg {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        rows: u32,
+        columns: u32,
+        tile_width: u32,
+        tile_height: u32,
+        large_fields: bool,
+        extent_config: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            rows,
+            columns,
+            tile_width,
+            tile_height,
+            large_fields,
+            extent_config,
+        }
+    }
+}
 
 impl Cexg {
     /// The number of extents / tiles the property announces.
@@ -529,13 +840,25 @@ impl Cexg {
 /// `dadj` — disparity adjustment for a stereo pair (HEIF Amd 1:2025
 /// §6.5.42), in units of 1/10 000 image widths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Dadj {
     /// `disparity_adjustment`.
     pub disparity_adjustment: i32,
 }
+impl Dadj {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(disparity_adjustment: i32) -> Self {
+        Self {
+            disparity_adjustment,
+        }
+    }
+}
 
 /// One stereo aggressor (HEIF Amd 1:2025 §6.5.43).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StereoAggressor {
     /// `aggressor_type` (Table 1: 0 unspecified, 1 lens occlusion, 2
     /// image condition mismatch, 3 stereo window violation, 4 objects
@@ -548,17 +871,39 @@ pub struct StereoAggressor {
     /// `sub_type_uri` when `sub_type_present`.
     pub sub_type_uri: Option<String>,
 }
+impl StereoAggressor {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(aggressor_type: u8, severity: u8, sub_type_uri: Option<String>) -> Self {
+        Self {
+            aggressor_type,
+            severity,
+            sub_type_uri,
+        }
+    }
+}
 
 /// `stag` — stereo aggressors (HEIF Amd 1:2025 §6.5.43).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Stag {
     /// The aggressors (one or more).
     pub aggressors: Vec<StereoAggressor>,
+}
+impl Stag {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(aggressors: Vec<StereoAggressor>) -> Self {
+        Self { aggressors }
+    }
 }
 
 /// Per-channel description of a `pixi` with `px_flags & 1` (HEIF Amd
 /// 2:2026 §6.5.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PixiChannel {
     /// `channel_idc` (Table 13: 0 unused, 1 unspecified, 2 / 3 / 4
     /// first / second / third colour channel, 5 alpha, 6 depth, 7
@@ -573,20 +918,48 @@ pub struct PixiChannel {
     /// `channel_label` when `channel_label_flag` is set.
     pub label: Option<String>,
 }
+impl PixiChannel {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        channel_idc: u8,
+        component_format: u8,
+        subsampling: Option<(u8, u8)>,
+        label: Option<String>,
+    ) -> Self {
+        Self {
+            channel_idc,
+            component_format,
+            subsampling,
+            label,
+        }
+    }
+}
 
 /// `pixi` with the Amd 2:2026 per-channel extension (`px_flags & 1`):
 /// the depths plus content / format / subsampling per channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PixiExtended {
     /// The depths (`num_channels` × `bits_per_channel`).
     pub pixi: Pixi,
     /// One entry per channel, in `bits_per_channel` order.
     pub channels: Vec<PixiChannel>,
 }
+impl PixiExtended {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(pixi: Pixi, channels: Vec<PixiChannel>) -> Self {
+        Self { pixi, channels }
+    }
+}
 
 /// `tilC` — tiled image configuration (HEIF Amd 2:2026 §6.11.3), the
 /// mandatory property of a `tili` item.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TilC {
     /// `tile_width`.
     pub tile_width: u32,
@@ -598,6 +971,24 @@ pub struct TilC {
     /// `(essential, property_index)`, present when the tiles are stored
     /// in this file (`external_tiles_urls == 0`).
     pub in_file_tiles: Option<(FourCc, Vec<(bool, u16)>)>,
+}
+impl TilC {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        tile_width: u32,
+        tile_height: u32,
+        extra_dimensions: Vec<u32>,
+        in_file_tiles: Option<(FourCc, Vec<(bool, u16)>)>,
+    ) -> Self {
+        Self {
+            tile_width,
+            tile_height,
+            extra_dimensions,
+            in_file_tiles,
+        }
+    }
 }
 
 impl TilC {
@@ -627,6 +1018,7 @@ impl TilC {
 
 /// One typed property.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Property {
     /// `ispe`.
     Ispe(Ispe),
@@ -830,6 +1222,7 @@ pub fn is_transformative_type(t: &FourCc) -> bool {
 /// One resolved association: the property, its 1-based `ipco` index and
 /// its `essential` flag.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PropertyEntry {
     /// 1-based index into `ipco`.
     pub index: u16,
@@ -838,12 +1231,33 @@ pub struct PropertyEntry {
     /// The typed property.
     pub property: Property,
 }
+impl PropertyEntry {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(index: u16, essential: bool, property: Property) -> Self {
+        Self {
+            index,
+            essential,
+            property,
+        }
+    }
+}
 
 /// The typed property list of one item, in association order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ItemProperties {
     /// Entries in `ipma` order.
     pub entries: Vec<PropertyEntry>,
+}
+impl ItemProperties {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(entries: Vec<PropertyEntry>) -> Self {
+        Self { entries }
+    }
 }
 
 impl ItemProperties {

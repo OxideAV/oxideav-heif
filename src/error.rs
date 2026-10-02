@@ -10,6 +10,7 @@ use std::fmt;
 /// Errors raised by the HEIF container parser, the derivation /
 /// composition layer and the writer.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HeifError {
     /// The byte stream violates ISO/IEC 14496-12 / 23008-12 syntax or
     /// semantics (truncated box, bad version, dangling reference, …).

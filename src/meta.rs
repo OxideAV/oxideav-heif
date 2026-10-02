@@ -116,15 +116,25 @@ pub mod reference {
 
 /// `hdlr` box contents.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Handler {
     /// `handler_type` (`pict` for HEIF image collections).
     pub handler_type: FourCc,
     /// Human-readable `name` (may be empty).
     pub name: String,
 }
+impl Handler {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(handler_type: FourCc, name: String) -> Self {
+        Self { handler_type, name }
+    }
+}
 
 /// One `infe` entry (ISO/IEC 14496-12 §8.11.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ItemInfo {
     /// `item_ID`.
     pub id: u32,
@@ -144,6 +154,35 @@ pub struct ItemInfo {
     pub content_encoding: Option<String>,
     /// `item_uri_type` for `uri ` items.
     pub item_uri_type: Option<String>,
+}
+impl ItemInfo {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: u32,
+        version: u8,
+        flags: u32,
+        protection_index: u16,
+        item_type: FourCc,
+        name: String,
+        content_type: Option<String>,
+        content_encoding: Option<String>,
+        item_uri_type: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            version,
+            flags,
+            protection_index,
+            item_type,
+            name,
+            content_type,
+            content_encoding,
+            item_uri_type,
+        }
+    }
 }
 
 impl ItemInfo {
@@ -204,6 +243,7 @@ impl ItemInfo {
 
 /// One `iloc` extent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Extent {
     /// `extent_index` (only meaningful for construction method 2; 0
     /// when the box carried `index_size == 0`, which implies 1).
@@ -213,9 +253,22 @@ pub struct Extent {
     /// `extent_length`; 0 means "to the end of the source".
     pub length: u64,
 }
+impl Extent {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(index: u64, offset: u64, length: u64) -> Self {
+        Self {
+            index,
+            offset,
+            length,
+        }
+    }
+}
 
 /// One `iloc` item record.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ItemLocation {
     /// `item_ID`.
     pub item_id: u32,
@@ -227,6 +280,26 @@ pub struct ItemLocation {
     pub base_offset: u64,
     /// The extents, concatenated in order to form the item data.
     pub extents: Vec<Extent>,
+}
+impl ItemLocation {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        item_id: u32,
+        construction_method: u8,
+        data_reference_index: u16,
+        base_offset: u64,
+        extents: Vec<Extent>,
+    ) -> Self {
+        Self {
+            item_id,
+            construction_method,
+            data_reference_index,
+            base_offset,
+            extents,
+        }
+    }
 }
 
 impl ItemLocation {
@@ -240,6 +313,7 @@ impl ItemLocation {
 
 /// One property box from `ipco`, kept raw.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RawProperty {
     /// Box type.
     pub box_type: FourCc,
@@ -251,18 +325,46 @@ pub struct RawProperty {
     /// Total box size in bytes (header included), as found in the file.
     pub box_size: usize,
 }
+impl RawProperty {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        box_type: FourCc,
+        user_type: Option<[u8; 16]>,
+        body: Vec<u8>,
+        box_size: usize,
+    ) -> Self {
+        Self {
+            box_type,
+            user_type,
+            body,
+            box_size,
+        }
+    }
+}
 
 /// One entry of an `ipma` association list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PropertyAssociation {
     /// 1-based index into `ipco`.
     pub index: u16,
     /// `essential` flag.
     pub essential: bool,
 }
+impl PropertyAssociation {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(index: u16, essential: bool) -> Self {
+        Self { index, essential }
+    }
+}
 
 /// The association list of one item.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ItemPropertyAssociations {
     /// `item_ID`.
     pub item_id: u32,
@@ -270,9 +372,18 @@ pub struct ItemPropertyAssociations {
     /// are dropped at parse time.
     pub entries: Vec<PropertyAssociation>,
 }
+impl ItemPropertyAssociations {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(item_id: u32, entries: Vec<PropertyAssociation>) -> Self {
+        Self { item_id, entries }
+    }
+}
 
 /// One `SingleItemTypeReferenceBox` from `iref`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ItemReference {
     /// The reference type (box type of the child box).
     pub reference_type: FourCc,
@@ -281,9 +392,22 @@ pub struct ItemReference {
     /// `to_item_ID[]` in order.
     pub to_item_ids: Vec<u32>,
 }
+impl ItemReference {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(reference_type: FourCc, from_item_id: u32, to_item_ids: Vec<u32>) -> Self {
+        Self {
+            reference_type,
+            from_item_id,
+            to_item_ids,
+        }
+    }
+}
 
 /// One `EntityToGroupBox` from `grpl`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EntityGroup {
     /// `grouping_type` (`altr`, `brst`, `eqiv`, `ster`, …).
     pub grouping_type: FourCc,
@@ -300,9 +424,32 @@ pub struct EntityGroup {
     /// plain groups.
     pub payload: Vec<u8>,
 }
+impl EntityGroup {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        grouping_type: FourCc,
+        version: u8,
+        flags: u32,
+        group_id: u32,
+        entity_ids: Vec<u32>,
+        payload: Vec<u8>,
+    ) -> Self {
+        Self {
+            grouping_type,
+            version,
+            flags,
+            group_id,
+            entity_ids,
+            payload,
+        }
+    }
+}
 
 /// `pymd` image pyramid tile information (HEIF Amd 1:2025 §6.8.12).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PyramidInfo {
     /// `(tile_size_x, tile_size_y)`: one entry for every layer (lowest
     /// resolution first, the base image last) when
@@ -310,6 +457,14 @@ pub struct PyramidInfo {
     /// empty when `tile_info_present_flag` is clear (derive from
     /// `cexg` / `grid` / `uncC` / `tilC`, Tables 3–5 + 15).
     pub tile_sizes: Vec<(u32, u32)>,
+}
+impl PyramidInfo {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(tile_sizes: Vec<(u32, u32)>) -> Self {
+        Self { tile_sizes }
+    }
 }
 
 impl PyramidInfo {
@@ -332,6 +487,7 @@ impl PyramidInfo {
 /// `rgpa` region partition group area (HEIF Amd 1:2025 §6.8.13), when
 /// `area_info_present`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RegionPartitionArea {
     /// `reference_width`.
     pub reference_width: u32,
@@ -346,10 +502,33 @@ pub struct RegionPartitionArea {
     /// `height`.
     pub height: u32,
 }
+impl RegionPartitionArea {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        reference_width: u32,
+        reference_height: u32,
+        top: u32,
+        left: u32,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        Self {
+            reference_width,
+            reference_height,
+            top,
+            left,
+            width,
+            height,
+        }
+    }
+}
 
 /// How the monoscopic fallback of a `stem` group relates to the pair
 /// (HEIF Amd 1:2025 §6.8.11, `flags & 3`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StereoFallbackPosition {
     /// 0.
     Unspecified,
@@ -469,6 +648,7 @@ impl EntityGroup {
 
 /// One `dref` entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DataReference {
     /// Entry box type (`url ` / `urn ` / `deti`).
     pub entry_type: FourCc,
@@ -486,9 +666,32 @@ pub struct DataReference {
     /// [`crate::tiled::DataEntryTiledItem::parse`] for `deti`).
     pub payload: Vec<u8>,
 }
+impl DataReference {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        entry_type: FourCc,
+        self_contained: bool,
+        location: String,
+        name: String,
+        flags: u32,
+        payload: Vec<u8>,
+    ) -> Self {
+        Self {
+            entry_type,
+            self_contained,
+            location,
+            name,
+            flags,
+            payload,
+        }
+    }
+}
 
 /// Parsed file-level `meta` box.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Meta {
     /// `meta` FullBox version.
     pub version: u8,
@@ -521,6 +724,47 @@ pub struct Meta {
     pub xml: Option<String>,
     /// Box types encountered directly inside `meta`, in file order.
     pub child_box_types: Vec<FourCc>,
+}
+impl Meta {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        version: u8,
+        flags: u32,
+        handler: Option<Handler>,
+        primary_item_id: Option<u32>,
+        items: Vec<ItemInfo>,
+        locations: Vec<ItemLocation>,
+        properties: Vec<RawProperty>,
+        associations: Vec<ItemPropertyAssociations>,
+        references: Vec<ItemReference>,
+        entity_groups: Vec<EntityGroup>,
+        data_references: Vec<DataReference>,
+        idat: Option<Vec<u8>>,
+        protection_scheme_count: u16,
+        xml: Option<String>,
+        child_box_types: Vec<FourCc>,
+    ) -> Self {
+        Self {
+            version,
+            flags,
+            handler,
+            primary_item_id,
+            items,
+            locations,
+            properties,
+            associations,
+            references,
+            entity_groups,
+            data_references,
+            idat,
+            protection_scheme_count,
+            xml,
+            child_box_types,
+        }
+    }
 }
 
 impl Meta {

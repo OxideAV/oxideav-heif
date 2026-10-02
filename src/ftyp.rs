@@ -97,6 +97,7 @@ pub const HEIF_FAMILY_BRANDS: &[FourCc] = &[
 
 /// Parsed `ftyp` / `styp` box.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileType {
     /// The box type that carried the brands (`ftyp` or `styp`).
     pub box_type: FourCc,
@@ -106,6 +107,24 @@ pub struct FileType {
     pub minor_version: u32,
     /// `compatible_brands[]`, in file order.
     pub compatible_brands: Vec<FourCc>,
+}
+impl FileType {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        box_type: FourCc,
+        major_brand: FourCc,
+        minor_version: u32,
+        compatible_brands: Vec<FourCc>,
+    ) -> Self {
+        Self {
+            box_type,
+            major_brand,
+            minor_version,
+            compatible_brands,
+        }
+    }
 }
 
 impl FileType {
@@ -222,6 +241,7 @@ impl FileType {
 
 /// What the declared brands say about the file layout.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BrandClass {
     /// `mif1` / `heic` / `avif` / … — a `meta`-box image collection.
     pub image_collection: bool,
@@ -235,6 +255,28 @@ pub struct BrandClass {
     pub av1: bool,
     /// `pred` (predictively coded image items) declared.
     pub predictive_items: bool,
+}
+impl BrandClass {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        image_collection: bool,
+        image_sequence: bool,
+        miaf: bool,
+        hevc: bool,
+        av1: bool,
+        predictive_items: bool,
+    ) -> Self {
+        Self {
+            image_collection,
+            image_sequence,
+            miaf,
+            hevc,
+            av1,
+            predictive_items,
+        }
+    }
 }
 
 /// Content probe over the first bytes of a file: `100` when an `ftyp`

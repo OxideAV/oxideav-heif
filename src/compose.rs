@@ -571,11 +571,23 @@ impl GridCanvas {
 /// when it has an alpha auxiliary) and whether its colour samples are
 /// pre-multiplied by that alpha (`prem` reference).
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct OverlayInput<'a> {
     /// The input image.
     pub frame: &'a HeifFrame,
     /// `prem` reference present from the master to its alpha.
     pub premultiplied: bool,
+}
+impl<'a> OverlayInput<'a> {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(frame: &'a HeifFrame, premultiplied: bool) -> Self {
+        Self {
+            frame,
+            premultiplied,
+        }
+    }
 }
 
 /// Convert an sRGB `canvas_fill_value` (16-bit R, G, B) to the coded

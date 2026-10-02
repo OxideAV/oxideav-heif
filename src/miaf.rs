@@ -19,6 +19,7 @@ use crate::props::{AuxKind, Colr, Property};
 
 /// A MIAF profile (Annex A) or the plain `miaf` brand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MiafProfile {
     /// The `miaf` brand: §7 general requirements only.
     Miaf,
@@ -76,6 +77,7 @@ impl MiafProfile {
 
 /// One violated requirement.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MiafViolation {
     /// The clause the requirement comes from (`"7.2.1.7"`, `"A.3.2"`, …).
     pub clause: &'static str,
@@ -84,9 +86,22 @@ pub struct MiafViolation {
     /// What went wrong.
     pub message: String,
 }
+impl MiafViolation {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(clause: &'static str, item_id: Option<u32>, message: String) -> Self {
+        Self {
+            clause,
+            item_id,
+            message,
+        }
+    }
+}
 
 /// Result of a MIAF check.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MiafReport {
     /// The violations found, in discovery order.
     pub violations: Vec<MiafViolation>,
@@ -95,6 +110,17 @@ pub struct MiafReport {
     /// gain map / `pixi` / `clli` hints, …), in discovery order. They
     /// do not affect [`MiafReport::is_conformant`].
     pub advisories: Vec<MiafViolation>,
+}
+impl MiafReport {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(violations: Vec<MiafViolation>, advisories: Vec<MiafViolation>) -> Self {
+        Self {
+            violations,
+            advisories,
+        }
+    }
 }
 
 impl MiafReport {

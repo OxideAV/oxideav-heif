@@ -29,6 +29,7 @@ use crate::writer::HeifWriter;
 
 /// Which codec produces the coded items.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StillCodec {
     /// HEVC (`hvc1` items, `heic` brand).
     Hevc,
@@ -39,6 +40,7 @@ pub enum StillCodec {
 
 /// Encoding options.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct EncodeOptions {
     /// Codec.
     pub codec: StillCodec,
@@ -112,6 +114,177 @@ pub struct EncodeOptions {
     /// subset.
     pub hevc_options: Vec<(String, String)>,
 }
+impl EncodeOptions {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        codec: StillCodec,
+        hevc_mode: String,
+        qp: u8,
+        grid_tile: Option<u32>,
+        thumbnail_max_dim: Option<u32>,
+        colr: Colr,
+        icc_profile: Option<Vec<u8>>,
+        exif: Option<Vec<u8>>,
+        xmp: Option<String>,
+        transforms: Vec<Property>,
+        av1_quality: Option<u8>,
+        av1_speed: String,
+        hevc_rd: Option<u32>,
+        hevc_tiles: Option<String>,
+        hevc_ctb: Option<u32>,
+        gain_map: Option<GainMapSpec>,
+        threads: Option<usize>,
+        hevc_depth: Option<u8>,
+        hevc_filters: Option<bool>,
+        hevc_options: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            codec,
+            hevc_mode,
+            qp,
+            grid_tile,
+            thumbnail_max_dim,
+            colr,
+            icc_profile,
+            exif,
+            xmp,
+            transforms,
+            av1_quality,
+            av1_speed,
+            hevc_rd,
+            hevc_tiles,
+            hevc_ctb,
+            gain_map,
+            threads,
+            hevc_depth,
+            hevc_filters,
+            hevc_options,
+        }
+    }
+
+    /// Set `codec`.
+    pub fn with_codec(mut self, codec: StillCodec) -> Self {
+        self.codec = codec;
+        self
+    }
+
+    /// Set `hevc_mode`.
+    pub fn with_hevc_mode(mut self, hevc_mode: String) -> Self {
+        self.hevc_mode = hevc_mode;
+        self
+    }
+
+    /// Set `qp`.
+    pub fn with_qp(mut self, qp: u8) -> Self {
+        self.qp = qp;
+        self
+    }
+
+    /// Set `grid_tile`.
+    pub fn with_grid_tile(mut self, grid_tile: Option<u32>) -> Self {
+        self.grid_tile = grid_tile;
+        self
+    }
+
+    /// Set `thumbnail_max_dim`.
+    pub fn with_thumbnail_max_dim(mut self, thumbnail_max_dim: Option<u32>) -> Self {
+        self.thumbnail_max_dim = thumbnail_max_dim;
+        self
+    }
+
+    /// Set `colr`.
+    pub fn with_colr(mut self, colr: Colr) -> Self {
+        self.colr = colr;
+        self
+    }
+
+    /// Set `icc_profile`.
+    pub fn with_icc_profile(mut self, icc_profile: Option<Vec<u8>>) -> Self {
+        self.icc_profile = icc_profile;
+        self
+    }
+
+    /// Set `exif`.
+    pub fn with_exif(mut self, exif: Option<Vec<u8>>) -> Self {
+        self.exif = exif;
+        self
+    }
+
+    /// Set `xmp`.
+    pub fn with_xmp(mut self, xmp: Option<String>) -> Self {
+        self.xmp = xmp;
+        self
+    }
+
+    /// Set `transforms`.
+    pub fn with_transforms(mut self, transforms: Vec<Property>) -> Self {
+        self.transforms = transforms;
+        self
+    }
+
+    /// Set `av1_quality`.
+    pub fn with_av1_quality(mut self, av1_quality: Option<u8>) -> Self {
+        self.av1_quality = av1_quality;
+        self
+    }
+
+    /// Set `av1_speed`.
+    pub fn with_av1_speed(mut self, av1_speed: String) -> Self {
+        self.av1_speed = av1_speed;
+        self
+    }
+
+    /// Set `hevc_rd`.
+    pub fn with_hevc_rd(mut self, hevc_rd: Option<u32>) -> Self {
+        self.hevc_rd = hevc_rd;
+        self
+    }
+
+    /// Set `hevc_tiles`.
+    pub fn with_hevc_tiles(mut self, hevc_tiles: Option<String>) -> Self {
+        self.hevc_tiles = hevc_tiles;
+        self
+    }
+
+    /// Set `hevc_ctb`.
+    pub fn with_hevc_ctb(mut self, hevc_ctb: Option<u32>) -> Self {
+        self.hevc_ctb = hevc_ctb;
+        self
+    }
+
+    /// Set `gain_map`.
+    pub fn with_gain_map(mut self, gain_map: Option<GainMapSpec>) -> Self {
+        self.gain_map = gain_map;
+        self
+    }
+
+    /// Set `threads`.
+    pub fn with_threads(mut self, threads: Option<usize>) -> Self {
+        self.threads = threads;
+        self
+    }
+
+    /// Set `hevc_depth`.
+    pub fn with_hevc_depth(mut self, hevc_depth: Option<u8>) -> Self {
+        self.hevc_depth = hevc_depth;
+        self
+    }
+
+    /// Set `hevc_filters`.
+    pub fn with_hevc_filters(mut self, hevc_filters: Option<bool>) -> Self {
+        self.hevc_filters = hevc_filters;
+        self
+    }
+
+    /// Set `hevc_options`.
+    pub fn with_hevc_options(mut self, hevc_options: Vec<(String, String)>) -> Self {
+        self.hevc_options = hevc_options;
+        self
+    }
+}
 
 /// The nominal worker count the AV1 still tile layout is derived from
 /// (`oxideav_av1::encoder::auto_tile_layout`): fixed, so the coded
@@ -128,6 +301,7 @@ pub const AV1_TILE_LAYOUT_THREADS: usize = 8;
 /// `gain_map_matrix` / `gain_map_full_range`; monochrome maps stay
 /// monochrome (AV1) or ride the luma of a 4:2:0 picture (HEVC).
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct GainMapSpec {
     /// The gain-map picture (monochrome or colour; any size — 21496-1
     /// §6.2.2 resamples it to the base at application).
@@ -150,6 +324,72 @@ pub struct GainMapSpec {
     /// (§6.6.2.4.1); also the depth this crate reconstructs the applied
     /// rendition at. 10–12 suits a PQ / HLG alternate over an 8-bit base.
     pub alternate_bit_depth: u8,
+}
+impl GainMapSpec {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        frame: HeifFrame,
+        metadata: crate::gainmap::GainMapMetadata,
+        alternate_colr: Colr,
+        gain_map_matrix: u16,
+        gain_map_full_range: bool,
+        alternate_clli: Option<crate::props::Clli>,
+        alternate_bit_depth: u8,
+    ) -> Self {
+        Self {
+            frame,
+            metadata,
+            alternate_colr,
+            gain_map_matrix,
+            gain_map_full_range,
+            alternate_clli,
+            alternate_bit_depth,
+        }
+    }
+
+    /// Set `frame`.
+    pub fn with_frame(mut self, frame: HeifFrame) -> Self {
+        self.frame = frame;
+        self
+    }
+
+    /// Set `metadata`.
+    pub fn with_metadata(mut self, metadata: crate::gainmap::GainMapMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Set `alternate_colr`.
+    pub fn with_alternate_colr(mut self, alternate_colr: Colr) -> Self {
+        self.alternate_colr = alternate_colr;
+        self
+    }
+
+    /// Set `gain_map_matrix`.
+    pub fn with_gain_map_matrix(mut self, gain_map_matrix: u16) -> Self {
+        self.gain_map_matrix = gain_map_matrix;
+        self
+    }
+
+    /// Set `gain_map_full_range`.
+    pub fn with_gain_map_full_range(mut self, gain_map_full_range: bool) -> Self {
+        self.gain_map_full_range = gain_map_full_range;
+        self
+    }
+
+    /// Set `alternate_clli`.
+    pub fn with_alternate_clli(mut self, alternate_clli: Option<crate::props::Clli>) -> Self {
+        self.alternate_clli = alternate_clli;
+        self
+    }
+
+    /// Set `alternate_bit_depth`.
+    pub fn with_alternate_bit_depth(mut self, alternate_bit_depth: u8) -> Self {
+        self.alternate_bit_depth = alternate_bit_depth;
+        self
+    }
 }
 
 /// The production HEVC intra QP: on a 12 MP photograph the historical
@@ -2062,6 +2302,7 @@ pub fn packed_to_planar_for(
 /// `intra`, `full`, `auto`, `on` and `420` (see [`Default`] and the
 /// `help` text).
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct HeifEncoderOptions {
     /// `codec`: `hevc` (alias `h265`) or `av1`.
     pub codec: String,
@@ -2101,6 +2342,137 @@ pub struct HeifEncoderOptions {
     /// `chroma`: `420` / `444` — the chroma layout packed RGB sources
     /// are converted to (planar sources keep their own).
     pub chroma: String,
+}
+impl HeifEncoderOptions {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        codec: String,
+        mode: String,
+        qp: u32,
+        grid: String,
+        thumbnail: u32,
+        range: String,
+        quality: u32,
+        speed: String,
+        rd: u32,
+        tiles: String,
+        ctb: u32,
+        threads: String,
+        depth: u32,
+        filters: String,
+        chroma: String,
+    ) -> Self {
+        Self {
+            codec,
+            mode,
+            qp,
+            grid,
+            thumbnail,
+            range,
+            quality,
+            speed,
+            rd,
+            tiles,
+            ctb,
+            threads,
+            depth,
+            filters,
+            chroma,
+        }
+    }
+
+    /// Set `codec`.
+    pub fn with_codec(mut self, codec: String) -> Self {
+        self.codec = codec;
+        self
+    }
+
+    /// Set `mode`.
+    pub fn with_mode(mut self, mode: String) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Set `qp`.
+    pub fn with_qp(mut self, qp: u32) -> Self {
+        self.qp = qp;
+        self
+    }
+
+    /// Set `grid`.
+    pub fn with_grid(mut self, grid: String) -> Self {
+        self.grid = grid;
+        self
+    }
+
+    /// Set `thumbnail`.
+    pub fn with_thumbnail(mut self, thumbnail: u32) -> Self {
+        self.thumbnail = thumbnail;
+        self
+    }
+
+    /// Set `range`.
+    pub fn with_range(mut self, range: String) -> Self {
+        self.range = range;
+        self
+    }
+
+    /// Set `quality`.
+    pub fn with_quality(mut self, quality: u32) -> Self {
+        self.quality = quality;
+        self
+    }
+
+    /// Set `speed`.
+    pub fn with_speed(mut self, speed: String) -> Self {
+        self.speed = speed;
+        self
+    }
+
+    /// Set `rd`.
+    pub fn with_rd(mut self, rd: u32) -> Self {
+        self.rd = rd;
+        self
+    }
+
+    /// Set `tiles`.
+    pub fn with_tiles(mut self, tiles: String) -> Self {
+        self.tiles = tiles;
+        self
+    }
+
+    /// Set `ctb`.
+    pub fn with_ctb(mut self, ctb: u32) -> Self {
+        self.ctb = ctb;
+        self
+    }
+
+    /// Set `threads`.
+    pub fn with_threads(mut self, threads: String) -> Self {
+        self.threads = threads;
+        self
+    }
+
+    /// Set `depth`.
+    pub fn with_depth(mut self, depth: u32) -> Self {
+        self.depth = depth;
+        self
+    }
+
+    /// Set `filters`.
+    pub fn with_filters(mut self, filters: String) -> Self {
+        self.filters = filters;
+        self
+    }
+
+    /// Set `chroma`.
+    pub fn with_chroma(mut self, chroma: String) -> Self {
+        self.chroma = chroma;
+        self
+    }
 }
 
 impl Default for HeifEncoderOptions {

@@ -54,12 +54,7 @@ fn tiles_of(
     let padded = pad_frame(src, cols * tile, rows * tile).unwrap();
     let mut tiles = Vec::new();
     let mut config = None;
-    let desc = GridDescriptor {
-        rows: rows as u16,
-        columns: cols as u16,
-        output_width: src.width,
-        output_height: src.height,
-    };
+    let desc = GridDescriptor::new(rows as u16, cols as u16, src.width, src.height);
     let mut expected = GridCanvas::new(&desc);
     let mut blanks = Vec::new();
     for r in 0..rows {
@@ -96,12 +91,7 @@ fn tiled_file(src: &HeifFrame, tile: u32, empty: &[usize]) -> (Vec<u8>, HeifFram
             tiles,
             vec![(config, true)],
             vec![
-                (
-                    Property::Pixi(Pixi {
-                        bits_per_channel: vec![8, 8, 8],
-                    }),
-                    false,
-                ),
+                (Property::Pixi(Pixi::new(vec![8, 8, 8])), false),
                 (Property::Colr(Colr::MIAF_DEFAULT), false),
             ],
         )
@@ -232,10 +222,7 @@ fn constrained_extents_item_composes_its_extents() {
             vec![
                 (config.clone(), true),
                 (
-                    Property::Ispe(oxideav_heif::props::Ispe {
-                        width: 120,
-                        height: 100,
-                    }),
+                    Property::Ispe(oxideav_heif::props::Ispe::new(120, 100)),
                     false,
                 ),
                 (Property::Colr(Colr::MIAF_DEFAULT), false),
@@ -317,18 +304,13 @@ fn colour_format_enhancement_composes_luma_planes() {
             let mut props = vec![
                 (pic.config.clone(), true),
                 (
-                    Property::Ispe(oxideav_heif::props::Ispe {
-                        width: pic.coded_width,
-                        height: pic.coded_height,
-                    }),
+                    Property::Ispe(oxideav_heif::props::Ispe::new(
+                        pic.coded_width,
+                        pic.coded_height,
+                    )),
                     false,
                 ),
-                (
-                    Property::Pixi(Pixi {
-                        bits_per_channel: vec![8],
-                    }),
-                    false,
-                ),
+                (Property::Pixi(Pixi::new(vec![8])), false),
             ];
             if (pic.coded_width, pic.coded_height) != (p.width, p.height) {
                 props.push((
@@ -359,19 +341,8 @@ fn colour_format_enhancement_composes_luma_planes() {
             .add_colour_format_enhancement(
                 &channels,
                 vec![
-                    (
-                        Property::Ispe(oxideav_heif::props::Ispe {
-                            width: w,
-                            height: h,
-                        }),
-                        false,
-                    ),
-                    (
-                        Property::Pixi(Pixi {
-                            bits_per_channel: vec![8, 8, 8],
-                        }),
-                        false,
-                    ),
+                    (Property::Ispe(oxideav_heif::props::Ispe::new(w, h)), false),
+                    (Property::Pixi(Pixi::new(vec![8, 8, 8])), false),
                     (Property::Colr(colr.clone()), false),
                 ],
             )

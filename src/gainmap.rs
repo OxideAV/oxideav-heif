@@ -53,6 +53,7 @@ impl Rational {
 
 /// Per-channel metadata (`GainMapChannel`, C.2.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GainMapChannel {
     /// `min(G)`, log₂ domain (5.2.5.2).
     pub gain_map_min: Rational,
@@ -65,9 +66,30 @@ pub struct GainMapChannel {
     /// `k_alternate` (5.2.5.5).
     pub alternate_offset: Rational,
 }
+impl GainMapChannel {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        gain_map_min: Rational,
+        gain_map_max: Rational,
+        gamma: Rational,
+        base_offset: Rational,
+        alternate_offset: Rational,
+    ) -> Self {
+        Self {
+            gain_map_min,
+            gain_map_max,
+            gamma,
+            base_offset,
+            alternate_offset,
+        }
+    }
+}
 
 /// `GainMapMetadata` (C.2.2), the body of a `tmap` item.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GainMapMetadata {
     /// `minimum_version` — 0 for this edition.
     pub minimum_version: u16,
@@ -85,6 +107,30 @@ pub struct GainMapMetadata {
     pub alternate_hdr_headroom: Rational,
     /// One entry, or three in R, G, B order when multichannel.
     pub channels: Vec<GainMapChannel>,
+}
+impl GainMapMetadata {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        minimum_version: u16,
+        writer_version: u16,
+        is_multichannel: bool,
+        use_base_colour_space: bool,
+        base_hdr_headroom: Rational,
+        alternate_hdr_headroom: Rational,
+        channels: Vec<GainMapChannel>,
+    ) -> Self {
+        Self {
+            minimum_version,
+            writer_version,
+            is_multichannel,
+            use_base_colour_space,
+            base_hdr_headroom,
+            alternate_hdr_headroom,
+            channels,
+        }
+    }
 }
 
 fn be32(b: &[u8], at: usize) -> Result<u32> {
@@ -446,6 +492,7 @@ pub fn primaries_conversion(from: u16, to: u16) -> Result<Mat3> {
 /// A linear-light RGB picture (three `f32` per pixel, row-major) in a
 /// given set of primaries; values may exceed 1 (HDR headroom).
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct LinearRgbImage {
     /// Width in pixels.
     pub width: u32,
@@ -455,6 +502,19 @@ pub struct LinearRgbImage {
     pub primaries: u16,
     /// `width × height × 3` samples.
     pub data: Vec<f32>,
+}
+impl LinearRgbImage {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(width: u32, height: u32, primaries: u16, data: Vec<f32>) -> Self {
+        Self {
+            width,
+            height,
+            primaries,
+            data,
+        }
+    }
 }
 
 impl LinearRgbImage {

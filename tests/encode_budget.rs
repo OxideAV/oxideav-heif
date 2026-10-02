@@ -98,24 +98,15 @@ fn grid_tiles_in_parallel_are_byte_identical_to_serial() {
         (StillCodec::Av1, 160, 96, 6, &[4usize][..]),
     ] {
         let src = picture(w, h, 8, Chroma::Yuv420, true);
-        let base = EncodeOptions {
-            codec,
-            grid_tile: Some(64),
-            thumbnail_max_dim: (codec == StillCodec::Hevc).then_some(48),
-            av1_quality: Some(50),
-            qp: 30,
-            ..EncodeOptions::default()
-        };
+        let base = EncodeOptions::default()
+            .with_codec(codec)
+            .with_grid_tile(Some(64))
+            .with_thumbnail_max_dim((codec == StillCodec::Hevc).then_some(48))
+            .with_av1_quality(Some(50))
+            .with_qp(30);
         let serial = encode_still(&src, &base).unwrap();
         for &threads in budgets {
-            let par = encode_still(
-                &src,
-                &EncodeOptions {
-                    threads: Some(threads),
-                    ..base.clone()
-                },
-            )
-            .unwrap();
+            let par = encode_still(&src, &base.clone().with_threads(Some(threads))).unwrap();
             assert!(
                 par == serial,
                 "{codec:?}: {threads} threads differ from serial"
@@ -144,20 +135,9 @@ fn hevc_wavefront_budget_keeps_the_bytes() {
     // The quadtree coder (rd set) runs the wavefront: the bytes are
     // those of the serial pass for any budget.
     let src = picture(200, 136, 8, Chroma::Yuv420, false);
-    let base = EncodeOptions {
-        hevc_rd: Some(1),
-        qp: 28,
-        ..EncodeOptions::default()
-    };
+    let base = EncodeOptions::default().with_hevc_rd(Some(1)).with_qp(28);
     let serial = encode_still(&src, &base).unwrap();
-    let par = encode_still(
-        &src,
-        &EncodeOptions {
-            threads: Some(4),
-            ..base
-        },
-    )
-    .unwrap();
+    let par = encode_still(&src, &base.with_threads(Some(4))).unwrap();
     assert_eq!(par, serial);
     let img = decode(&serial);
     assert_eq!(img.frame.format.bit_depth, 8);
@@ -174,10 +154,7 @@ fn deeper_sources_code_at_ten_bits() {
     let src12 = picture(64, 48, 12, Chroma::Yuv420, false);
     let bytes = encode_still(
         &src12,
-        &EncodeOptions {
-            hevc_mode: "pcm".into(),
-            ..EncodeOptions::default()
-        },
+        &EncodeOptions::default().with_hevc_mode("pcm".into()),
     )
     .unwrap();
     let img = decode(&bytes);
@@ -185,23 +162,9 @@ fn deeper_sources_code_at_ten_bits() {
     // Lossless at 12 bits reproduces the source.
     assert_eq!(img.frame, src12);
     // An explicit depth wins.
-    let bytes = encode_still(
-        &src16,
-        &EncodeOptions {
-            hevc_depth: Some(8),
-            ..EncodeOptions::default()
-        },
-    )
-    .unwrap();
+    let bytes = encode_still(&src16, &EncodeOptions::default().with_hevc_depth(Some(8))).unwrap();
     assert_eq!(decode(&bytes).frame.format.bit_depth, 8);
-    assert!(encode_still(
-        &src16,
-        &EncodeOptions {
-            hevc_depth: Some(9),
-            ..EncodeOptions::default()
-        }
-    )
-    .is_err());
+    assert!(encode_still(&src16, &EncodeOptions::default().with_hevc_depth(Some(9))).is_err());
 }
 
 #[test]
@@ -415,18 +378,13 @@ fn framework_encoder_chroma_and_filters_options() {
 fn automatic_grid_above_four_megapixels() {
     // 2048 x 2049 exceeds the 4 MP rule by one row: tiled at 512 px;
     // 2048 x 2048 is a single item. PCM keeps the test fast.
-    let opts = EncodeOptions {
-        hevc_mode: "pcm".into(),
-        ..EncodeOptions::default()
-    };
+    let opts = EncodeOptions::default().with_hevc_mode("pcm".into());
     assert_eq!(opts.effective_grid_tile(2048, 2048), None);
     assert_eq!(opts.effective_grid_tile(2048, 2049), Some(GRID_AUTO_TILE));
     assert_eq!(
-        EncodeOptions {
-            grid_tile: Some(0),
-            ..opts.clone()
-        }
-        .effective_grid_tile(4032, 3024),
+        opts.clone()
+            .with_grid_tile(Some(0))
+            .effective_grid_tile(4032, 3024),
         None
     );
     let (w, h) = (2048u32, 2049u32);
@@ -483,11 +441,9 @@ fn automatic_grid_above_four_megapixels() {
 #[test]
 fn writer_streams_the_same_bytes_it_builds() {
     let src = picture(96, 80, 8, Chroma::Yuv420, true);
-    let opts = EncodeOptions {
-        thumbnail_max_dim: Some(32),
-        exif: Some(vec![b'I', b'I', 42, 0, 8, 0, 0, 0, 0, 0]),
-        ..EncodeOptions::default()
-    };
+    let opts = EncodeOptions::default()
+        .with_thumbnail_max_dim(Some(32))
+        .with_exif(Some(vec![b'I', b'I', 42, 0, 8, 0, 0, 0, 0, 0]));
     let mut w = HeifWriter::new();
     let master = oxideav_heif::encode::encode_still_into(&mut w, &src, &opts).unwrap();
     w.set_primary(master);

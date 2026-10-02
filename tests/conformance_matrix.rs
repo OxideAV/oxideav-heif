@@ -1021,19 +1021,16 @@ fn frame_from_source(w: u32, h: u32, channels: usize, depth: u8) -> HeifFrame {
 
 /// Our writer's shapes: `(name, extension, frame, options)`.
 fn writer_shapes() -> Vec<(String, &'static str, HeifFrame, EncodeOptions)> {
-    let pcm = || EncodeOptions {
-        hevc_mode: "pcm".into(),
-        ..EncodeOptions::default()
+    let pcm = || EncodeOptions::default().with_hevc_mode("pcm".into());
+    let intra = |qp: u8| {
+        EncodeOptions::default()
+            .with_hevc_mode("intra".into())
+            .with_qp(qp)
     };
-    let intra = |qp: u8| EncodeOptions {
-        hevc_mode: "intra".into(),
-        qp,
-        ..EncodeOptions::default()
-    };
-    let av1 = |q: Option<u8>| EncodeOptions {
-        codec: StillCodec::Av1,
-        av1_quality: q,
-        ..EncodeOptions::default()
+    let av1 = |q: Option<u8>| {
+        EncodeOptions::default()
+            .with_codec(StillCodec::Av1)
+            .with_av1_quality(q)
     };
     let mut v: Vec<(String, &str, HeifFrame, EncodeOptions)> = Vec::new();
     for (w, h) in [(1, 1), (7, 5), (63, 61), (96, 80)] {
@@ -1055,20 +1052,15 @@ fn writer_shapes() -> Vec<(String, &'static str, HeifFrame, EncodeOptions)> {
             "hevc 4032×3024 grid (12 MP)".into(),
             "heic",
             frame_from_source(4032, 3024, 3, 8),
-            EncodeOptions {
-                grid_tile: Some(512),
-                ..intra(26)
-            },
+            intra(26).with_grid_tile(Some(512)),
         ));
         v.push((
             "av1 4032×3024 grid (12 MP)".into(),
             "avif",
             frame_from_source(4032, 3024, 3, 8),
-            EncodeOptions {
-                grid_tile: Some(512),
-                av1_speed: "fast".into(),
-                ..av1(Some(60))
-            },
+            av1(Some(60))
+                .with_grid_tile(Some(512))
+                .with_av1_speed("fast".into()),
         ));
     }
     v.push((
@@ -1117,57 +1109,45 @@ fn writer_shapes() -> Vec<(String, &'static str, HeifFrame, EncodeOptions)> {
         "hevc thumbnail".into(),
         "heic",
         frame_from_source(96, 80, 3, 8),
-        EncodeOptions {
-            thumbnail_max_dim: Some(48),
-            ..pcm()
-        },
+        pcm().with_thumbnail_max_dim(Some(48)),
     ));
     v.push((
         "hevc Exif+XMP+ICC".into(),
         "heic",
         frame_from_source(96, 80, 3, 8),
-        EncodeOptions {
-            exif: Some(b"II*\0\x08\0\0\0\0\0".to_vec()),
-            xmp: Some("<x:xmpmeta>oxideav</x:xmpmeta>".into()),
-            icc_profile: Some(std::fs::read(minimal_icc(&scratch_dir("matrix"))).unwrap()),
-            ..pcm()
-        },
+        pcm()
+            .with_exif(Some(b"II*\0\x08\0\0\0\0\0".to_vec()))
+            .with_xmp(Some("<x:xmpmeta>oxideav</x:xmpmeta>".into()))
+            .with_icc_profile(Some(
+                std::fs::read(minimal_icc(&scratch_dir("matrix"))).unwrap(),
+            )),
     ));
     v.push((
         "hevc irot".into(),
         "heic",
         frame_from_source(96, 80, 3, 8),
-        EncodeOptions {
-            transforms: vec![Property::Irot(Irot { angle: 1 })],
-            ..pcm()
-        },
+        pcm().with_transforms(vec![Property::Irot(Irot::new(1))]),
     ));
     v.push((
         "hevc imir".into(),
         "heic",
         frame_from_source(96, 80, 3, 8),
-        EncodeOptions {
-            transforms: vec![Property::Imir(Imir { axis: 1 })],
-            ..pcm()
-        },
+        pcm().with_transforms(vec![Property::Imir(Imir::new(1))]),
     ));
     v.push((
         "hevc clap".into(),
         "heic",
         frame_from_source(96, 80, 3, 8),
-        EncodeOptions {
-            transforms: vec![Property::Clap(Clap::for_rect(
-                96,
-                80,
-                CropRect {
-                    x: 8,
-                    y: 8,
-                    width: 64,
-                    height: 48,
-                },
-            ))],
-            ..pcm()
-        },
+        pcm().with_transforms(vec![Property::Clap(Clap::for_rect(
+            96,
+            80,
+            CropRect {
+                x: 8,
+                y: 8,
+                width: 64,
+                height: 48,
+            },
+        ))]),
     ));
     v
 }

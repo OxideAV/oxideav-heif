@@ -28,6 +28,7 @@ use crate::error::{HeifError, Result};
 
 /// Parsed `av1C` record.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Av1Config {
     /// `seq_profile`.
     pub seq_profile: u8,
@@ -53,6 +54,41 @@ pub struct Av1Config {
     pub config_obus: Vec<u8>,
     /// The record bytes as found in the file.
     pub raw: Vec<u8>,
+}
+impl Av1Config {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        seq_profile: u8,
+        seq_level_idx_0: u8,
+        seq_tier_0: bool,
+        high_bitdepth: bool,
+        twelve_bit: bool,
+        monochrome: bool,
+        chroma_subsampling_x: bool,
+        chroma_subsampling_y: bool,
+        chroma_sample_position: u8,
+        initial_presentation_delay_minus_one: Option<u8>,
+        config_obus: Vec<u8>,
+        raw: Vec<u8>,
+    ) -> Self {
+        Self {
+            seq_profile,
+            seq_level_idx_0,
+            seq_tier_0,
+            high_bitdepth,
+            twelve_bit,
+            monochrome,
+            chroma_subsampling_x,
+            chroma_subsampling_y,
+            chroma_sample_position,
+            initial_presentation_delay_minus_one,
+            config_obus,
+            raw,
+        }
+    }
 }
 
 impl Av1Config {

@@ -5,6 +5,8 @@
 
 use std::io::Cursor;
 
+use oxideav_heif::encode::EncodeOptions;
+
 use oxideav_core::{
     CodecId, CodecParameters, Decoder, Error, Frame, PixelFormat, RuntimeContext, StreamInfo,
     TimeBase,
@@ -180,14 +182,9 @@ fn has_box(bytes: &[u8], t: &[u8; 4]) -> bool {
 fn still_stream_passes_through_as_the_file() {
     let ctx = context();
     let src = frame(0);
-    let bytes = oxideav_heif::encode_still(
-        &src,
-        &oxideav_heif::EncodeOptions {
-            hevc_mode: "pcm".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let bytes =
+        oxideav_heif::encode_still(&src, &EncodeOptions::default().with_hevc_mode("pcm".into()))
+            .unwrap();
     let mut params = CodecParameters::video(CodecId::new("heif"));
     params.width = Some(32);
     params.height = Some(32);
@@ -345,20 +342,22 @@ fn sequence_writer_alpha_track_round_trips_and_opens_in_readers() {
         let w =
             sw.get_or_insert_with(|| SequenceWriter::new(*b"hvc1", pic.config.clone(), 32, 32, 10));
         w.push_sample(pic.data.clone(), 1, true);
-        let at = alpha_track.get_or_insert_with(|| SequenceAlphaTrack {
-            entry_type: *b"hvc1",
-            config: apic.config.clone(),
-            width: 32,
-            height: 32,
-            aux_type: oxideav_heif::props::AUX_URN_ALPHA_HEVC.to_string(),
-            samples: Vec::new(),
-            entry_properties: Vec::new(),
+        let at = alpha_track.get_or_insert_with(|| {
+            SequenceAlphaTrack::new(
+                *b"hvc1",
+                apic.config.clone(),
+                32,
+                32,
+                oxideav_heif::props::AUX_URN_ALPHA_HEVC.to_string(),
+                Vec::new(),
+                Vec::new(),
+            )
         });
-        at.samples.push(oxideav_heif::writer::SequenceSample {
-            data: apic.data.clone(),
-            duration: 1,
-            sync: true,
-        });
+        at.samples.push(oxideav_heif::writer::SequenceSample::new(
+            apic.data.clone(),
+            1,
+            true,
+        ));
     }
     let mut sw = sw.unwrap();
     sw.alpha = alpha_track;
@@ -371,16 +370,11 @@ fn sequence_writer_alpha_track_round_trips_and_opens_in_readers() {
         vec![
             (sw.config.clone(), true),
             (
-                oxideav_heif::props::Property::Ispe(oxideav_heif::props::Ispe {
-                    width: 32,
-                    height: 32,
-                }),
+                oxideav_heif::props::Property::Ispe(oxideav_heif::props::Ispe::new(32, 32)),
                 false,
             ),
             (
-                oxideav_heif::props::Property::Pixi(oxideav_heif::props::Pixi {
-                    bits_per_channel: vec![8, 8, 8],
-                }),
+                oxideav_heif::props::Property::Pixi(oxideav_heif::props::Pixi::new(vec![8, 8, 8])),
                 false,
             ),
             (
@@ -512,6 +506,7 @@ fn sequence_looping_round_trips_through_the_edit_list() {
                 assert!(t.repeat_edits);
                 assert_eq!(t.track_duration, u64::MAX);
             }
+            Some(other) => panic!("unexpected loop behaviour {other:?}"),
         }
     }
 }

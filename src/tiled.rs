@@ -28,6 +28,7 @@ pub type PackedTiles = (Vec<u8>, DataEntryTiledItem, (u32, Vec<u8>));
 
 /// A parsed `DataEntryTiledItemBox` (§6.11.5).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DataEntryTiledItem {
     /// Bits of a `tile_start_offset` (32 / 40 / 48 / 64).
     pub offset_bits: u8,
@@ -44,9 +45,32 @@ pub struct DataEntryTiledItem {
     /// relative to the item's referenced data, for in-file tiles.
     pub offset_table: Option<(u64, u32)>,
 }
+impl DataEntryTiledItem {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        offset_bits: u8,
+        size_bits: u8,
+        sequential_order: bool,
+        input_items: u64,
+        external: Option<ExternalTiles>,
+        offset_table: Option<(u64, u32)>,
+    ) -> Self {
+        Self {
+            offset_bits,
+            size_bits,
+            sequential_order,
+            input_items,
+            external,
+            offset_table,
+        }
+    }
+}
 
 /// The URL construction fields of an external-tile `deti`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExternalTiles {
     /// `directoryIDstart` / `directoryIDend` when `directory_ID_flag`.
     pub directory_ids: Option<(u16, u16)>,
@@ -58,6 +82,26 @@ pub struct ExternalTiles {
     pub url_extension: String,
     /// `tileitemrequesttemplate`.
     pub request_template: String,
+}
+impl ExternalTiles {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        directory_ids: Option<(u16, u16)>,
+        tile_id_start: u64,
+        base_url: String,
+        url_extension: String,
+        request_template: String,
+    ) -> Self {
+        Self {
+            directory_ids,
+            tile_id_start,
+            base_url,
+            url_extension,
+            request_template,
+        }
+    }
 }
 
 impl DataEntryTiledItem {

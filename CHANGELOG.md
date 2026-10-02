@@ -4,6 +4,60 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (API hygiene — a minor bump; every public record gains an additive-friendly shape)
+
+- **`#[non_exhaustive]` on every public record struct** that callers
+  could build by struct literal, with `Type::new(<every field, in
+  declaration order>)` as the construction path (fields stay `pub`:
+  read and assign them after `new` / `Default`; `..Default::default()`
+  struct update is no longer available from outside the crate — use
+  the setters below or assign). Affected, by module: `props` (`Ispe`
+  `Pixi` `Pasp` `Clap` `Irot` `Imir` `Iscl` `AuxC` `Clli` `Mdcv` `Cclv`
+  `Amve` `Rloc` `Lsel` `A1op` `A1lx` `Rref` `TimeInfo` `Udes` `Altt`
+  `Reve` `Ndwt` `Cexg` `Dadj` `StereoAggressor` `Stag` `PixiChannel`
+  `PixiExtended` `TilC` `PropertyEntry` `ItemProperties`), `meta`
+  (`Handler` `ItemInfo` `Extent` `ItemLocation` `RawProperty`
+  `PropertyAssociation` `ItemPropertyAssociations` `ItemReference`
+  `EntityGroup` `PyramidInfo` `RegionPartitionArea` `DataReference`
+  `Meta`), `derived` (`GridDescriptor` `OverlayDescriptor`
+  `ColourFormatEnhancement` `TiledItem` `ImageNode`), `decode`
+  (`DecodedImage` `GainMapAttachment` `LayerFrame`), `encode`
+  (`EncodeOptions` `GainMapSpec` `HeifEncoderOptions`), codec
+  configurations (`HevcConfig` `NalArray` `Av1Config` `AvcConfig`
+  `LhevcConfig` `OperatingPoints` `OperatingPoint` `OperatingPointPtl`
+  `OperatingPointLayer` `LayerDependency`), `ftyp` (`FileType`
+  `BrandClass`), `gainmap` (`GainMapMetadata` `GainMapChannel`
+  `LinearRgbImage`), `miaf` (`MiafViolation` `MiafReport`), `mini`
+  (`MiniChroma` `MiniHdrBoxes` `MiniGainMap` `MinimizedImage`),
+  `sequence` (`CodingConstraints` `SampleEntry` `Sample` `Edit`
+  `TrackOrientation` `SampleGroup` `SampleGroupDescription`
+  `ProducerReferenceTime` `SubsegmentIndex` `Track` `Movie`), `tiled`
+  (`DataEntryTiledItem` `ExternalTiles`), `compose::OverlayInput`,
+  `rgb::RgbImage`, `writer` (`SequenceAlphaTrack`, `SequenceWriter` —
+  which keeps its own `new`), `HeifFile`.
+- **Setters** `with_<field>` on the option records `EncodeOptions`,
+  `HeifEncoderOptions` and `GainMapSpec` (one per field), so
+  `EncodeOptions::default().with_qp(20).with_grid_tile(Some(512))`
+  replaces the struct-update literal.
+- **`#[non_exhaustive]` on the public enums that grow with the
+  standard**: `Property` (a variant per typed property — this crate
+  gains properties every round), `Colr` (`Nclx` / `Icc` / `Other`; a
+  future `colr` colour type), `HeifError` (error classes), `StillCodec`
+  (VVC items are in the standard already), `ImageKind`, `CfenInput`,
+  `ToneMapOutput`, `MiafProfile` (brands), `AuxKind`,
+  `StereoFallbackPosition` (`flags & 3` has a reserved value),
+  `LoopBehaviour`, `mini::SampleFormat`. Matches on them need a `_`
+  arm from outside the crate.
+- **Kept open on purpose** (closed by the standard or fundamental
+  value types): `Chroma` (`chroma_format_idc` 0..=3 — H.265 / AV1
+  define no fourth structure), `HeifFrame` / `HeifPlane` /
+  `HeifPixelFormat` (the planar sample model: dimensions, layout,
+  planes), `CropRect`, `gainmap::Rational`, `boxes::BoxHeader` (the
+  ISOBMFF header: size / type / `largesize` / `uuid`).
+- Internal-only `pub` items were already `#[doc(hidden)]` (`CodedPicture`,
+  `WriterItem`, `ItemBody`, `SequenceSample`, `CodedKind`, `ItemKind`,
+  `WalkEntry`); unchanged.
+
 ## [0.0.6](https://github.com/OxideAV/oxideav-heif/compare/v0.0.5...v0.0.6) - 2026-10-01
 
 ### Other

@@ -28,6 +28,7 @@ use crate::hvcc::NalArray;
 
 /// Parsed `lhvC` record.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LhevcConfig {
     /// `configurationVersion` (1).
     pub configuration_version: u8,
@@ -45,6 +46,33 @@ pub struct LhevcConfig {
     pub arrays: Vec<NalArray>,
     /// The record bytes as parsed / serialized.
     pub raw: Vec<u8>,
+}
+impl LhevcConfig {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        configuration_version: u8,
+        min_spatial_segmentation_idc: u16,
+        parallelism_type: u8,
+        num_temporal_layers: u8,
+        temporal_id_nested: bool,
+        length_size: u8,
+        arrays: Vec<NalArray>,
+        raw: Vec<u8>,
+    ) -> Self {
+        Self {
+            configuration_version,
+            min_spatial_segmentation_idc,
+            parallelism_type,
+            num_temporal_layers,
+            temporal_id_nested,
+            length_size,
+            arrays,
+            raw,
+        }
+    }
 }
 
 impl LhevcConfig {
@@ -128,6 +156,7 @@ impl LhevcConfig {
 
 /// One profile / tier / level entry of an `oinf` record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OperatingPointPtl {
     /// `general_profile_space`.
     pub profile_space: u8,
@@ -142,9 +171,32 @@ pub struct OperatingPointPtl {
     /// `general_level_idc`.
     pub level_idc: u8,
 }
+impl OperatingPointPtl {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        profile_space: u8,
+        tier_flag: bool,
+        profile_idc: u8,
+        profile_compatibility_flags: u32,
+        constraint_indicator_flags: u64,
+        level_idc: u8,
+    ) -> Self {
+        Self {
+            profile_space,
+            tier_flag,
+            profile_idc,
+            profile_compatibility_flags,
+            constraint_indicator_flags,
+            level_idc,
+        }
+    }
+}
 
 /// One layer of an operating point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OperatingPointLayer {
     /// `ptl_idx` (1-based into the PTL list; 0 = none).
     pub ptl_idx: u8,
@@ -155,9 +207,28 @@ pub struct OperatingPointLayer {
     /// `is_alternate_outputlayer`.
     pub is_alternate_output_layer: bool,
 }
+impl OperatingPointLayer {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        ptl_idx: u8,
+        layer_id: u8,
+        is_output_layer: bool,
+        is_alternate_output_layer: bool,
+    ) -> Self {
+        Self {
+            ptl_idx,
+            layer_id,
+            is_output_layer,
+            is_alternate_output_layer,
+        }
+    }
+}
 
 /// One operating point of an `oinf` record.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OperatingPoint {
     /// `output_layer_set_idx`.
     pub output_layer_set_idx: u16,
@@ -178,9 +249,39 @@ pub struct OperatingPoint {
     /// `maxBitRate` / `avgBitRate` when `bit_rate_info_flag`.
     pub bit_rate: Option<(u32, u32)>,
 }
+impl OperatingPoint {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        output_layer_set_idx: u16,
+        max_temporal_id: u8,
+        layers: Vec<OperatingPointLayer>,
+        min_pic_size: (u16, u16),
+        max_pic_size: (u16, u16),
+        max_chroma_format: u8,
+        max_bit_depth_minus8: u8,
+        frame_rate: Option<(u16, u8)>,
+        bit_rate: Option<(u32, u32)>,
+    ) -> Self {
+        Self {
+            output_layer_set_idx,
+            max_temporal_id,
+            layers,
+            min_pic_size,
+            max_pic_size,
+            max_chroma_format,
+            max_bit_depth_minus8,
+            frame_rate,
+            bit_rate,
+        }
+    }
+}
 
 /// One layer's dependency entry of an `oinf` record.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LayerDependency {
     /// `layerID`.
     pub layer_id: u8,
@@ -189,9 +290,26 @@ pub struct LayerDependency {
     /// `dimension_identifier[j]` for every set bit `j` of `scalability_mask`.
     pub dimension_identifiers: Vec<(u8, u8)>,
 }
+impl LayerDependency {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        layer_id: u8,
+        direct_ref_layer_ids: Vec<u8>,
+        dimension_identifiers: Vec<(u8, u8)>,
+    ) -> Self {
+        Self {
+            layer_id,
+            direct_ref_layer_ids,
+            dimension_identifiers,
+        }
+    }
+}
 
 /// Parsed `OperatingPointsRecord` (`oinf`).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OperatingPoints {
     /// `scalability_mask`.
     pub scalability_mask: u16,
@@ -203,6 +321,26 @@ pub struct OperatingPoints {
     pub layers: Vec<LayerDependency>,
     /// The record bytes as parsed.
     pub raw: Vec<u8>,
+}
+impl OperatingPoints {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        scalability_mask: u16,
+        ptls: Vec<OperatingPointPtl>,
+        operating_points: Vec<OperatingPoint>,
+        layers: Vec<LayerDependency>,
+        raw: Vec<u8>,
+    ) -> Self {
+        Self {
+            scalability_mask,
+            ptls,
+            operating_points,
+            layers,
+            raw,
+        }
+    }
 }
 
 impl OperatingPoints {

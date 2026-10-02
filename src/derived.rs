@@ -30,6 +30,7 @@ pub const MAX_CANVAS_PIXELS: u64 = 1 << 30;
 
 /// `ImageGrid` descriptor (§6.6.2.3.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GridDescriptor {
     /// Number of tile rows (`rows_minus_one + 1`).
     pub rows: u16,
@@ -39,6 +40,19 @@ pub struct GridDescriptor {
     pub output_width: u32,
     /// `output_height`.
     pub output_height: u32,
+}
+impl GridDescriptor {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(rows: u16, columns: u16, output_width: u32, output_height: u32) -> Self {
+        Self {
+            rows,
+            columns,
+            output_width,
+            output_height,
+        }
+    }
 }
 
 impl GridDescriptor {
@@ -105,6 +119,7 @@ impl GridDescriptor {
 
 /// `ImageOverlay` descriptor (§6.6.2.2.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OverlayDescriptor {
     /// `canvas_fill_value[4]` — R, G, B (sRGB, 16-bit) and A (0..=65535 opacity).
     pub canvas_fill: [u16; 4],
@@ -114,6 +129,24 @@ pub struct OverlayDescriptor {
     pub output_height: u32,
     /// `(horizontal_offset, vertical_offset)` per input, in `dimg` order.
     pub offsets: Vec<(i32, i32)>,
+}
+impl OverlayDescriptor {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        canvas_fill: [u16; 4],
+        output_width: u32,
+        output_height: u32,
+        offsets: Vec<(i32, i32)>,
+    ) -> Self {
+        Self {
+            canvas_fill,
+            output_width,
+            output_height,
+            offsets,
+        }
+    }
 }
 
 impl OverlayDescriptor {
@@ -207,6 +240,7 @@ impl OverlayDescriptor {
 
 /// What an image item is, once its body has been interpreted.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ImageKind {
     /// A coded image item (`hvc1`, `av01`, …).
     Coded(FourCc),
@@ -229,13 +263,23 @@ pub enum ImageKind {
 /// §6.6.2.5.2, channel table as amended by Amd 2:2026): per input, the
 /// channel(s) its luma plane carries.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ColourFormatEnhancement {
     /// One entry per `dimg` input, in reference order.
     pub inputs: Vec<CfenInput>,
 }
+impl ColourFormatEnhancement {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(inputs: Vec<CfenInput>) -> Self {
+        Self { inputs }
+    }
+}
 
 /// What one `cfen` input's luma plane carries.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CfenInput {
     /// `is_packed_flag == 0`: the whole luma plane is `channel_id`
     /// (Table 2: 1 unspecified, 2 Y / R / C, 3 Cb / G / M, 4 Cr / B / Y,
@@ -327,6 +371,7 @@ impl ColourFormatEnhancement {
 /// `TileItemPropertyAssociationBox` gives every tile (decoder
 /// configuration first, as for a coded item).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TiledItem {
     /// `tilC`.
     pub config: crate::props::TilC,
@@ -334,9 +379,21 @@ pub struct TiledItem {
     /// properties live in their own files).
     pub tile_properties: ItemProperties,
 }
+impl TiledItem {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(config: crate::props::TilC, tile_properties: ItemProperties) -> Self {
+        Self {
+            config,
+            tile_properties,
+        }
+    }
+}
 
 /// One node of a derivation graph.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ImageNode {
     /// The item.
     pub item: ItemInfo,
@@ -360,6 +417,39 @@ pub struct ImageNode {
     pub metadata: Vec<ItemInfo>,
     /// Depth of this node in the derivation chain (0 = root).
     pub depth_in_chain: usize,
+}
+impl ImageNode {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        item: ItemInfo,
+        kind: ImageKind,
+        properties: ItemProperties,
+        inputs: Vec<ImageNode>,
+        alpha: Option<Box<ImageNode>>,
+        depth: Option<Box<ImageNode>>,
+        other_auxiliaries: Vec<ImageNode>,
+        premultiplied_alpha: bool,
+        thumbnails: Vec<ImageNode>,
+        metadata: Vec<ItemInfo>,
+        depth_in_chain: usize,
+    ) -> Self {
+        Self {
+            item,
+            kind,
+            properties,
+            inputs,
+            alpha,
+            depth,
+            other_auxiliaries,
+            premultiplied_alpha,
+            thumbnails,
+            metadata,
+            depth_in_chain,
+        }
+    }
 }
 
 impl ImageNode {

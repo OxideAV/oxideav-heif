@@ -82,10 +82,7 @@ fn picture(w: u32, h: u32, gray: bool, alpha: bool) -> HeifFrame {
 }
 
 fn pcm() -> EncodeOptions {
-    EncodeOptions {
-        hevc_mode: "pcm".into(),
-        ..EncodeOptions::default()
-    }
+    EncodeOptions::default().with_hevc_mode("pcm".into())
 }
 
 /// A minimal but structurally valid ICC v4 profile (128-byte header
@@ -257,10 +254,10 @@ fn heif_info_ok(heic: &Path) -> Option<bool> {
 
 /// The interop cases: `(name, extension, options, gray, alpha)`.
 fn cases() -> Vec<(&'static str, &'static str, EncodeOptions, bool, bool)> {
-    let intra = |qp| EncodeOptions {
-        hevc_mode: "intra".into(),
-        qp,
-        ..EncodeOptions::default()
+    let intra = |qp| {
+        EncodeOptions::default()
+            .with_hevc_mode("intra".into())
+            .with_qp(qp)
     };
     vec![
         ("hevc_pcm", "heic", pcm(), false, false),
@@ -271,118 +268,91 @@ fn cases() -> Vec<(&'static str, &'static str, EncodeOptions, bool, bool)> {
         (
             "hevc_grid",
             "heic",
-            EncodeOptions {
-                hevc_mode: "intra".into(),
-                qp: 22,
-                grid_tile: Some(64),
-                ..EncodeOptions::default()
-            },
+            EncodeOptions::default()
+                .with_hevc_mode("intra".into())
+                .with_qp(22)
+                .with_grid_tile(Some(64)),
             false,
             false,
         ),
         (
             "hevc_thumb",
             "heic",
-            EncodeOptions {
-                thumbnail_max_dim: Some(48),
-                ..pcm()
-            },
+            pcm().with_thumbnail_max_dim(Some(48)),
             false,
             false,
         ),
         (
             "hevc_irot1",
             "heic",
-            EncodeOptions {
-                transforms: vec![Property::Irot(Irot { angle: 1 })],
-                ..pcm()
-            },
+            pcm().with_transforms(vec![Property::Irot(Irot::new(1))]),
             false,
             false,
         ),
         (
             "hevc_imir1",
             "heic",
-            EncodeOptions {
-                transforms: vec![Property::Imir(Imir { axis: 1 })],
-                ..pcm()
-            },
+            pcm().with_transforms(vec![Property::Imir(Imir::new(1))]),
             false,
             false,
         ),
         (
             "hevc_exif_xmp_icc",
             "heic",
-            EncodeOptions {
-                exif: Some(b"II*\0\x08\0\0\0\0\0".to_vec()),
-                xmp: Some("<x:xmpmeta>oxideav</x:xmpmeta>".into()),
-                icc_profile: Some(minimal_icc()),
-                ..pcm()
-            },
+            pcm()
+                .with_exif(Some(b"II*\0\x08\0\0\0\0\0".to_vec()))
+                .with_xmp(Some("<x:xmpmeta>oxideav</x:xmpmeta>".into()))
+                .with_icc_profile(Some(minimal_icc())),
             false,
             false,
         ),
         (
             "av1_lossless",
             "avif",
-            EncodeOptions {
-                codec: StillCodec::Av1,
-                ..Default::default()
-            },
+            EncodeOptions::default().with_codec(StillCodec::Av1),
             false,
             false,
         ),
         (
             "av1_odd",
             "avif",
-            EncodeOptions {
-                codec: StillCodec::Av1,
-                ..Default::default()
-            },
+            EncodeOptions::default().with_codec(StillCodec::Av1),
             false,
             false,
         ),
         (
             "av1_grid",
             "avif",
-            EncodeOptions {
-                codec: StillCodec::Av1,
-                grid_tile: Some(64),
-                ..Default::default()
-            },
+            EncodeOptions::default()
+                .with_codec(StillCodec::Av1)
+                .with_grid_tile(Some(64)),
             false,
             false,
         ),
         (
             "av1_q60",
             "avif",
-            EncodeOptions {
-                codec: StillCodec::Av1,
-                av1_quality: Some(60),
-                ..Default::default()
-            },
+            EncodeOptions::default()
+                .with_codec(StillCodec::Av1)
+                .with_av1_quality(Some(60)),
             false,
             false,
         ),
         (
             "av1_q30_odd",
             "avif",
-            EncodeOptions {
-                codec: StillCodec::Av1,
-                av1_quality: Some(30),
-                ..Default::default()
-            },
+            EncodeOptions::default()
+                .with_codec(StillCodec::Av1)
+                .with_av1_quality(Some(30)),
             false,
             false,
         ),
         (
             "av1_q60_alpha",
             "avif",
-            EncodeOptions {
-                codec: StillCodec::Av1,
-                av1_quality: Some(60),
-                ..Default::default()
-            },
+            EncodeOptions::default()
+                .with_codec(StillCodec::Av1)
+                .with_av1_quality(Some(60)),
             false,
             true,
         ),
@@ -390,10 +360,7 @@ fn cases() -> Vec<(&'static str, &'static str, EncodeOptions, bool, bool)> {
         (
             "av1_alpha",
             "avif",
-            EncodeOptions {
-                codec: StillCodec::Av1,
-                ..Default::default()
-            },
+            EncodeOptions::default().with_codec(StillCodec::Av1),
             false,
             true,
         ),
@@ -425,7 +392,7 @@ fn every_written_shape_reparses_and_round_trips() {
         let swaps = opts
             .transforms
             .iter()
-            .any(|t| matches!(t, Property::Irot(Irot { angle }) if angle % 2 == 1));
+            .any(|t| matches!(t, Property::Irot(r) if r.angle % 2 == 1));
         let (ow, oh) = if swaps { (h, w) } else { (w, h) };
         assert_eq!((img.width(), img.height()), (ow, oh), "{name}: geometry");
         if alpha {
@@ -546,12 +513,10 @@ fn our_container_structure_is_accepted_by_apple_imageio() {
     // A written grid (multiple hidden hvc1 tiles) also opens.
     let g = encode_still(
         &picture(200, 150, false, false),
-        &EncodeOptions {
-            hevc_mode: "intra".into(),
-            qp: 22,
-            grid_tile: Some(64),
-            ..EncodeOptions::default()
-        },
+        &EncodeOptions::default()
+            .with_hevc_mode("intra".into())
+            .with_qp(22)
+            .with_grid_tile(Some(64)),
     )
     .unwrap();
     let gp = dir.join("grid.heic");
@@ -576,10 +541,7 @@ fn identity_item_carries_transforms() {
         vec![
             (pic.config.clone(), true),
             (
-                Property::Ispe(oxideav_heif::props::Ispe {
-                    width: 64,
-                    height: 48,
-                }),
+                Property::Ispe(oxideav_heif::props::Ispe::new(64, 48)),
                 false,
             ),
             (Property::Colr(Colr::MIAF_DEFAULT), false),
@@ -590,10 +552,7 @@ fn identity_item_carries_transforms() {
         base,
         vec![
             (
-                Property::Ispe(oxideav_heif::props::Ispe {
-                    width: 64,
-                    height: 48,
-                }),
+                Property::Ispe(oxideav_heif::props::Ispe::new(64, 48)),
                 false,
             ),
             (
@@ -718,11 +677,9 @@ fn apple_imageio_renders_the_alpha_plane_exactly() {
         ("pcm", pcm()),
         (
             "intra",
-            EncodeOptions {
-                hevc_mode: "intra".into(),
-                qp: 20,
-                ..EncodeOptions::default()
-            },
+            EncodeOptions::default()
+                .with_hevc_mode("intra".into())
+                .with_qp(20),
         ),
     ] {
         let src = picture(96, 80, false, true);
@@ -751,13 +708,7 @@ fn apple_imageio_renders_the_alpha_plane_exactly() {
                 data.extend_from_slice(&[v, v, v]);
             }
         }
-        let want = oxideav_heif::rgb::RgbImage {
-            width: a.width,
-            height: a.height,
-            channels: 3,
-            bit_depth: 8,
-            data,
-        };
+        let want = oxideav_heif::rgb::RgbImage::new(a.width, a.height, 3, 8, data);
         let (max, mean) = ppm_diff(&ppm, &want).unwrap();
         assert!(
             max == 0.0,

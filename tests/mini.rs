@@ -57,10 +57,7 @@ fn minimized_files_decode_like_the_regular_writer() {
             "hevc-pcm",
             StillCodec::Hevc,
             picture(64, 48, Chroma::Yuv420, 8),
-            EncodeOptions {
-                hevc_mode: "pcm".into(),
-                ..EncodeOptions::default()
-            },
+            EncodeOptions::default().with_hevc_mode("pcm".into()),
         ),
         (
             "hevc-intra-alpha-meta",
@@ -68,35 +65,28 @@ fn minimized_files_decode_like_the_regular_writer() {
             picture(96, 80, Chroma::Yuv420, 8)
                 .with_alpha_plane(&alpha_plane(96, 80))
                 .unwrap(),
-            EncodeOptions {
-                exif: Some(b"II*\0\x08\0\0\0\0\0".to_vec()),
-                xmp: Some("<x:xmpmeta>mini</x:xmpmeta>".into()),
-                icc_profile: Some(vec![0x42; 64]),
-                transforms: vec![
-                    Property::Irot(Irot { angle: 1 }),
-                    Property::Imir(Imir { axis: 1 }),
-                ],
-                ..EncodeOptions::default()
-            },
+            EncodeOptions::default()
+                .with_exif(Some(b"II*\0\x08\0\0\0\0\0".to_vec()))
+                .with_xmp(Some("<x:xmpmeta>mini</x:xmpmeta>".into()))
+                .with_icc_profile(Some(vec![0x42; 64]))
+                .with_transforms(vec![
+                    Property::Irot(Irot::new(1)),
+                    Property::Imir(Imir::new(1)),
+                ]),
         ),
         (
             "av1-444-10bit",
             StillCodec::Av1,
             picture(40, 24, Chroma::Yuv444, 10),
-            EncodeOptions {
-                codec: StillCodec::Av1,
-                ..EncodeOptions::default()
-            },
+            EncodeOptions::default().with_codec(StillCodec::Av1),
         ),
         (
             "av1-mono-large",
             StillCodec::Av1,
             picture(200, 136, Chroma::Mono, 8),
-            EncodeOptions {
-                codec: StillCodec::Av1,
-                transforms: vec![Property::Irot(Irot { angle: 2 })],
-                ..EncodeOptions::default()
-            },
+            EncodeOptions::default()
+                .with_codec(StillCodec::Av1)
+                .with_transforms(vec![Property::Irot(Irot::new(2))]),
         ),
     ];
     for (name, codec, frame, mut opts) in cases {
@@ -159,44 +149,25 @@ fn minimized_gain_map_round_trips() {
     let base = picture(64, 48, Chroma::Yuv420, 8);
     let map = picture(32, 24, Chroma::Mono, 8);
     let r = |num: i64, den: u32| Rational { num, den };
-    let ch = GainMapChannel {
-        gain_map_min: r(0, 1),
-        gain_map_max: r(2, 1),
-        gamma: r(1, 1),
-        base_offset: r(1, 64),
-        alternate_offset: r(1, 64),
-    };
-    let metadata = GainMapMetadata {
-        minimum_version: 0,
-        writer_version: 0,
-        is_multichannel: false,
-        use_base_colour_space: true,
-        base_hdr_headroom: r(0, 1),
-        alternate_hdr_headroom: r(2, 1),
-        channels: vec![ch],
-    };
+    let ch = GainMapChannel::new(r(0, 1), r(2, 1), r(1, 1), r(1, 64), r(1, 64));
+    let metadata = GainMapMetadata::new(0, 0, false, true, r(0, 1), r(2, 1), vec![ch]);
     let alternate = Colr::Nclx {
         primaries: 9,
         transfer: 16,
         matrix: 9,
         full_range: true,
     };
-    let opts = EncodeOptions {
-        codec: StillCodec::Av1,
-        gain_map: Some(GainMapSpec {
-            frame: map.clone(),
-            metadata: metadata.clone(),
-            alternate_colr: alternate.clone(),
-            gain_map_matrix: 2,
-            gain_map_full_range: true,
-            alternate_clli: Some(Clli {
-                max_content_light_level: 1000,
-                max_pic_average_light_level: 200,
-            }),
-            alternate_bit_depth: 10,
-        }),
-        ..EncodeOptions::default()
-    };
+    let opts = EncodeOptions::default()
+        .with_codec(StillCodec::Av1)
+        .with_gain_map(Some(GainMapSpec::new(
+            map.clone(),
+            metadata.clone(),
+            alternate.clone(),
+            2,
+            true,
+            Some(Clli::new(1000, 200)),
+            10,
+        )));
     let bytes = encode_still_minimized(&base, &opts).unwrap();
     let f = HeifFile::parse(&bytes).unwrap();
     assert!(f.file_type.has_brand(b"tmap"), "O.2.1.2 implied tmap");
@@ -218,10 +189,7 @@ fn minimized_gain_map_round_trips() {
     assert_eq!(r.frame, img.frame);
     assert_eq!(r.gain_map.unwrap().frame, gm.frame);
     // HEVC codes a luma-only map as 4:2:0: refused, not mislabelled.
-    let hevc = EncodeOptions {
-        codec: StillCodec::Hevc,
-        ..opts.clone()
-    };
+    let hevc = opts.clone().with_codec(StillCodec::Hevc);
     assert!(encode_still_minimized(&base, &hevc).is_err());
 }
 
@@ -230,10 +198,7 @@ fn minimized_gain_map_round_trips() {
 #[test]
 fn minimized_compressed_metadata_and_limits() {
     let frame = picture(32, 32, Chroma::Yuv420, 8);
-    let opts = EncodeOptions {
-        hevc_mode: "pcm".into(),
-        ..EncodeOptions::default()
-    };
+    let opts = EncodeOptions::default().with_hevc_mode("pcm".into());
     let bytes = encode_still_minimized(&frame, &opts).unwrap();
     let f = HeifFile::parse(&bytes).unwrap();
     let mut m = f.minimized.clone().unwrap();
@@ -259,10 +224,7 @@ fn minimized_compressed_metadata_and_limits() {
     // No clap slot: a picture off the coding grid is refused.
     assert!(encode_still_minimized(&picture(30, 32, Chroma::Yuv420, 8), &opts).is_err());
     // No grid / thumbnail slot.
-    let grid = EncodeOptions {
-        grid_tile: Some(64),
-        ..opts.clone()
-    };
+    let grid = opts.clone().with_grid_tile(Some(64));
     assert!(encode_still_minimized(&frame, &grid).is_err());
 }
 
@@ -278,10 +240,7 @@ fn minimized_file_in_black_box_readers() {
     let dir = common::scratch_dir("mini");
     for (codec, tag) in [(StillCodec::Hevc, "hevc"), (StillCodec::Av1, "av1")] {
         let frame = picture(64, 48, Chroma::Yuv420, 8);
-        let opts = EncodeOptions {
-            codec,
-            ..EncodeOptions::default()
-        };
+        let opts = EncodeOptions::default().with_codec(codec);
         let mini = encode_still_minimized(&frame, &opts).unwrap();
         let regular = encode_still(&frame, &opts).unwrap();
         let render = |bytes: &[u8], name: &str| -> Option<Vec<u8>> {

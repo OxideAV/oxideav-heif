@@ -225,8 +225,8 @@ fn main() {
             .set(
                 "codec",
                 match opts.codec {
-                    StillCodec::Hevc => "hevc",
                     StillCodec::Av1 => "av1",
+                    _ => "hevc",
                 },
             )
             .set("mode", opts.hevc_mode.as_str())
@@ -315,8 +315,8 @@ fn main() {
     println!(
         "{label} {w}x{h} {} {} qp{} grid={:?} threads={threads} {}: {} bytes fnv={hash:016x}",
         match opts.codec {
-            StillCodec::Hevc => "hevc",
             StillCodec::Av1 => "av1",
+            _ => "hevc",
         },
         opts.hevc_mode,
         opts.qp,

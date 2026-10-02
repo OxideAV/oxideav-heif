@@ -23,6 +23,7 @@ pub const MAX_TRACKS: usize = 1 << 12;
 
 /// `ccst` — coding constraints (§7.2.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CodingConstraints {
     /// `all_ref_pics_intra`.
     pub all_ref_pics_intra: bool,
@@ -31,9 +32,22 @@ pub struct CodingConstraints {
     /// `max_ref_per_pic` (15 = unconstrained).
     pub max_ref_per_pic: u8,
 }
+impl CodingConstraints {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(all_ref_pics_intra: bool, intra_pred_used: bool, max_ref_per_pic: u8) -> Self {
+        Self {
+            all_ref_pics_intra,
+            intra_pred_used,
+            max_ref_per_pic,
+        }
+    }
+}
 
 /// One visual sample entry of a track's `stsd`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SampleEntry {
     /// Entry type (`hvc1`, `hev1`, `av01`, …).
     pub entry_type: FourCc,
@@ -72,9 +86,57 @@ pub struct SampleEntry {
     /// Every child box, raw, in order.
     pub children: Vec<RawProperty>,
 }
+impl SampleEntry {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        entry_type: FourCc,
+        data_reference_index: u16,
+        width: u16,
+        height: u16,
+        hvcc: Option<HevcConfig>,
+        av1c: Option<Av1Config>,
+        avcc: Option<crate::avcc::AvcConfig>,
+        lhvc: Option<crate::lhvc::LhevcConfig>,
+        ccst: Option<CodingConstraints>,
+        aux_track_type: Option<String>,
+        colr: Vec<Colr>,
+        clap: Option<Clap>,
+        pasp: Option<Pasp>,
+        clli: Option<Clli>,
+        mdcv: Option<Mdcv>,
+        cclv: Option<Cclv>,
+        amve: Option<Amve>,
+        children: Vec<RawProperty>,
+    ) -> Self {
+        Self {
+            entry_type,
+            data_reference_index,
+            width,
+            height,
+            hvcc,
+            av1c,
+            avcc,
+            lhvc,
+            ccst,
+            aux_track_type,
+            colr,
+            clap,
+            pasp,
+            clli,
+            mdcv,
+            cclv,
+            amve,
+            children,
+        }
+    }
+}
 
 /// One sample of a track.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Sample {
     /// Absolute file offset.
     pub offset: u64,
@@ -91,6 +153,30 @@ pub struct Sample {
     /// 1-based `stsd` entry index.
     pub description_index: u32,
 }
+impl Sample {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        offset: u64,
+        size: u32,
+        dts: u64,
+        cts_offset: i64,
+        duration: u32,
+        is_sync: bool,
+        description_index: u32,
+    ) -> Self {
+        Self {
+            offset,
+            size,
+            dts,
+            cts_offset,
+            duration,
+            is_sync,
+            description_index,
+        }
+    }
+}
 
 impl Sample {
     /// Presentation time (`dts + cts_offset`), saturating at 0.
@@ -101,6 +187,7 @@ impl Sample {
 
 /// One `elst` entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Edit {
     /// `segment_duration` (movie timescale).
     pub segment_duration: u64,
@@ -109,19 +196,41 @@ pub struct Edit {
     /// `media_rate` as a 16.16 fixed-point value.
     pub media_rate: i32,
 }
+impl Edit {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(segment_duration: u64, media_time: i64, media_rate: i32) -> Self {
+        Self {
+            segment_duration,
+            media_time,
+            media_rate,
+        }
+    }
+}
 
 /// Orientation derived from the §7.2.1 track-header matrix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TrackOrientation {
     /// Anti-clockwise rotation in units of 90°.
     pub rotation: u8,
     /// Horizontal mirror (left/right exchanged) before rotation.
     pub mirror: bool,
 }
+impl TrackOrientation {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(rotation: u8, mirror: bool) -> Self {
+        Self { rotation, mirror }
+    }
+}
 
 /// A sample-to-group mapping (`sbgp`, ISO/IEC 14496-12 §8.9.2, or the
 /// compact `csgp`, §8.9.5, expanded to the same run list).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SampleGroup {
     /// `grouping_type`.
     pub grouping_type: FourCc,
@@ -133,6 +242,24 @@ pub struct SampleGroup {
     pub entries: Vec<(u32, u32)>,
     /// `true` when parsed from a `csgp` box.
     pub compact: bool,
+}
+impl SampleGroup {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        grouping_type: FourCc,
+        grouping_type_parameter: Option<u32>,
+        entries: Vec<(u32, u32)>,
+        compact: bool,
+    ) -> Self {
+        Self {
+            grouping_type,
+            grouping_type_parameter,
+            entries,
+            compact,
+        }
+    }
 }
 
 impl SampleGroup {
@@ -154,6 +281,7 @@ impl SampleGroup {
 /// One `sgpd` box (§8.9.3): the group descriptions of a grouping type;
 /// entries stay raw (their layout is per grouping type).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SampleGroupDescription {
     /// `grouping_type`.
     pub grouping_type: FourCc,
@@ -166,9 +294,30 @@ pub struct SampleGroupDescription {
     /// The `SampleGroupDescriptionEntry` bodies, 1-based in the file.
     pub entries: Vec<Vec<u8>>,
 }
+impl SampleGroupDescription {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        grouping_type: FourCc,
+        version: u8,
+        default_length: u32,
+        default_group_description_index: u32,
+        entries: Vec<Vec<u8>>,
+    ) -> Self {
+        Self {
+            grouping_type,
+            version,
+            default_length,
+            default_group_description_index,
+            entries,
+        }
+    }
+}
 
 /// A `prft` box (§8.16.5): producer reference time for one track.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProducerReferenceTime {
     /// Box flags (0 / 1 / 2 / 4 / 8 / 16 / 24, §8.16.5.3).
     pub flags: u32,
@@ -179,12 +328,34 @@ pub struct ProducerReferenceTime {
     /// `media_time` (32-bit in v0, 64-bit in v1).
     pub media_time: u64,
 }
+impl ProducerReferenceTime {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(flags: u32, reference_track_id: u32, ntp_timestamp: u64, media_time: u64) -> Self {
+        Self {
+            flags,
+            reference_track_id,
+            ntp_timestamp,
+            media_time,
+        }
+    }
+}
 
 /// An `ssix` box (§8.16.4): per subsegment, `(level, range_size)` runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SubsegmentIndex {
     /// One `Vec<(level, range_size)>` per subsegment.
     pub subsegments: Vec<Vec<(u8, u32)>>,
+}
+impl SubsegmentIndex {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(subsegments: Vec<Vec<(u8, u32)>>) -> Self {
+        Self { subsegments }
+    }
 }
 
 /// Upper bound on sample-group runs / description entries per box.
@@ -194,6 +365,7 @@ pub const MAX_CSGP_RUNS: usize = 1 << 16;
 
 /// One track.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Track {
     /// `track_ID`.
     pub track_id: u32,
@@ -232,10 +404,56 @@ pub struct Track {
     /// `sgpd` group descriptions of the `stbl`, in file order.
     pub sample_group_descriptions: Vec<SampleGroupDescription>,
 }
+impl Track {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        track_id: u32,
+        enabled: bool,
+        in_movie: bool,
+        handler: FourCc,
+        timescale: u32,
+        duration: u64,
+        width: u32,
+        height: u32,
+        matrix: [i32; 9],
+        sample_entries: Vec<SampleEntry>,
+        samples: Vec<Sample>,
+        references: Vec<(FourCc, Vec<u32>)>,
+        edits: Vec<Edit>,
+        repeat_edits: bool,
+        track_duration: u64,
+        sample_groups: Vec<SampleGroup>,
+        sample_group_descriptions: Vec<SampleGroupDescription>,
+    ) -> Self {
+        Self {
+            track_id,
+            enabled,
+            in_movie,
+            handler,
+            timescale,
+            duration,
+            width,
+            height,
+            matrix,
+            sample_entries,
+            samples,
+            references,
+            edits,
+            repeat_edits,
+            track_duration,
+            sample_groups,
+            sample_group_descriptions,
+        }
+    }
+}
 
 /// How many times an image sequence plays (MIAF Amd 1:2025 Annex A.2,
 /// the behaviour browsers converged on).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LoopBehaviour {
     /// Play indefinitely (no `elst`, or `RepeatEdits` with an
     /// indefinite `tkhd` duration).
@@ -411,6 +629,7 @@ impl Track {
 
 /// The `moov` box.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Movie {
     /// `mvhd` timescale.
     pub timescale: u32,
@@ -422,6 +641,26 @@ pub struct Movie {
     pub producer_reference_times: Vec<ProducerReferenceTime>,
     /// Top-level `ssix` boxes, in file order.
     pub subsegment_indexes: Vec<SubsegmentIndex>,
+}
+impl Movie {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        timescale: u32,
+        duration: u64,
+        tracks: Vec<Track>,
+        producer_reference_times: Vec<ProducerReferenceTime>,
+        subsegment_indexes: Vec<SubsegmentIndex>,
+    ) -> Self {
+        Self {
+            timescale,
+            duration,
+            tracks,
+            producer_reference_times,
+            subsegment_indexes,
+        }
+    }
 }
 
 impl Movie {

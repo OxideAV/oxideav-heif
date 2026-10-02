@@ -5,6 +5,8 @@
 
 mod common;
 
+use oxideav_heif::encode::EncodeOptions;
+
 use std::io::Cursor;
 
 use common::{all_bundles, fixture_bytes, fixture_root};
@@ -168,10 +170,7 @@ fn still_stream_carries_the_full_range_pixel_format() {
         128,
     )
     .unwrap();
-    let mut opts = oxideav_heif::EncodeOptions {
-        hevc_mode: "pcm".into(),
-        ..Default::default()
-    };
+    let mut opts = EncodeOptions::default().with_hevc_mode("pcm".into());
     opts.colr = oxideav_heif::props::Colr::Nclx {
         primaries: 1,
         transfer: 13,

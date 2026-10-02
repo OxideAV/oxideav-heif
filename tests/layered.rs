@@ -51,51 +51,30 @@ fn source() -> (HevcConfig, LhevcConfig, Vec<u8>) {
 /// An `oinf` for a two-view stream: output layer set 0 = the base, set
 /// 1 = both layers output (HEIF B.2.3.3).
 fn oinf_for(hvcc: &HevcConfig) -> OperatingPoints {
-    let layer = |id: u8, out: bool| OperatingPointLayer {
-        ptl_idx: 1,
-        layer_id: id,
-        is_output_layer: out,
-        is_alternate_output_layer: false,
+    let layer = |id: u8, out: bool| OperatingPointLayer::new(1, id, out, false);
+    let op = |ols: u16, layers: Vec<OperatingPointLayer>| {
+        OperatingPoint::new(ols, 0, layers, (960, 960), (960, 960), 1, 0, None, None)
     };
-    let op = |ols: u16, layers: Vec<OperatingPointLayer>| OperatingPoint {
-        output_layer_set_idx: ols,
-        max_temporal_id: 0,
-        layers,
-        min_pic_size: (960, 960),
-        max_pic_size: (960, 960),
-        max_chroma_format: 1,
-        max_bit_depth_minus8: 0,
-        frame_rate: None,
-        bit_rate: None,
-    };
-    OperatingPoints {
-        scalability_mask: 0b1_0000, // view order index dimension
-        ptls: vec![OperatingPointPtl {
-            profile_space: 0,
-            tier_flag: false,
-            profile_idc: hvcc.general_profile_idc,
-            profile_compatibility_flags: hvcc.general_profile_compatibility_flags,
-            constraint_indicator_flags: hvcc.general_constraint_indicator_flags,
-            level_idc: hvcc.general_level_idc,
-        }],
-        operating_points: vec![
+    OperatingPoints::new(
+        0b1_0000, // view order index dimension
+        vec![OperatingPointPtl::new(
+            0,
+            false,
+            hvcc.general_profile_idc,
+            hvcc.general_profile_compatibility_flags,
+            hvcc.general_constraint_indicator_flags,
+            hvcc.general_level_idc,
+        )],
+        vec![
             op(0, vec![layer(0, true)]),
             op(1, vec![layer(0, true), layer(1, true)]),
         ],
-        layers: vec![
-            LayerDependency {
-                layer_id: 0,
-                direct_ref_layer_ids: vec![],
-                dimension_identifiers: vec![(4, 0)],
-            },
-            LayerDependency {
-                layer_id: 1,
-                direct_ref_layer_ids: vec![0],
-                dimension_identifiers: vec![(4, 1)],
-            },
+        vec![
+            LayerDependency::new(0, vec![], vec![(4, 0)]),
+            LayerDependency::new(1, vec![0], vec![(4, 1)]),
         ],
-        raw: Vec::new(),
-    }
+        Vec::new(),
+    )
 }
 
 fn lhv1_props(hvcc: &HevcConfig, lhvc: &LhevcConfig, lsel: Option<u16>) -> Vec<(Property, bool)> {
@@ -104,23 +83,12 @@ fn lhv1_props(hvcc: &HevcConfig, lhvc: &LhevcConfig, lsel: Option<u16>) -> Vec<(
         (Property::LhvC(lhvc.clone()), true),
         (Property::Oinf(oinf_for(hvcc)), false),
         (Property::Tols(1), true),
-        (
-            Property::Ispe(Ispe {
-                width: 960,
-                height: 960,
-            }),
-            false,
-        ),
-        (
-            Property::Pixi(Pixi {
-                bits_per_channel: vec![8, 8, 8],
-            }),
-            false,
-        ),
+        (Property::Ispe(Ispe::new(960, 960)), false),
+        (Property::Pixi(Pixi::new(vec![8, 8, 8])), false),
         (Property::Colr(Colr::MIAF_DEFAULT), false),
     ];
     if let Some(l) = lsel {
-        v.push((Property::Lsel(Lsel { layer_id: l }), true));
+        v.push((Property::Lsel(Lsel::new(l)), true));
     }
     v
 }

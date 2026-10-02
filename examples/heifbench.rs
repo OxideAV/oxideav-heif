@@ -165,10 +165,7 @@ fn main() {
             let mut t = Vec::new();
             for _ in 0..runs {
                 let s = Instant::now();
-                let opts = EncodeOptions {
-                    threads: Some(threads),
-                    ..EncodeOptions::default()
-                };
+                let opts = EncodeOptions::default().with_threads(Some(threads));
                 let out = encode_still(&img.frame, &opts).expect("hevc encode");
                 t.push(s.elapsed());
                 if t.len() == 1 {
@@ -184,12 +181,10 @@ fn main() {
             let big = img.width() as u64 * img.height() as u64 > 4_000_000;
             if !big || all_encodes {
                 let mut t = Vec::new();
-                let opts = EncodeOptions {
-                    codec: StillCodec::Av1,
-                    av1_quality: Some(60),
-                    threads: Some(threads),
-                    ..EncodeOptions::default()
-                };
+                let opts = EncodeOptions::default()
+                    .with_codec(StillCodec::Av1)
+                    .with_av1_quality(Some(60))
+                    .with_threads(Some(threads));
                 let mut size = 0;
                 for _ in 0..runs {
                     let s = Instant::now();

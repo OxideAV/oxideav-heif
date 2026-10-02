@@ -512,6 +512,21 @@ container adds no copies any more. Handing a single still's codec the
 thread budget measured slower (HEVC 0.30 → 0.34 s), so the budget is
 spent on independent items only.
 
+## Constructing the crate's types
+
+Every public record (typed properties, `meta` records, codec
+configurations, descriptors, `EncodeOptions`, …) is
+`#[non_exhaustive]`: build it with `Type::new(<every field, in
+declaration order>)` — or `Default` where one exists — then read /
+assign its public fields; the option records `EncodeOptions`,
+`HeifEncoderOptions` and `GainMapSpec` also take `with_<field>`
+setters (`EncodeOptions::default().with_qp(20).with_threads(Some(8))`).
+The enums that grow with the standard (`Property`, `Colr`,
+`HeifError`, `StillCodec`, `MiafProfile`, …) are `#[non_exhaustive]`
+too: match them with a `_` arm. `Chroma`, `HeifFrame` / `HeifPlane` /
+`HeifPixelFormat`, `CropRect` and `Rational` stay plain (closed by the
+standard, or the fundamental sample model).
+
 ## Standalone build
 
 ```toml

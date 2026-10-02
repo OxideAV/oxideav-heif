@@ -31,6 +31,7 @@ use crate::image::{Chroma, HeifPixelFormat};
 
 /// Parsed `avcC` record.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AvcConfig {
     /// `configurationVersion` (1).
     pub configuration_version: u8,
@@ -56,6 +57,41 @@ pub struct AvcConfig {
     pub sps_ext: Vec<Vec<u8>>,
     /// The record bytes as parsed / serialized.
     pub raw: Vec<u8>,
+}
+impl AvcConfig {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        configuration_version: u8,
+        profile_idc: u8,
+        profile_compatibility: u8,
+        level_idc: u8,
+        length_size: u8,
+        sps: Vec<Vec<u8>>,
+        pps: Vec<Vec<u8>>,
+        chroma_format: Option<u8>,
+        bit_depth_luma_minus8: Option<u8>,
+        bit_depth_chroma_minus8: Option<u8>,
+        sps_ext: Vec<Vec<u8>>,
+        raw: Vec<u8>,
+    ) -> Self {
+        Self {
+            configuration_version,
+            profile_idc,
+            profile_compatibility,
+            level_idc,
+            length_size,
+            sps,
+            pps,
+            chroma_format,
+            bit_depth_luma_minus8,
+            bit_depth_chroma_minus8,
+            sps_ext,
+            raw,
+        }
+    }
 }
 
 impl AvcConfig {

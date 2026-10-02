@@ -26,12 +26,7 @@ const TYPES: &[&[u8; 4]] = &[
 
 fn round_trip(p: &Property) {
     let bytes = property_box(p);
-    let raw = RawProperty {
-        box_type: p.box_type(),
-        user_type: None,
-        body: bytes[8..].to_vec(),
-        box_size: bytes.len(),
-    };
+    let raw = RawProperty::new(p.box_type(), None, bytes[8..].to_vec(), bytes.len());
     if let Ok(back) = Property::parse(&raw) {
         match p {
             // Decoder configuration records keep their input bytes in
@@ -62,12 +57,7 @@ fuzz_target!(|data: &[u8]| {
     let body = &data[1..];
     // Typed property under the selected box type.
     let t = TYPES[sel % TYPES.len()];
-    let raw = RawProperty {
-        box_type: *t,
-        user_type: None,
-        body: body.to_vec(),
-        box_size: body.len() + 8,
-    };
+    let raw = RawProperty::new(*t, None, body.to_vec(), body.len() + 8);
     if let Ok(p) = Property::parse(&raw) {
         round_trip(&p);
     }
@@ -78,16 +68,11 @@ fuzz_target!(|data: &[u8]| {
             let again = oxideav_heif::mini::MinimizedImage::parse(&b[8..]).unwrap();
             assert_eq!(again, m, "mini must round-trip");
         }
-        let ft = oxideav_heif::FileType {
-            box_type: *b"ftyp",
-            major_brand: *b"mif3",
-            minor_version: if sel & 1 == 1 {
+        let ft = oxideav_heif::FileType::new(*b"ftyp", *b"mif3", if sel & 1 == 1 {
                 u32::from_be_bytes(*b"vvi3")
             } else {
                 0
-            },
-            compatible_brands: vec![],
-        };
+            }, vec![]);
         if let Ok(eq) = m.equivalent_file(&ft) {
             let f = oxideav_heif::HeifFile::parse(&eq).expect("equivalent file parses");
             let _ = oxideav_heif::miaf::check(&f, oxideav_heif::MiafProfile::Miaf);
@@ -96,14 +81,7 @@ fuzz_target!(|data: &[u8]| {
     }
     // deti data reference (Amd 2 §6.11.5) + its offset table over the
     // same bytes.
-    let dref = oxideav_heif::meta::DataReference {
-        entry_type: *b"deti",
-        self_contained: (sel >> 7) & 1 == 0,
-        location: String::new(),
-        name: String::new(),
-        flags: sel as u32,
-        payload: body.to_vec(),
-    };
+    let dref = oxideav_heif::meta::DataReference::new(*b"deti", (sel >> 7) & 1 == 0, String::new(), String::new(), sel as u32, body.to_vec());
     if let Ok(d) = oxideav_heif::tiled::DataEntryTiledItem::parse(&dref) {
         let _ = d.tile_spans(body, (sel % 7) as u64);
     }

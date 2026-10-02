@@ -315,27 +315,22 @@ fn writer_authors_a_tmap_the_black_box_tool_tone_maps_identically() {
     else {
         panic!("gain map colr");
     };
-    let spec = GainMapSpec {
-        frame: gm.frame.clone(),
-        metadata: gm.metadata.clone(),
-        alternate_colr: gm.alternate_colr.clone().unwrap(),
-        gain_map_matrix: matrix,
-        gain_map_full_range: full_range,
-        alternate_clli: Some(oxideav_heif::props::Clli {
-            max_content_light_level: 4000,
-            max_pic_average_light_level: 400,
-        }),
-        alternate_bit_depth: 12,
-    };
+    let spec = GainMapSpec::new(
+        gm.frame.clone(),
+        gm.metadata.clone(),
+        gm.alternate_colr.clone().unwrap(),
+        matrix,
+        full_range,
+        Some(oxideav_heif::props::Clli::new(4000, 400)),
+        12,
+    );
     let dir = common::scratch_dir("tmap");
     for (codec, ext) in [(StillCodec::Av1, "avif"), (StillCodec::Hevc, "heic")] {
-        let opts = EncodeOptions {
-            codec,
-            hevc_mode: "pcm".into(),
-            colr: base.nclx.clone(),
-            gain_map: Some(spec.clone()),
-            ..EncodeOptions::default()
-        };
+        let opts = EncodeOptions::default()
+            .with_codec(codec)
+            .with_hevc_mode("pcm".into())
+            .with_colr(base.nclx.clone())
+            .with_gain_map(Some(spec.clone()));
         let bytes = encode_still(&base.frame, &opts).unwrap();
         let f = HeifFile::parse(&bytes).unwrap();
         assert!(f.file_type.has_brand(b"tmap"));

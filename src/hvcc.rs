@@ -47,6 +47,7 @@ pub const HEVC_CONFIG_HEAD_LEN: usize = 23;
 
 /// One parameter-set / SEI array of the record.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NalArray {
     /// `array_completeness`.
     pub complete: bool,
@@ -59,10 +60,29 @@ pub struct NalArray {
     /// The NAL units (two-byte header + payload each, no length prefix).
     pub nal_units: Vec<Vec<u8>>,
 }
+impl NalArray {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    pub fn new(
+        complete: bool,
+        reserved_bit: bool,
+        nal_unit_type: u8,
+        nal_units: Vec<Vec<u8>>,
+    ) -> Self {
+        Self {
+            complete,
+            reserved_bit,
+            nal_unit_type,
+            nal_units,
+        }
+    }
+}
 
 /// Parsed `hvcC` record. The raw bytes are kept for the decoder
 /// hand-off and for byte-exact rewriting.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HevcConfig {
     /// `configurationVersion` (1).
     pub configuration_version: u8,
@@ -102,6 +122,55 @@ pub struct HevcConfig {
     pub arrays: Vec<NalArray>,
     /// The record bytes as found in the file.
     pub raw: Vec<u8>,
+}
+impl HevcConfig {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default` where one exists, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        configuration_version: u8,
+        general_profile_space: u8,
+        general_tier_flag: bool,
+        general_profile_idc: u8,
+        general_profile_compatibility_flags: u32,
+        general_constraint_indicator_flags: u64,
+        general_level_idc: u8,
+        min_spatial_segmentation_idc: u16,
+        parallelism_type: u8,
+        chroma_format_idc: u8,
+        bit_depth_luma_minus8: u8,
+        bit_depth_chroma_minus8: u8,
+        avg_frame_rate: u16,
+        constant_frame_rate: u8,
+        num_temporal_layers: u8,
+        temporal_id_nested: bool,
+        length_size: u8,
+        arrays: Vec<NalArray>,
+        raw: Vec<u8>,
+    ) -> Self {
+        Self {
+            configuration_version,
+            general_profile_space,
+            general_tier_flag,
+            general_profile_idc,
+            general_profile_compatibility_flags,
+            general_constraint_indicator_flags,
+            general_level_idc,
+            min_spatial_segmentation_idc,
+            parallelism_type,
+            chroma_format_idc,
+            bit_depth_luma_minus8,
+            bit_depth_chroma_minus8,
+            avg_frame_rate,
+            constant_frame_rate,
+            num_temporal_layers,
+            temporal_id_nested,
+            length_size,
+            arrays,
+            raw,
+        }
+    }
 }
 
 impl HevcConfig {
