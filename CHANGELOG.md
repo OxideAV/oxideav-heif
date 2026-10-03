@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.8](https://github.com/OxideAV/oxideav-heif/compare/v0.0.7...v0.0.8) - 2026-10-02
+
+### Other
+
+- plumbing records go #[doc(hidden)] (non_exhaustive dropped there); documented records keep the constructors
+
 ### Changed (API hygiene, pass 2 — plumbing records leave the documented surface)
 
 - `#[doc(hidden)]` (and no longer `#[non_exhaustive]` — hidden items
