@@ -12,14 +12,14 @@
 //! becomes grey; an alpha plane is carried through untouched.
 
 use crate::error::{HeifError, Result};
-use crate::image::{Chroma, HeifFrame, HeifPixelFormat};
+use crate::image::{Chroma, HeifFrame, HeifPixelFormat, Plane};
 use crate::props::Colr;
 
 /// An interleaved RGB / RGBA picture, one `u16` per sample holding
 /// `bit_depth` significant bits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct RgbImage {
+pub struct RgbImage16 {
     /// Width in pixels.
     pub width: u32,
     /// Height in pixels.
@@ -31,7 +31,7 @@ pub struct RgbImage {
     /// `width × height × channels` samples, row-major.
     pub data: Vec<u16>,
 }
-impl RgbImage {
+impl RgbImage16 {
     /// Every field as a positional argument, in declaration order
     /// (the struct is `#[non_exhaustive]`: build it here or from
     /// `Default` where one exists, then read / assign its public fields).
@@ -46,7 +46,7 @@ impl RgbImage {
     }
 }
 
-impl RgbImage {
+impl RgbImage16 {
     /// One sample.
     #[inline]
     pub fn sample(&self, x: u32, y: u32, c: usize) -> u16 {
@@ -81,21 +81,120 @@ pub fn matrix_kr_kb(matrix: u16) -> Option<(f64, f64)> {
 
 /// Convert `frame` to RGB(A) using the matrix / range of `colr`
 /// (`nclx`; an ICC or absent `colr` falls back to the MIAF default:
-/// BT.601 matrix, full range).
-pub fn to_rgb(frame: &HeifFrame, colr: Option<&Colr>) -> Result<RgbImage> {
+/// BT.601 matrix, full range). Samples keep the frame's bit depth.
+pub fn to_rgb(frame: &HeifFrame, colr: Option<&Colr>) -> Result<RgbImage16> {
     frame.validate()?;
+    let depth = frame.format.bit_depth;
+    let max = ((1u32 << depth) - 1) as f64;
+    let has_alpha = frame.format.has_alpha;
+    let channels = 3 + has_alpha as usize;
+    let mut data = Vec::with_capacity(frame.width as usize * frame.height as usize * channels);
+    let quant = |v: f64| (v * max).round().clamp(0.0, max) as u16;
+    for_each_pixel(
+        frame.width,
+        frame.height,
+        frame.format,
+        &frame.planes,
+        colr,
+        |rgb, alpha| {
+            data.extend_from_slice(&[quant(rgb[0]), quant(rgb[1]), quant(rgb[2])]);
+            if has_alpha {
+                data.push(alpha);
+            }
+        },
+    )?;
+    Ok(RgbImage16 {
+        width: frame.width,
+        height: frame.height,
+        channels,
+        bit_depth: depth,
+        data,
+    })
+}
+
+/// Convert planes of `layout` to tightly packed 8-bit RGB (`alpha`
+/// false) or RGBA (`alpha` true): the same kernel as [`to_rgb`], the
+/// normalised result quantised to 8 bits (round to nearest), the alpha
+/// plane scaled to 8 bits and opaque (255) when the layout has none.
+pub fn planes_to_rgb8(
+    width: u32,
+    height: u32,
+    layout: HeifPixelFormat,
+    planes: &[Plane],
+    colr: Option<&Colr>,
+    alpha: bool,
+) -> Result<Vec<u8>> {
+    let out_bpp = 3 + alpha as usize;
+    let mut data = Vec::with_capacity(width as usize * height as usize * out_bpp);
+    let src_max = layout.max_value() as f64;
+    let quant = |v: f64| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+    for_each_pixel(width, height, layout, planes, colr, |rgb, a| {
+        data.extend_from_slice(&[quant(rgb[0]), quant(rgb[1]), quant(rgb[2])]);
+        if alpha {
+            data.push(if layout.has_alpha {
+                (a as f64 / src_max * 255.0).round().clamp(0.0, 255.0) as u8
+            } else {
+                255
+            });
+        }
+    })?;
+    Ok(data)
+}
+
+/// The YCbCr → RGB kernel shared by [`to_rgb`] and [`planes_to_rgb8`]:
+/// calls `f(rgb, alpha)` per pixel in row-major order with the
+/// normalised (0.0 ..= 1.0, unclamped) RGB and the raw alpha sample (0
+/// when the layout has no alpha plane). H.273 §8.3 equations with the
+/// matrix / range of `colr` (MIAF default for ICC / absent); identity
+/// matrix 0 reads the planes as G, B, R; monochrome becomes grey;
+/// sub-sampled chroma is replicated to its co-sited luma samples.
+pub fn for_each_pixel(
+    width: u32,
+    height: u32,
+    layout: HeifPixelFormat,
+    planes: &[Plane],
+    colr: Option<&Colr>,
+    mut f: impl FnMut([f64; 3], u16),
+) -> Result<()> {
+    // Geometry check without cloning the planes.
+    if planes.len() != layout.plane_count() {
+        return Err(HeifError::invalid(format!(
+            "{} planes, layout needs {}",
+            planes.len(),
+            layout.plane_count()
+        )));
+    }
+    let bps = layout.bytes_per_sample();
+    for (i, p) in planes.iter().enumerate() {
+        let (w, h) = layout.plane_dims(i, width, height);
+        if p.stride < w as usize * bps
+            || p.stride == 0
+            || h == 0
+            || p.data.len() < p.stride * (h as usize - 1) + w as usize * bps
+        {
+            return Err(HeifError::invalid(format!(
+                "plane {i} too small for its layout"
+            )));
+        }
+    }
+    let sample = |plane: usize, x: u32, y: u32| -> u16 {
+        let p = &planes[plane];
+        let i = y as usize * p.stride + x as usize * bps;
+        if bps == 1 {
+            p.data[i] as u16
+        } else {
+            u16::from_le_bytes([p.data[i], p.data[i + 1]])
+        }
+    };
     let (matrix, full_range) = match colr {
         Some(Colr::Nclx {
             matrix, full_range, ..
         }) => (*matrix, *full_range),
         _ => (6, true),
     };
-    let depth = frame.format.bit_depth as u32;
+    let depth = layout.bit_depth as u32;
     let max = ((1u32 << depth) - 1) as f64;
-    let channels = 3 + frame.format.has_alpha as usize;
-    let alpha = frame.format.alpha_plane();
-    let (w, h) = (frame.width, frame.height);
-    let mut data = Vec::with_capacity(w as usize * h as usize * channels);
+    let alpha = layout.alpha_plane();
     // Limited-range scale factors (H.273 equations 20–22 inverted).
     let sh = (1u32 << (depth - 8)) as f64;
     let (y_off, y_scale, c_scale) = if full_range {
@@ -104,64 +203,52 @@ pub fn to_rgb(frame: &HeifFrame, colr: Option<&Colr>) -> Result<RgbImage> {
         (16.0 * sh, 219.0 * sh, 224.0 * sh)
     };
     let mid = (1u32 << (depth - 1)) as f64;
-    let quant = |v: f64| (v * max).round().clamp(0.0, max) as u16;
-    if frame.format.chroma == Chroma::Mono {
+    let (w, h) = (width, height);
+    if layout.chroma == Chroma::Mono {
         for y in 0..h {
             for x in 0..w {
-                let g = quant((frame.sample(0, x, y) as f64 - y_off) / y_scale);
-                data.extend_from_slice(&[g, g, g]);
-                if let Some(a) = alpha {
-                    data.push(frame.sample(a, x, y));
-                }
+                let g = (sample(0, x, y) as f64 - y_off) / y_scale;
+                f([g, g, g], alpha.map(|a| sample(a, x, y)).unwrap_or(0));
             }
         }
+        return Ok(());
+    }
+    let (sx, sy) = layout.chroma.shift();
+    let kr_kb = if matrix == 0 {
+        None
     } else {
-        let (sx, sy) = frame.format.chroma.shift();
-        let kr_kb = if matrix == 0 {
-            None
-        } else {
-            Some(matrix_kr_kb(matrix).ok_or_else(|| {
-                HeifError::unsupported(format!("matrix_coefficients {matrix} conversion"))
-            })?)
-        };
-        for y in 0..h {
-            for x in 0..w {
-                let yv = frame.sample(0, x, y) as f64;
-                let cb = frame.sample(1, x >> sx, y >> sy) as f64;
-                let cr = frame.sample(2, x >> sx, y >> sy) as f64;
-                let rgb = match kr_kb {
-                    None => {
-                        // Identity: Y = G, Cb = B, Cr = R (equations 41–43).
-                        [
-                            quant((cr - y_off) / y_scale),
-                            quant((yv - y_off) / y_scale),
-                            quant((cb - y_off) / y_scale),
-                        ]
-                    }
-                    Some((kr, kb)) => {
-                        let ey = (yv - y_off) / y_scale;
-                        let pb = (cb - mid) / c_scale;
-                        let pr = (cr - mid) / c_scale;
-                        let r = ey + 2.0 * (1.0 - kr) * pr;
-                        let b = ey + 2.0 * (1.0 - kb) * pb;
-                        let g = (ey - kr * r - kb * b) / (1.0 - kr - kb);
-                        [quant(r), quant(g), quant(b)]
-                    }
-                };
-                data.extend_from_slice(&rgb);
-                if let Some(a) = alpha {
-                    data.push(frame.sample(a, x, y));
+        Some(matrix_kr_kb(matrix).ok_or_else(|| {
+            HeifError::unsupported(format!("matrix_coefficients {matrix} conversion"))
+        })?)
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let yv = sample(0, x, y) as f64;
+            let cb = sample(1, x >> sx, y >> sy) as f64;
+            let cr = sample(2, x >> sx, y >> sy) as f64;
+            let rgb = match kr_kb {
+                None => {
+                    // Identity: Y = G, Cb = B, Cr = R (equations 41–43).
+                    [
+                        (cr - y_off) / y_scale,
+                        (yv - y_off) / y_scale,
+                        (cb - y_off) / y_scale,
+                    ]
                 }
-            }
+                Some((kr, kb)) => {
+                    let ey = (yv - y_off) / y_scale;
+                    let pb = (cb - mid) / c_scale;
+                    let pr = (cr - mid) / c_scale;
+                    let r = ey + 2.0 * (1.0 - kr) * pr;
+                    let b = ey + 2.0 * (1.0 - kb) * pb;
+                    let g = (ey - kr * r - kb * b) / (1.0 - kr - kb);
+                    [r, g, b]
+                }
+            };
+            f(rgb, alpha.map(|a| sample(a, x, y)).unwrap_or(0));
         }
     }
-    Ok(RgbImage {
-        width: w,
-        height: h,
-        channels,
-        bit_depth: frame.format.bit_depth,
-        data,
-    })
+    Ok(())
 }
 
 /// Convert an interleaved RGB / RGBA picture to a planar 4:4:4 YCbCr
@@ -170,7 +257,7 @@ pub fn to_rgb(frame: &HeifFrame, colr: Option<&Colr>) -> Result<RgbImage> {
 /// range of `colr` exactly as [`to_rgb`] does in the other direction
 /// (H.273 equations 20–22 / 38–40; identity matrix 0 = GBR). An alpha
 /// channel becomes the alpha plane.
-pub fn from_rgb(rgb: &RgbImage, colr: Option<&Colr>, chroma: Chroma) -> Result<HeifFrame> {
+pub fn from_rgb(rgb: &RgbImage16, colr: Option<&Colr>, chroma: Chroma) -> Result<HeifFrame> {
     if !matches!(chroma, Chroma::Yuv444 | Chroma::Mono) {
         return Err(HeifError::unsupported(
             "from_rgb writes 4:4:4 or monochrome frames only",

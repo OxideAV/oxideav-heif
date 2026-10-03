@@ -1667,7 +1667,7 @@ mod tests {
         huge.extend_from_slice(&1u32.to_be_bytes());
         assert!(matches!(
             parse_csgp(&full_boxed(b"csgp", 0, 0x3f, &huge)[8..]),
-            Err(HeifError::ResourceExhausted(_))
+            Err(HeifError::LimitExceeded(_))
         ));
         // A single-index pattern over many samples is one run.
         let mut one = b"eqiv".to_vec();

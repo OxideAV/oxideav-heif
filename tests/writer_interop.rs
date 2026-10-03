@@ -154,7 +154,7 @@ fn read_ppm(bytes: &[u8]) -> Option<Ppm> {
 
 /// `(max, mean)` colour difference between a reader's PPM and `want`,
 /// in 8-bit units.
-fn ppm_diff(ppm_path: &Path, want: &oxideav_heif::rgb::RgbImage) -> Option<(f64, f64)> {
+fn ppm_diff(ppm_path: &Path, want: &oxideav_heif::rgb::RgbImage16) -> Option<(f64, f64)> {
     let bytes = std::fs::read(ppm_path).ok()?;
     let ppm = read_ppm(&bytes)?;
     if (ppm.width, ppm.height) != (want.width, want.height) {
@@ -649,7 +649,7 @@ trait PipeMono {
     fn pipe_into_mono(self, w: u32, h: u32) -> HeifFrame;
 }
 
-impl PipeMono for oxideav_heif::HeifPlane {
+impl PipeMono for oxideav_heif::Plane {
     fn pipe_into_mono(self, w: u32, h: u32) -> HeifFrame {
         HeifFrame {
             width: w,
@@ -708,7 +708,7 @@ fn apple_imageio_renders_the_alpha_plane_exactly() {
                 data.extend_from_slice(&[v, v, v]);
             }
         }
-        let want = oxideav_heif::rgb::RgbImage::new(a.width, a.height, 3, 8, data);
+        let want = oxideav_heif::rgb::RgbImage16::new(a.width, a.height, 3, 8, data);
         let (max, mean) = ppm_diff(&ppm, &want).unwrap();
         assert!(
             max == 0.0,

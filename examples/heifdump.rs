@@ -296,7 +296,7 @@ fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]) {
     out.extend_from_slice(&crc32(&c).to_be_bytes());
 }
 
-fn encode_png(img: &oxideav_heif::rgb::RgbImage) -> Vec<u8> {
+fn encode_png(img: &oxideav_heif::rgb::RgbImage16) -> Vec<u8> {
     let depth: u8 = if img.bit_depth > 8 { 16 } else { 8 };
     let colour_type = if img.channels == 4 { 6 } else { 2 };
     let bps = (depth / 8) as usize;

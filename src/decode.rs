@@ -28,9 +28,11 @@ use crate::derived::{build_graph, ImageKind, ImageNode};
 use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
 use crate::hvcc::HevcConfig;
-use crate::image::{Chroma, HeifFrame, HeifPixelFormat, HeifPlane};
+use crate::image::{HeifFrame, HeifPixelFormat, Plane};
 use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_AVC1, ITEM_TYPE_HEV1, ITEM_TYPE_HVC1, ITEM_TYPE_LHV1};
 use crate::props::{Colr, ItemProperties};
+
+pub use crate::layout::{av1_layout, hevc_layout, layered_base_layout, layered_layout, layout_of};
 
 /// Codec id the HEVC decoder is registered under.
 pub const CODEC_ID_HEVC: &str = "h265";
@@ -103,9 +105,22 @@ impl<'r> ItemDecoder<'r> {
         self
     }
 
+    /// Grant a thread budget as a plain worker count (`0` / `1` =
+    /// serial); see [`ItemDecoder::with_execution_context`].
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads.max(1);
+        self
+    }
+
     /// The thread budget ([`ItemDecoder::with_execution_context`]).
     pub fn threads(&self) -> usize {
         self.threads
+    }
+
+    /// A codec instance for `params` through the configured route
+    /// (registry or direct factories).
+    pub(crate) fn instantiate(&self, params: &CodecParameters) -> Result<Box<dyn Decoder>> {
+        self.make(params)
     }
 
     /// Select what a decoded `tmap` item yields (see [`ToneMapOutput`]).
@@ -471,30 +486,6 @@ pub enum CodedKind<'a> {
     LayeredHevc(&'a crate::lhvc::LhevcConfig),
 }
 
-/// Sample layout of an `lhv1` item's base layer: the `oinf` operating
-/// point of output layer set 0 (its `maxChromaFormat` /
-/// `maxBitDepthMinus8`), else that of the first operating point.
-pub fn layered_base_layout(props: &ItemProperties) -> Result<HeifPixelFormat> {
-    layered_layout(props, 0)
-}
-
-/// Sample layout of an `lhv1` item's output layer set `tols`: the
-/// `oinf` operating point of that set (its `maxChromaFormat` /
-/// `maxBitDepthMinus8`), else that of set 0, else the first one.
-pub fn layered_layout(props: &ItemProperties, tols: u16) -> Result<HeifPixelFormat> {
-    let oinf = props
-        .oinf()
-        .ok_or_else(|| HeifError::invalid("lhv1 item without an oinf property (HEIF B.2.2.1.3)"))?;
-    let op = oinf
-        .operating_point(tols)
-        .or_else(|| oinf.operating_point(0))
-        .or_else(|| oinf.operating_points.first())
-        .ok_or_else(|| HeifError::invalid("oinf without operating points"))?;
-    let chroma = Chroma::from_idc(op.max_chroma_format)
-        .ok_or_else(|| HeifError::invalid("oinf maxChromaFormat"))?;
-    HeifPixelFormat::new(chroma, 8 + op.max_bit_depth_minus8, false)
-}
-
 /// The base layer (`nuh_layer_id` 0) of an `lhv1` access unit as an
 /// Annex B stream: the record's parameter sets first, then the item's
 /// length-prefixed NAL units, every unit filtered to layer 0.
@@ -581,45 +572,12 @@ pub fn classify(node: &ImageNode) -> Result<ItemKind<'_>> {
     }
 }
 
-/// Sample layout an `hvcC` record announces.
-pub fn hevc_layout(cfg: &HevcConfig) -> Result<HeifPixelFormat> {
-    let chroma = Chroma::from_idc(cfg.chroma_format_idc).ok_or_else(|| {
-        HeifError::invalid(format!("hvcC chroma_format_idc {}", cfg.chroma_format_idc))
-    })?;
-    HeifPixelFormat::new(chroma, cfg.bit_depth_luma(), false)
-}
-
-/// Sample layout an `av1C` record announces.
-pub fn av1_layout(cfg: &Av1Config) -> Result<HeifPixelFormat> {
-    let chroma = Chroma::from_idc(cfg.chroma_format_idc()).expect("idc in 0..=3");
-    HeifPixelFormat::new(chroma, cfg.bit_depth(), false)
-}
-
-#[doc(hidden)]
-/// Same-layout properties helper used by callers that only hold a
-/// property list (no graph node).
-pub fn layout_of(props: &ItemProperties) -> Option<HeifPixelFormat> {
-    if props.lhvc().is_some() {
-        return layered_layout(props, props.tols().unwrap_or(0)).ok();
-    }
-    if let Some(h) = props.hvcc() {
-        return hevc_layout(h).ok();
-    }
-    if let Some(a) = props.av1c() {
-        return av1_layout(a).ok();
-    }
-    if let Some(a) = props.avcc() {
-        return a.layout().ok();
-    }
-    None
-}
-
 /// Interpret the planes a codec emitted as a tightly packed
 /// [`HeifFrame`] of the announced layout, cropped to `ispe` when the
 /// decoded picture is larger (codecs may emit the coded size). A plane
 /// the codec already emitted tight at the output size is moved, not
 /// copied.
-fn frame_from_planes(
+pub(crate) fn frame_from_planes(
     vf: oxideav_core::VideoFrame,
     layout: HeifPixelFormat,
     ispe: Option<(u32, u32)>,
@@ -679,7 +637,7 @@ fn frame_from_planes(
             }
             data
         };
-        out.push(HeifPlane {
+        out.push(Plane {
             stride: row_bytes,
             data,
         });
@@ -1558,6 +1516,7 @@ pub fn exif_payload(item: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::image::Chroma;
     use oxideav_core::{VideoFrame, VideoPlane};
 
     #[test]

@@ -339,7 +339,7 @@ fn adler32(data: &[u8]) -> u32 {
     (b << 16) | a
 }
 
-fn png_bytes(img: &oxideav_heif::rgb::RgbImage) -> Vec<u8> {
+fn png_bytes(img: &oxideav_heif::rgb::RgbImage16) -> Vec<u8> {
     let colour_type = if img.channels == 4 { 6 } else { 2 };
     let mut raw = Vec::new();
     let row = img.width as usize * img.channels;

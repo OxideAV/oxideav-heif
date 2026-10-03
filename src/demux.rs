@@ -27,8 +27,7 @@ use oxideav_core::{
     PixelFormat, ProbeContext, ProbeData, ReadSeek, Result as CoreResult, StreamInfo, TimeBase,
 };
 
-use crate::compose::needs_444;
-use crate::decode::{self, decode_primary, ItemDecoder};
+use crate::decode;
 use crate::derived::{build_primary_graph, ImageKind, ImageNode};
 use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
@@ -43,148 +42,7 @@ pub const CODEC_ID: &str = "heif";
 /// Maximum file size the demuxer reads into memory.
 pub const MAX_FILE_BYTES: u64 = 1 << 32;
 
-#[doc(hidden)]
-/// Predict the output layout and size of an image item without
-/// decoding, by replaying the composition layer's promotion rules on
-/// the container metadata. Used for the still stream's parameters.
-pub fn predict_output(node: &ImageNode) -> Result<(HeifPixelFormat, (u32, u32))> {
-    let (mut fmt, (mut w, mut h)) = match &node.kind {
-        ImageKind::Coded(_) => {
-            let f = decode::layout_of(&node.properties).ok_or_else(|| {
-                HeifError::invalid(format!(
-                    "item {}: no decoder configuration to predict a layout from",
-                    node.item.id
-                ))
-            })?;
-            (f, node.reconstructed_size()?)
-        }
-        ImageKind::Grid(g) => {
-            let first = node
-                .inputs
-                .first()
-                .ok_or_else(|| HeifError::invalid("grid without inputs"))?;
-            let (tf, (tw, th)) = predict_output(first)?;
-            let any_alpha = node
-                .inputs
-                .iter()
-                .any(|i| predict_output(i).map(|(f, _)| f.has_alpha).unwrap_or(false));
-            let promote = needs_444(tf.chroma, tw % 2 == 1, th % 2 == 1)
-                || needs_444(tf.chroma, g.output_width % 2 == 1, g.output_height % 2 == 1);
-            let chroma = if promote { Chroma::Yuv444 } else { tf.chroma };
-            (
-                HeifPixelFormat::new(chroma, tf.bit_depth, any_alpha || tf.has_alpha)?,
-                (g.output_width, g.output_height),
-            )
-        }
-        ImageKind::Overlay(o) => {
-            let mut layouts = Vec::with_capacity(node.inputs.len());
-            for i in &node.inputs {
-                layouts.push(predict_output(i)?);
-            }
-            let (ff, _) = layouts
-                .first()
-                .ok_or_else(|| HeifError::invalid("iovl without inputs"))?;
-            let any_alpha = ff.chroma != Chroma::Mono && layouts.iter().any(|(f, _)| f.has_alpha);
-            let promote = any_alpha
-                || needs_444(
-                    ff.chroma,
-                    o.offsets.iter().any(|(x, _)| x.rem_euclid(2) == 1) || o.output_width % 2 == 1,
-                    o.offsets.iter().any(|(_, y)| y.rem_euclid(2) == 1) || o.output_height % 2 == 1,
-                )
-                || layouts
-                    .iter()
-                    .any(|(f, (w, h))| needs_444(f.chroma, w % 2 == 1, h % 2 == 1));
-            let chroma = if promote { Chroma::Yuv444 } else { ff.chroma };
-            let translucent = o.canvas_fill[3] != 65535;
-            (
-                HeifPixelFormat::new(chroma, ff.bit_depth, translucent)?,
-                (o.output_width, o.output_height),
-            )
-        }
-        ImageKind::Identity | ImageKind::ToneMap(_) => {
-            let first = node
-                .inputs
-                .first()
-                .ok_or_else(|| HeifError::invalid("derived item without inputs"))?;
-            predict_output(first)?
-        }
-        ImageKind::ColourFormatEnhancement(c) => {
-            let mut geometry = Vec::with_capacity(node.inputs.len());
-            for i in &node.inputs {
-                let (f, size) = predict_output(i)?;
-                geometry.push((size, f.bit_depth));
-            }
-            let (f, size, _) = crate::compose::plan_colour_format_enhancement(
-                c,
-                &geometry,
-                node.properties.nclx(),
-            )?;
-            (f, size)
-        }
-        ImageKind::Tiled(t) => {
-            // The tiles' layout comes from their tilC-associated decoder
-            // configuration; odd tile / output sizes promote as a grid.
-            let (w, h) = node.reconstructed_size()?;
-            let f = decode::layout_of(&t.tile_properties).ok_or_else(|| {
-                HeifError::invalid(format!(
-                    "item {}: no decoder configuration among the tile properties",
-                    node.item.id
-                ))
-            })?;
-            let (tw, th) = (t.config.tile_width, t.config.tile_height);
-            let promote = needs_444(
-                f.chroma,
-                tw % 2 == 1 || w % 2 == 1,
-                th % 2 == 1 || h % 2 == 1,
-            );
-            (
-                HeifPixelFormat {
-                    chroma: if promote { Chroma::Yuv444 } else { f.chroma },
-                    ..f
-                },
-                (w, h),
-            )
-        }
-    };
-    for e in node.properties.transformative() {
-        match &e.property {
-            Property::Clap(c) => {
-                let r = c.resolve(w, h)?;
-                if needs_444(
-                    fmt.chroma,
-                    r.x % 2 == 1 || r.width % 2 == 1,
-                    r.y % 2 == 1 || r.height % 2 == 1,
-                ) {
-                    fmt.chroma = Chroma::Yuv444;
-                }
-                w = r.width;
-                h = r.height;
-            }
-            Property::Irot(r) => {
-                if r.angle & 3 != 0 {
-                    let (sx, sy) = fmt.chroma.shift();
-                    let axis_swap = r.angle & 1 == 1 && sx != sy;
-                    if axis_swap || needs_444(fmt.chroma, w % 2 == 1, h % 2 == 1) {
-                        fmt.chroma = Chroma::Yuv444;
-                    }
-                    if r.angle & 1 == 1 {
-                        std::mem::swap(&mut w, &mut h);
-                    }
-                }
-            }
-            Property::Iscl(s) => {
-                let (nw, nh) = s.output_size(w, h)?;
-                w = nw;
-                h = nh;
-            }
-            _ => {}
-        }
-    }
-    if node.alpha.is_some() {
-        fmt.has_alpha = true;
-    }
-    Ok((fmt, (w, h)))
-}
+pub use crate::layout::predict_output;
 
 #[doc(hidden)]
 /// The framework pixel format the `"heif"` decoder will emit for a
@@ -861,8 +719,11 @@ impl HeifCodec {
         self.last.as_ref()
     }
 
-    fn item_decoder(&self) -> ItemDecoder<'static> {
-        ItemDecoder::direct().with_execution_context(&self.exec)
+    /// The contract options this decoder runs with: the thread budget
+    /// of `set_execution_context`, everything else default.
+    fn decode_options(&self) -> crate::api::DecodeOptions {
+        crate::api::DecodeOptions::default()
+            .with_threads((self.exec.threads > 1).then_some(self.exec.threads))
     }
 }
 
@@ -873,12 +734,20 @@ impl Decoder for HeifCodec {
 
     fn send_packet(&mut self, packet: &Packet) -> CoreResult<()> {
         let file = HeifFile::parse_borrowed(&packet.data)?;
-        let img = decode_primary(&file, self.item_decoder())?;
+        // The contract path: one implementation (limits, strictness and
+        // the thread budget through DecodeOptions).
+        let opts = self.decode_options();
+        let img = crate::api_registry::decode_file_item(&file, &opts)?;
         // The colour information rides on the frame (H.273 code points +
-        // range; identity-matrix items as planar RGB, see
-        // HeifFrame::to_core_signalled).
+        // range; identity-matrix items as planar RGB), the way
+        // HeifImage::into_video_frame labels it.
         let signal_frame = |f: &crate::HeifFrame, nclx: &crate::props::Colr| {
-            let (mut vf, _pf) = f.to_core_signalled(nclx)?;
+            let image = crate::api::HeifImage::from_frame(
+                f.clone(),
+                crate::api::ColorInfo::from_colr(nclx),
+                crate::api::Metadata::default(),
+            );
+            let (mut vf, _pf) = image.into_video_frame();
             vf.pts = packet.pts;
             Ok::<_, CoreError>(vf)
         };
@@ -893,7 +762,10 @@ impl Decoder for HeifCodec {
             // HEIF §6.8.5 'ster': the primary is one view of a stereo
             // pair — both views out, tagged view 0 (left) / 1 (right).
             let other = if img.item_id == left { right } else { left };
-            let partner = crate::decode::decode_item(&file, other, self.item_decoder())?;
+            let partner = crate::api_registry::decode_file_item(
+                &file,
+                &opts.clone().with_item_id(Some(other)),
+            )?;
             let (first, second) = if img.item_id == left {
                 (&img, &partner)
             } else {

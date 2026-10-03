@@ -34,7 +34,7 @@
 //!   derivations, `clap` / `irot` / `imir`, alpha attachment.
 //! * [`sequence`] — `moov` / `trak` / `stbl` image-sequence tracks
 //!   (sample tables, visual sample entries, `ccst`, the §7.2.1 matrix).
-//! * [`decode`] (`registry`) — coded items → pixels through
+//! * [`decode`](mod@decode) (`registry`) — coded items → pixels through
 //!   `oxideav-h265` / `oxideav-av1` ([`decode::ItemDecoder`]) and the
 //!   whole-image driver ([`decode::decode_item`] → [`DecodedImage`]).
 //! * [`demux`] (`registry`) — the framework [`Demuxer`](oxideav_core::Demuxer)
@@ -43,7 +43,7 @@
 //!   entry point, probe priority, extension hints.
 //! * [`writer`] — [`HeifWriter`] (MIAF-conformant still files from coded
 //!   payloads) and [`SequenceWriter`] (`msf1` image sequences).
-//! * [`encode`] (`registry`) — pixels → HEVC / AV1 items through the
+//! * [`encode`](mod@encode) (`registry`) — pixels → HEVC / AV1 items through the
 //!   oxideav encoders ([`encode::encode_still`]) and the `"heif"`
 //!   framework [`Encoder`](oxideav_core::Encoder).
 //! * [`mux`] (`registry`) — the framework [`Muxer`](oxideav_core::Muxer)
@@ -55,6 +55,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod api;
 pub mod av1c;
 pub mod avcc;
 pub mod boxes;
@@ -66,6 +67,7 @@ pub mod ftyp;
 pub mod gainmap;
 pub mod hvcc;
 pub mod image;
+pub mod layout;
 pub mod lhvc;
 pub mod meta;
 pub mod miaf;
@@ -77,6 +79,8 @@ pub mod tiled;
 pub mod writer;
 
 #[cfg(feature = "registry")]
+pub mod api_registry;
+#[cfg(feature = "registry")]
 pub mod decode;
 #[cfg(feature = "registry")]
 pub mod demux;
@@ -87,17 +91,23 @@ pub mod mux;
 #[cfg(feature = "registry")]
 pub mod registry;
 
+pub use api::{
+    info, info_of, probe, ColorInfo, ColorRange, DecodeOptions, Frame, HeifImage, ImageInfo,
+    Metadata, Palette, PixelFormat, RgbImage, RgbaImage,
+};
 pub use av1c::Av1Config;
 pub use avcc::AvcConfig;
 pub use derived::{
     build_graph, build_primary_graph, GridDescriptor, ImageKind, ImageNode, OverlayDescriptor,
 };
-pub use error::{HeifError, Result};
+pub use error::{Error, HeifError, Result};
 pub use file::{HeifFile, HeifFileRef};
 pub use ftyp::{BrandClass, FileType};
 pub use gainmap::{apply_gain_map, GainMapMetadata, LinearRgbImage};
 pub use hvcc::HevcConfig;
-pub use image::{Chroma, HeifFrame, HeifPixelFormat, HeifPlane};
+#[allow(deprecated)]
+pub use image::HeifPlane;
+pub use image::{Chroma, HeifFrame, HeifPixelFormat, Plane};
 pub use lhvc::{LhevcConfig, OperatingPoints};
 pub use meta::{
     EntityGroup, Extent, ItemInfo, ItemLocation, ItemReference, Meta, PropertyAssociation,
@@ -105,6 +115,11 @@ pub use meta::{
 };
 pub use miaf::{MiafProfile, MiafReport, MiafViolation};
 
+#[cfg(feature = "registry")]
+pub use api_registry::{
+    decode, decode_all, decode_all_with, decode_file, decode_file_item, decode_from, decode_rgb8,
+    decode_rgba8, decode_with, encode, encode_owned, encode_rgb8, encode_rgba8, encode_to,
+};
 #[cfg(feature = "registry")]
 pub use decode::{decode_item, decode_primary, DecodedImage, ItemDecoder};
 #[cfg(feature = "registry")]
@@ -125,7 +140,7 @@ pub use props::{
 pub use registry::__oxideav_entry;
 #[cfg(feature = "registry")]
 pub use registry::{register, register_codecs, register_containers};
-pub use rgb::{to_rgb, RgbImage};
+pub use rgb::{to_rgb, RgbImage16};
 pub use sequence::{Movie, Sample, SampleEntry, Track};
 pub use writer::{HeifWriter, SequenceAlphaTrack, SequenceWriter};
 

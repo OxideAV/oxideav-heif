@@ -4,6 +4,10 @@
 //! only error surface; with `registry` on it also converts into
 //! [`oxideav_core::Error`] so framework callers see the familiar
 //! `InvalidData` / `Unsupported` / `ResourceExhausted` variants.
+//!
+//! The variant set follows the workspace image-crate contract:
+//! `InvalidData`, `Unsupported`, `LimitExceeded`, `Io` (plus the typed
+//! helpers below). [`Error`] is the contract's alias of [`HeifError`].
 
 use std::fmt;
 
@@ -19,9 +23,24 @@ pub enum HeifError {
     /// not implement (unknown item type, unsupported construction, …).
     Unsupported(String),
     /// A structural limit was exceeded (derivation depth, canvas size,
-    /// item count, …). Raised before any large allocation happens.
+    /// item count, a [`DecodeOptions`](crate::DecodeOptions) bound, …).
+    /// Raised before any large allocation happens.
+    LimitExceeded(String),
+    /// An I/O error from a [`Read`](std::io::Read) / [`Write`](std::io::Write)
+    /// handed to [`decode_from`](crate::decode_from) /
+    /// [`encode_to`](crate::encode_to): the error's message.
+    Io(String),
+    /// The pre-0.0.9 name of [`HeifError::LimitExceeded`]. No longer
+    /// produced; kept one release so existing `match` arms compile.
+    #[deprecated(
+        since = "0.0.9",
+        note = "limit refusals are `HeifError::LimitExceeded`"
+    )]
     ResourceExhausted(String),
 }
+
+/// The contract's alias of [`HeifError`].
+pub type Error = HeifError;
 
 impl HeifError {
     /// Build an [`HeifError::InvalidData`].
@@ -34,9 +53,20 @@ impl HeifError {
         Self::Unsupported(msg.into())
     }
 
-    /// Build an [`HeifError::ResourceExhausted`].
+    /// Build an [`HeifError::LimitExceeded`].
     pub fn exhausted(msg: impl Into<String>) -> Self {
-        Self::ResourceExhausted(msg.into())
+        Self::LimitExceeded(msg.into())
+    }
+
+    /// Build an [`HeifError::LimitExceeded`] (the contract's name of
+    /// [`HeifError::exhausted`]).
+    pub fn limit(msg: impl Into<String>) -> Self {
+        Self::LimitExceeded(msg.into())
+    }
+
+    /// Build an [`HeifError::Io`].
+    pub fn io(msg: impl Into<String>) -> Self {
+        Self::Io(msg.into())
     }
 
     /// The refusal for an L-HEVC (`lhv1`) item whose `tols` asks for
@@ -72,12 +102,21 @@ impl fmt::Display for HeifError {
         match self {
             HeifError::InvalidData(m) => write!(f, "heif: invalid data: {m}"),
             HeifError::Unsupported(m) => write!(f, "heif: unsupported: {m}"),
+            HeifError::LimitExceeded(m) => write!(f, "heif: limit exceeded: {m}"),
+            HeifError::Io(m) => write!(f, "heif: i/o: {m}"),
+            #[allow(deprecated)]
             HeifError::ResourceExhausted(m) => write!(f, "heif: resource exhausted: {m}"),
         }
     }
 }
 
 impl std::error::Error for HeifError {}
+
+impl From<std::io::Error> for HeifError {
+    fn from(e: std::io::Error) -> Self {
+        HeifError::Io(e.to_string())
+    }
+}
 
 /// Crate-wide result alias.
 pub type Result<T> = std::result::Result<T, HeifError>;
@@ -88,6 +127,9 @@ impl From<HeifError> for oxideav_core::Error {
         match e {
             HeifError::InvalidData(m) => oxideav_core::Error::InvalidData(m),
             HeifError::Unsupported(m) => oxideav_core::Error::Unsupported(m),
+            HeifError::LimitExceeded(m) => oxideav_core::Error::ResourceExhausted(m),
+            HeifError::Io(m) => oxideav_core::Error::Io(std::io::Error::other(m)),
+            #[allow(deprecated)]
             HeifError::ResourceExhausted(m) => oxideav_core::Error::ResourceExhausted(m),
         }
     }
@@ -106,8 +148,11 @@ mod tests {
         );
         assert_eq!(
             HeifError::exhausted("z").to_string(),
-            "heif: resource exhausted: z"
+            "heif: limit exceeded: z"
         );
+        assert!(matches!(HeifError::limit("z"), HeifError::LimitExceeded(_)));
+        let io: HeifError = std::io::Error::other("disk").into();
+        assert_eq!(io.to_string(), "heif: i/o: disk");
         let e = HeifError::layered_hevc(7, 2);
         assert!(matches!(e, HeifError::Unsupported(_)));
         assert_eq!(e.layered_hevc_info(), Some((7, 2)));

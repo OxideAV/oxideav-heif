@@ -113,6 +113,11 @@ pub struct EncodeOptions {
     /// key wins). Expert knob; the framework encoder exposes a typed
     /// subset.
     pub hevc_options: Vec<(String, String)>,
+    /// Chroma layout packed / planar RGB sources are coded in on AV1
+    /// (`None` = 4:2:0; `Some(Chroma::Yuv444)` keeps full chroma).
+    /// HEVC items are always 4:2:0; planar YCbCr sources keep their
+    /// own layout on AV1 regardless.
+    pub chroma: Option<Chroma>,
 }
 impl EncodeOptions {
     /// Every field as a positional argument, in declaration order
@@ -140,6 +145,7 @@ impl EncodeOptions {
         hevc_depth: Option<u8>,
         hevc_filters: Option<bool>,
         hevc_options: Vec<(String, String)>,
+        chroma: Option<Chroma>,
     ) -> Self {
         Self {
             codec,
@@ -162,7 +168,14 @@ impl EncodeOptions {
             hevc_depth,
             hevc_filters,
             hevc_options,
+            chroma,
         }
+    }
+
+    /// Set `chroma`.
+    pub fn with_chroma(mut self, chroma: Option<Chroma>) -> Self {
+        self.chroma = chroma;
+        self
     }
 
     /// Set `codec`.
@@ -429,6 +442,7 @@ impl Default for EncodeOptions {
             hevc_depth: None,
             hevc_filters: None,
             hevc_options: Vec::new(),
+            chroma: None,
         }
     }
 }
@@ -581,7 +595,7 @@ pub fn to_yuv420(f: &HeifFrame, depth: u8) -> Result<HeifFrame> {
                 for y in 0..h {
                     data.extend_from_slice(f.row(i, y));
                 }
-                crate::image::HeifPlane { stride, data }
+                crate::image::Plane { stride, data }
             })
             .collect();
         return Ok(HeifFrame {
@@ -2182,12 +2196,42 @@ pub fn packed_to_planar_for(
     let src = planes
         .first()
         .ok_or_else(|| HeifError::invalid("packed frame without a plane"))?;
+    packed_bytes_to_planar(
+        &src.data, src.stride, width, height, bpp, order, wide, grey, colr, target,
+    )
+}
+
+/// The kernel of [`packed_to_planar_for`] over raw packed rows: `bpp`
+/// bytes per pixel, `order` the channel index of R, G, B, A (or Y at
+/// `order[0]` and A at `order[3]` for `grey`), `wide` for 16-bit
+/// little-endian samples. Shared with the contract's
+/// [`encode_rgb8`](crate::encode_rgb8) / [`encode_rgba8`](crate::encode_rgba8).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn packed_bytes_to_planar(
+    data: &[u8],
+    src_stride: usize,
+    width: u32,
+    height: u32,
+    bpp: usize,
+    order: [usize; 4],
+    wide: bool,
+    grey: bool,
+    colr: &Colr,
+    target: HeifPixelFormat,
+) -> Result<HeifFrame> {
     let row_bytes = width as usize * bpp;
-    if src.stride < row_bytes || src.data.len() < src.stride * (height as usize - 1) + row_bytes {
+    if width == 0 || height == 0 {
+        return Err(HeifError::invalid("zero-sized packed frame"));
+    }
+    if src_stride < row_bytes || data.len() < src_stride * (height as usize - 1) + row_bytes {
         return Err(HeifError::invalid(format!(
-            "packed {pf:?} frame too small for {width}x{height}"
+            "packed frame too small for {width}x{height}x{bpp}"
         )));
     }
+    let src = PackedRows {
+        data,
+        stride: src_stride,
+    };
     let depth = target.bit_depth;
     let max = target.max_value() as u32;
     let src_depth: u8 = if wide { 16 } else { 8 };
@@ -2293,6 +2337,12 @@ pub fn packed_to_planar_for(
         }
     }
     Ok(out)
+}
+
+/// Borrowed packed rows for [`packed_bytes_to_planar`].
+struct PackedRows<'a> {
+    data: &'a [u8],
+    stride: usize,
 }
 
 /// Typed options of the `"heif"` framework encoder (declared schema:
@@ -2674,6 +2724,7 @@ impl HeifEncoderOptions {
                 }
             },
             hevc_filters: Some(self.filters != "off"),
+            chroma: (self.chroma == "444").then_some(Chroma::Yuv444),
             ..EncodeOptions::default()
         };
         if let Colr::Nclx { full_range, .. } = &mut opts.colr {
@@ -2703,7 +2754,6 @@ pub struct HeifEncoder {
     /// `range` was given explicitly (the stream's / frame's colour
     /// signal then does not override it).
     explicit_range: bool,
-    packed_chroma: Chroma,
     queue: std::collections::VecDeque<Packet>,
     flushed: bool,
 }
@@ -2719,7 +2769,6 @@ impl HeifEncoder {
             params: params.clone(),
             explicit_threads: opts.threads.is_some(),
             explicit_range: params.options.get("range").is_some(),
-            packed_chroma: typed.packed_chroma(),
             opts,
             queue: std::collections::VecDeque::new(),
             flushed: false,
@@ -2729,69 +2778,6 @@ impl HeifEncoder {
     /// The effective encode options (after `set_execution_context`).
     pub fn options(&self) -> &EncodeOptions {
         &self.opts
-    }
-
-    /// The `colr` for a frame: the configured one (the MIAF default
-    /// unless `range` was set) refined by the frame's colour-signal
-    /// record, else the stream's `CodecParameters::color_signal` —
-    /// H.273 code points that are not "unspecified" (2) replace the
-    /// defaults, and a signalled range replaces the default range
-    /// unless `range` was given explicitly. For packed / planar RGB
-    /// sources the signal's matrix describes RGB, not the YCbCr this
-    /// encoder derives, so only the primaries / transfer / range are
-    /// taken (`rgb_source`).
-    fn colr_for(&self, vf: &oxideav_core::VideoFrame, rgb_source: bool) -> Colr {
-        let signal = vf.color_signal().unwrap_or(self.params.color_signal);
-        let Colr::Nclx {
-            primaries,
-            transfer,
-            matrix,
-            full_range,
-        } = &self.opts.colr
-        else {
-            return self.opts.colr.clone();
-        };
-        let (p, tr, m) = (
-            signal.primaries.code_point(),
-            signal.transfer.code_point(),
-            signal.matrix.code_point(),
-        );
-        let pick = |code: u8, default: u16| if code == 2 { default } else { code as u16 };
-        let range = match signal.range {
-            _ if self.explicit_range => *full_range,
-            oxideav_core::ColorRange::Full => true,
-            oxideav_core::ColorRange::Limited => false,
-            _ => *full_range,
-        };
-        Colr::Nclx {
-            primaries: pick(p, *primaries),
-            transfer: pick(tr, *transfer),
-            matrix: if rgb_source || m == 0 {
-                *matrix
-            } else {
-                pick(m, *matrix)
-            },
-            full_range: range,
-        }
-    }
-
-    /// The coding layout a packed source of `depth` bits is converted
-    /// to for the configured codec: the chosen chroma (monochrome for
-    /// grey sources) at the coded depth, with the source's alpha.
-    fn packed_target(&self, grey: bool, depth: u8, alpha: bool) -> Result<HeifPixelFormat> {
-        let coded = coded_depth(depth, self.opts.hevc_depth)?;
-        let chroma = if grey {
-            Chroma::Mono
-        } else {
-            self.packed_chroma
-        };
-        // HEVC items are 4:2:0 (monochrome rides 4:2:0 too); AV1 keeps
-        // the chosen layout.
-        let chroma = match self.opts.codec {
-            StillCodec::Hevc => Chroma::Yuv420,
-            StillCodec::Av1 => chroma,
-        };
-        HeifPixelFormat::new(chroma, coded, alpha)
     }
 }
 
@@ -2822,66 +2808,66 @@ impl Encoder for HeifEncoder {
             .params
             .pixel_format
             .ok_or_else(|| CoreError::invalid("heif: pixel_format must be set"))?;
-        if HeifPixelFormat::from_core_gbr(pf).is_some() {
-            // Planar RGB in: AV1 codes the G, B, R planes as a 4:4:4
-            // item with `matrix_coefficients = 0` (H.273 identity, no
-            // conversion — lossless stays lossless); the HEVC path, which
-            // codes 4:2:0, converts through the configured matrix first.
-            let planar = HeifFrame::from_core_gbr(vf, w, h, pf)?;
-            let colr = self.colr_for(vf, true);
-            let (p, t) = match &colr {
+        // The frame's colour description: its own signal, else the
+        // stream's; `range` given explicitly pins the range.
+        let signal = vf.color_signal().unwrap_or(self.params.color_signal);
+        let mut color = crate::api::ColorInfo::from_color_signal(&signal);
+        if self.explicit_range {
+            color.range = match &self.opts.colr {
                 Colr::Nclx {
-                    primaries,
-                    transfer,
-                    ..
-                } => (*primaries, *transfer),
-                _ => (1, 13),
+                    full_range: true, ..
+                } => crate::api::ColorRange::Full,
+                Colr::Nclx { .. } => crate::api::ColorRange::Limited,
+                _ => color.range,
             };
-            let identity = Colr::Nclx {
-                primaries: p,
-                transfer: t,
-                matrix: 0,
-                full_range: true,
-            };
-            let bytes = if self.opts.codec == StillCodec::Av1 && planar.format.bit_depth <= 12 {
-                let opts = EncodeOptions {
-                    colr: identity,
-                    ..self.opts.clone()
-                };
-                encode_still_owned(planar, &opts)?
-            } else {
+        }
+        let bytes = match crate::api::PixelFormat::try_from(pf) {
+            // Planar YCbCr / grey / GBR and packed RGB(A): the contract
+            // path, one implementation.
+            Ok(_) => {
+                let image =
+                    crate::api::HeifImage::from_video_frame(vf, w, h, pf)?.with_color(color);
+                if image.format.is_packed() {
+                    // Borrowed rows straight into the coding layout.
+                    let plane = &vf.image_planes()[0];
+                    crate::api_registry::encode_packed_bytes(
+                        w,
+                        h,
+                        image.format,
+                        plane.stride,
+                        &plane.data,
+                        &color,
+                        &crate::api::Metadata::default(),
+                        &self.opts,
+                    )?
+                } else {
+                    crate::api_registry::encode_owned(image, &self.opts)?
+                }
+            }
+            // The other packed layouts (BGR(A), 16-bit RGB(A), grey +
+            // alpha): the same kernel into the coding layout, then the
+            // still writer.
+            Err(_) => {
+                let (_, _, wide, alpha, grey) = packed_layout(pf)?;
+                let colr = crate::api_registry::effective_colr(
+                    &color,
+                    crate::api::PixelFormat::Rgb24,
+                    &self.opts,
+                );
+                let target = crate::api_registry::packed_target(
+                    &self.opts,
+                    grey,
+                    if wide { 16 } else { 8 },
+                    alpha,
+                )?;
+                let hf = packed_to_planar_for(vf, w, h, pf, &colr, target)?;
                 let opts = EncodeOptions {
                     colr,
                     ..self.opts.clone()
                 };
-                let rgb = crate::rgb::to_rgb(&planar, Some(&identity))?;
-                drop(planar);
-                let ycc = crate::rgb::from_rgb(&rgb, Some(&opts.colr), Chroma::Yuv444)?;
-                drop(rgb);
-                encode_still_owned(ycc, &opts)?
-            };
-            let pkt = Packet::new(0, TimeBase::new(1, 1), bytes)
-                .with_pts(vf.pts.unwrap_or(0))
-                .with_keyframe(true);
-            self.queue.push_back(pkt);
-            return Ok(());
-        }
-        let (hf, colr) = match HeifFrame::from_core(vf, w, h, pf) {
-            Ok(f) => (f, self.colr_for(vf, false)),
-            Err(_) => {
-                // Packed RGB(A) / grey(+alpha): straight into the coding
-                // layout, row pair by row pair.
-                let (_, _, wide, alpha, grey) = packed_layout(pf)?;
-                let target = self.packed_target(grey, if wide { 16 } else { 8 }, alpha)?;
-                let colr = self.colr_for(vf, true);
-                (packed_to_planar_for(vf, w, h, pf, &colr, target)?, colr)
+                encode_still_owned(hf, &opts)?
             }
         };
-        let opts = EncodeOptions {
-            colr,
-            ..self.opts.clone()
-        };
-        let bytes = encode_still_owned(hf, &opts)?;
         let pkt = Packet::new(0, TimeBase::new(1, 1), bytes)
             .with_pts(vf.pts.unwrap_or(0))
             .with_keyframe(true);

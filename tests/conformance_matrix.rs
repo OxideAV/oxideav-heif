@@ -927,7 +927,10 @@ fn render(dir: &Path, r: Reader, file: &Path, tag: &str) -> Result<Option<PathBu
     }
 }
 
-fn render_delta(png_path: &Path, want: &oxideav_heif::rgb::RgbImage) -> Option<(f64, f64, String)> {
+fn render_delta(
+    png_path: &Path,
+    want: &oxideav_heif::rgb::RgbImage16,
+) -> Option<(f64, f64, String)> {
     let bytes = std::fs::read(png_path).ok()?;
     // Palette / sub-byte PNGs (a reader's choice for tiny pictures)
     // count as "opens" without a pixel comparison.

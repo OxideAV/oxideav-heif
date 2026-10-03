@@ -275,7 +275,7 @@ fn main() {
                 width: w,
                 height: h,
                 format: pf,
-                planes: vec![oxideav_heif::HeifPlane {
+                planes: vec![oxideav_heif::Plane {
                     stride: w as usize * if wide { 2 } else { 1 },
                     data: packed,
                 }],

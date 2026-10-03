@@ -148,14 +148,26 @@ impl HeifPixelFormat {
     }
 }
 
-/// One plane: `stride` bytes per row, rows packed top to bottom.
+/// One plane: `stride` bytes per row, rows packed top to bottom. The
+/// contract's `Plane` (identical fields in every image crate).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HeifPlane {
+pub struct Plane {
     /// Bytes per row.
     pub stride: usize,
     /// `stride × rows` bytes.
     pub data: Vec<u8>,
 }
+
+impl Plane {
+    /// Every field as a positional argument, in declaration order.
+    pub fn new(stride: usize, data: Vec<u8>) -> Self {
+        Self { stride, data }
+    }
+}
+
+/// The pre-0.0.9 name of [`Plane`]; kept one release.
+#[deprecated(since = "0.0.9", note = "renamed to `Plane`")]
+pub type HeifPlane = Plane;
 
 /// A planar picture.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,7 +179,7 @@ pub struct HeifFrame {
     /// Sample layout.
     pub format: HeifPixelFormat,
     /// The planes, `format.plane_count()` of them.
-    pub planes: Vec<HeifPlane>,
+    pub planes: Vec<Plane>,
 }
 
 /// Upper bound on the luma pixel count of a frame this crate allocates.
@@ -192,7 +204,7 @@ impl HeifFrame {
                     }
                 }
             }
-            planes.push(HeifPlane { stride, data });
+            planes.push(Plane { stride, data });
         }
         Ok(Self {
             width,
@@ -301,7 +313,7 @@ impl HeifFrame {
                 for y in 0..h {
                     data.extend_from_slice(self.row(i, y));
                 }
-                HeifPlane { stride, data }
+                Plane { stride, data }
             })
             .collect();
         Self {
@@ -485,8 +497,9 @@ pub mod core_bridge {
 
         /// The framework pixel format for this layout, when one exists.
         ///
-        /// Monochrome + alpha above 8 bits and 4:2:0 12-bit + alpha
-        /// have no framework layout; callers promote them with
+        /// Monochrome + alpha (the framework's `Ya8` / `Ya16Le` are
+        /// packed, not planar) and 4:2:0 12/16-bit + alpha have no
+        /// framework layout; callers promote them with
         /// [`HeifFrame::to_core`]'s neutral-chroma 4:4:4 fallback.
         pub fn to_core(&self) -> Option<PixelFormat> {
             use Chroma::*;
@@ -495,7 +508,6 @@ pub mod core_bridge {
                 (Mono, 10, false) => PixelFormat::Gray10Le,
                 (Mono, 12, false) => PixelFormat::Gray12Le,
                 (Mono, 16, false) => PixelFormat::Gray16Le,
-                (Mono, 8, true) => PixelFormat::Ya8,
                 (Yuv420, 8, false) => PixelFormat::Yuv420P,
                 (Yuv420, 10, false) => PixelFormat::Yuv420P10Le,
                 (Yuv420, 12, false) => PixelFormat::Yuv420P12Le,
@@ -531,7 +543,6 @@ pub mod core_bridge {
                 PixelFormat::Gray10Le => (Mono, 10, false),
                 PixelFormat::Gray12Le => (Mono, 12, false),
                 PixelFormat::Gray16Le => (Mono, 16, false),
-                PixelFormat::Ya8 => (Mono, 8, true),
                 PixelFormat::Yuv420P | PixelFormat::YuvJ420P => (Yuv420, 8, false),
                 PixelFormat::Yuv420P10Le => (Yuv420, 10, false),
                 PixelFormat::Yuv420P12Le => (Yuv420, 12, false),
@@ -567,10 +578,9 @@ pub mod core_bridge {
     impl HeifFrame {
         /// Convert into a framework `VideoFrame` plus its pixel format.
         ///
-        /// Layouts without a framework equivalent (gray + alpha above
-        /// 8 bits, 4:2:0 12-bit + alpha) are promoted to the matching
-        /// 4:4:4 alpha layout with neutral chroma so no information is
-        /// lost.
+        /// Layouts without a framework equivalent (gray + alpha, 4:2:0
+        /// 12/16-bit + alpha) are promoted to the matching 4:4:4 alpha
+        /// layout with neutral chroma so no information is lost.
         pub fn to_core(&self) -> Result<(VideoFrame, PixelFormat)> {
             if let Some(pf) = self.format.to_core() {
                 let planes = self
@@ -686,7 +696,7 @@ pub mod core_bridge {
                 format,
                 planes: image_planes[..format.plane_count()]
                     .iter()
-                    .map(|p| HeifPlane {
+                    .map(|p| Plane {
                         stride: p.stride,
                         data: p.data.clone(),
                     })

@@ -524,13 +524,13 @@ impl LinearRgbImage {
 
     /// Re-encode with an H.273 `transfer` in `primaries`, quantised to
     /// `bit_depth` (values above 1.0 clip: SDR display of an HDR
-    /// rendition). Returns an interleaved RGB [`RgbImage`](crate::rgb::RgbImage).
+    /// rendition). Returns an interleaved RGB [`RgbImage16`](crate::rgb::RgbImage16).
     pub fn encode(
         &self,
         primaries: u16,
         transfer: u16,
         bit_depth: u8,
-    ) -> Result<crate::rgb::RgbImage> {
+    ) -> Result<crate::rgb::RgbImage16> {
         let m = primaries_conversion(self.primaries, primaries)?;
         let max = ((1u32 << bit_depth) - 1) as f64;
         let mut data = Vec::with_capacity(self.data.len());
@@ -542,7 +542,7 @@ impl LinearRgbImage {
                 data.push((v * max).round().clamp(0.0, max) as u16);
             }
         }
-        Ok(crate::rgb::RgbImage {
+        Ok(crate::rgb::RgbImage16 {
             width: self.width,
             height: self.height,
             channels: 3,

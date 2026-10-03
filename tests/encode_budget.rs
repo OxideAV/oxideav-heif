@@ -3,6 +3,7 @@
 //! sources convert straight into the coding layout, deeper sources
 //! code at 10 bits, the automatic grid tiles large pictures, and the
 //! writer streams its `mdat`.
+#![cfg(feature = "registry")]
 
 mod common;
 
