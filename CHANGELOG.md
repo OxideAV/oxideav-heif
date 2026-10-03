@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/OxideAV/oxideav-heif/compare/v0.0.8...v0.0.9) - 2026-10-03
+
+### Other
+
+- contract rulings — HeifError::Io(std::io::Error), Option limits in DecodeOptions, validating HeifImage::new, (&VideoFrame, &CodecParameters) bridge
+- README in the contract's section order + CHANGELOG for the image-crate API
+- fuzz + ci: contract targets (heif_api standalone, heif_decode under registry) and a full no-default-features job
+- the image-crate contract vocabulary at the root (standalone probe / info / HeifImage; registry decode* / decode_all / encode*)
+
 ### Added (the workspace image-crate API contract, r465)
 
 - Root vocabulary per `IMAGE_CRATE_API.md`. Standalone
