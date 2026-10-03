@@ -4,6 +4,94 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added (the workspace image-crate API contract, r465)
+
+- Root vocabulary per `IMAGE_CRATE_API.md`. Standalone
+  (`default-features = false`): `probe(&[u8]) -> bool` (HEIF-family
+  `ftyp` brands), `info(&[u8]) -> ImageInfo` / `info_of(&HeifFile)`
+  (primary geometry after transforms, the `PixelFormat` a decode
+  yields, `frames` = displayable items + sequence samples, alpha /
+  colour / ICC / Exif / XMP presence, `primary_item_id`,
+  `has_gain_map` — read from the container alone), the types
+  `HeifImage` (`width`, `height`, `format`, `planes`, `color`,
+  `metadata`, `palette`; `new` / `from_rgb8` / `from_rgba8` /
+  `from_frame`, `to_rgb8` / `to_rgba8` exact H.273 kernels at the
+  signalled matrix and range, `as_bytes` / `into_raw` / `to_frame` /
+  `into_frame` / `validate`), `PixelFormat` (a new enum whose variants
+  mirror `oxideav_core::PixelFormat` by name: the planar YCbCr / grey
+  / `Gbrp*` layouts this crate emits plus packed `Rgb24` / `Rgba`;
+  `from_layout` / `from_layout_promoting` / `layout` and `TryFrom`
+  both ways with `HeifPixelFormat`), `Plane` (the former `HeifPlane`),
+  `ColorInfo` / `ColorRange`, `Metadata`, `Palette` (always `None` for
+  HEIF), `RgbImage` / `RgbaImage` (8-bit, tightly packed),
+  `ImageInfo`, `DecodeOptions` (`max_width` / `max_height` /
+  `max_pixels` / `max_bytes` / `strict` + `item_id` / `tone_mapped` /
+  `base_layer_fallback` / `threads` / `reference_white_nits`),
+  `Frame`, `Error` (= `HeifError`).
+- With `registry`: `decode` / `decode_with` / `decode_file` /
+  `decode_file_item` (the whole `DecodedImage`), `decode_rgb8` /
+  `decode_rgba8`, `decode_all` / `decode_all_with` (burst items —
+  primary first, then by id, `altr` groups collapsed — then every
+  sample of the image-sequence tracks through one codec instance per
+  track, alpha tracks composed in, the sample entry's `clap` applied,
+  `delay` from the track timing), `decode_from<R: Read>`, `encode` /
+  `encode_owned` / `encode_rgb8` / `encode_rgba8` / `encode_to<W:
+  Write>`; `From<DecodedImage> for HeifImage`; the framework bridges
+  `HeifImage::into_video_frame` / `from_video_frame`, `From<HeifImage>
+  for VideoFrame`, `From<PixelFormat> for oxideav_core::PixelFormat` +
+  `TryFrom` back, `ColorInfo::{to_color_signal, from_color_signal}`,
+  `PixelFormat::to_core_labelled`. Limits are checked against the
+  header before any decode (`HeifError::LimitExceeded`); `strict`
+  requires a HEIF-family brand and MIAF conformance of `miaf` files.
+- `EncodeOptions::chroma` (+ `with_chroma`): the chroma layout packed
+  / planar RGB sources are coded in on AV1 (the framework encoder's
+  `chroma=444` option now reaches the library API). `EncodeOptions::new`
+  takes it as its last argument.
+- `HeifError::{LimitExceeded, Io}` (+ `limit`, `io`, `From<std::io::Error>`);
+  `ItemDecoder::with_threads`.
+- `layout` module: `hevc_layout` / `av1_layout` / `layered_layout` /
+  `layered_base_layout` / `layout_of` / `predict_output` /
+  `entry_layout` are standalone now (re-exported from `decode` /
+  `demux` where they lived).
+- `tests/api.rs` (contract conformance against the corpus oracles,
+  limits / strictness / selection, encode round trips, byte-identity
+  of the framework adapters with the contract path), fuzz targets
+  `heif_api` (standalone `probe` / `info`) and `heif_decode`
+  (`decode_with` / `decode_rgba8` / `decode_all_with` under limits;
+  the fuzz crate now builds with `registry`), seeded from the corpus.
+- CI: the `ci-standalone` job builds and tests every target with
+  `--no-default-features` and runs clippy.
+
+### Changed
+
+- The `"heif"` framework decoder and encoder are thin adapters over
+  the contract functions (`decode_file_item`, `encode_owned` /
+  `encode_packed_bytes`): one implementation, byte-identical output
+  (pinned by `tests/api.rs`).
+- `rgb::RgbImage` (interleaved `u16` samples) is `rgb::RgbImage16`;
+  the root `RgbImage` is the contract's 8-bit record. `rgb::to_rgb`
+  returns `RgbImage16`; the shared kernel is `rgb::for_each_pixel`,
+  with `rgb::planes_to_rgb8` the 8-bit path.
+- `HeifError::exhausted` builds `LimitExceeded`; `ResourceExhausted`
+  is no longer produced (deprecated, see below). The `Display` text is
+  `heif: limit exceeded: …`.
+- The `heifencbench` example requires `registry` (it always did).
+
+### Fixed
+
+- A monochrome + alpha layout is promoted to `Yuva444P` on the
+  framework side instead of being labelled `Ya8`: the framework's
+  `Ya8` is a *packed* grey + alpha layout, so the two-plane frame the
+  demuxer announced under that label could not be read back by its
+  consumers.
+
+### Deprecated (one release)
+
+- `HeifPlane` → `Plane` (type alias).
+- `HeifError::ResourceExhausted` → `HeifError::LimitExceeded` (the
+  variant stays so existing `match` arms compile; it is never
+  produced).
+
 ## [0.0.8](https://github.com/OxideAV/oxideav-heif/compare/v0.0.7...v0.0.8) - 2026-10-02
 
 ### Other
