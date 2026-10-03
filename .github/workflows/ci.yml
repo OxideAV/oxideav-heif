@@ -6,11 +6,13 @@ name: CI
 #   which exercises the registry-integrated path (oxideav-core +
 #   oxideav-h265 + oxideav-av1 deps + Decoder trait impls).
 # * `ci-standalone` (no-default-features) — inline job that builds and
-#   tests the lib with `--no-default-features`, exercising the
-#   `oxideav-core`-free standalone path (HEIF parser + composition layer
-#   on crate-local HeifFrame / HeifPixelFormat / HeifError). Catches
-#   regressions where pipeline modules accidentally regrow an
-#   oxideav-core / codec import.
+#   tests the crate with `--no-default-features`, exercising the
+#   `oxideav-core`-free standalone path: the image-crate contract's
+#   `probe` / `info` / `HeifImage` vocabulary, the HEIF parser and the
+#   composition layer on the crate-local HeifFrame / HeifPixelFormat /
+#   HeifError (`tests/api.rs` runs its standalone half; the registry
+#   tests are `cfg`-gated out). Catches regressions where pipeline
+#   modules accidentally regrow an oxideav-core / codec import.
 
 on:
   push:
@@ -42,7 +44,10 @@ jobs:
           key: standalone
 
       - name: Build (no-default-features)
-        run: cargo build --no-default-features --lib --verbose
+        run: cargo build --no-default-features --all-targets --verbose
 
       - name: Test (no-default-features)
-        run: cargo test --no-default-features --lib --verbose
+        run: cargo test --no-default-features --verbose
+
+      - name: Clippy (no-default-features)
+        run: cargo clippy --no-default-features --all-targets --no-deps -- -D warnings

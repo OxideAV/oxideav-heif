@@ -30,17 +30,22 @@ cargo-fuzz = true
 #                      avcC / lhvC / oinf / tols, sbgp / csgp / sgpd,
 #                      prft / ssix, every typed property) with a
 #                      serialize → parse round-trip oracle.
+#  * `heif_api`      — the standalone image-crate contract: `probe`,
+#                      `info` / `info_of`, the limit checks.
+#  * `heif_decode`   — the registry contract: `decode_with` /
+#                      `decode_rgba8` / `decode_all_with` under tight
+#                      `DecodeOptions` limits (container → codec →
+#                      composition → RGB; seeded with the corpus files).
 #
-# The targets build the crate without its default `registry` feature:
-# the codec crates are never fuzzed here (they have their own
-# harnesses), and the container fuzz stays fast to build.
+# `heif_decode` needs the default `registry` feature (the codec crates
+# have their own harnesses; here they are reached only through valid
+# HEIF structure); the other targets exercise the standalone surface.
 
 [dependencies]
 libfuzzer-sys = "0.4"
 
 [dependencies.oxideav-heif]
 path = ".."
-default-features = false
 
 # Prevent this fuzz package from being pulled into the umbrella
 # workspace at `crates/*` glob-resolve time.
@@ -71,5 +76,17 @@ doc = false
 [[bin]]
 name = "heif_records"
 path = "fuzz_targets/heif_records.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "heif_api"
+path = "fuzz_targets/heif_api.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "heif_decode"
+path = "fuzz_targets/heif_decode.rs"
 test = false
 doc = false
