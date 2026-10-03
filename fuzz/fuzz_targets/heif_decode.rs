@@ -14,10 +14,10 @@ fuzz_target!(|data: &[u8]| {
     }
     // Bound the work per input: small pictures, few bytes, serial.
     let opts = oxideav_heif::DecodeOptions::default()
-        .with_max_width(512)
-        .with_max_height(512)
-        .with_max_pixels(1 << 16)
-        .with_max_bytes(1 << 18);
+        .with_max_width(Some(512))
+        .with_max_height(Some(512))
+        .with_max_pixels(Some(1 << 16))
+        .with_max_bytes(Some(1 << 18));
     if let Ok(img) = oxideav_heif::decode_with(data, &opts) {
         let _ = img.validate();
         let _ = img.to_rgba8();

@@ -20,9 +20,9 @@ fuzz_target!(|data: &[u8]| {
     }
     // Limits are enforced before any allocation.
     let opts = oxideav_heif::DecodeOptions::default()
-        .with_max_width(4096)
-        .with_max_height(4096)
-        .with_max_pixels(1 << 22)
-        .with_max_bytes(1 << 20);
+        .with_max_width(Some(4096))
+        .with_max_height(Some(4096))
+        .with_max_pixels(Some(1 << 22))
+        .with_max_bytes(Some(1 << 20));
     let _ = opts.check_input(data.len());
 });

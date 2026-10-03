@@ -25,9 +25,12 @@ All notable changes to this project will be documented in this file.
   `ColorInfo` / `ColorRange`, `Metadata`, `Palette` (always `None` for
   HEIF), `RgbImage` / `RgbaImage` (8-bit, tightly packed),
   `ImageInfo`, `DecodeOptions` (`max_width` / `max_height` /
-  `max_pixels` / `max_bytes` / `strict` + `item_id` / `tone_mapped` /
+  `max_pixels` / `max_bytes` as `Option`s, `None` = unlimited, finite
+  defaults; `strict` + `item_id` / `tone_mapped` /
   `base_layer_fallback` / `threads` / `reference_white_nits`),
-  `Frame`, `Error` (= `HeifError`).
+  `Frame`, `Error` (= `HeifError`). `HeifImage::new` validates the
+  plane geometry and returns `Result`; `try_to_rgb8` / `try_to_rgba8`
+  report a bad geometry where `to_rgb8` / `to_rgba8` substitute.
 - With `registry`: `decode` / `decode_with` / `decode_file` /
   `decode_file_item` (the whole `DecodedImage`), `decode_rgb8` /
   `decode_rgba8`, `decode_all` / `decode_all_with` (burst items —
@@ -37,8 +40,10 @@ All notable changes to this project will be documented in this file.
   `delay` from the track timing), `decode_from<R: Read>`, `encode` /
   `encode_owned` / `encode_rgb8` / `encode_rgba8` / `encode_to<W:
   Write>`; `From<DecodedImage> for HeifImage`; the framework bridges
-  `HeifImage::into_video_frame` / `from_video_frame`, `From<HeifImage>
-  for VideoFrame`, `From<PixelFormat> for oxideav_core::PixelFormat` +
+  `HeifImage::into_video_frame` / `from_video_frame(&VideoFrame,
+  &CodecParameters)` / `from_video_frame_parts` /
+  `TryFrom<(&VideoFrame, &CodecParameters)>`, `From<HeifImage> for
+  VideoFrame`, `From<PixelFormat> for oxideav_core::PixelFormat` +
   `TryFrom` back, `ColorInfo::{to_color_signal, from_color_signal}`,
   `PixelFormat::to_core_labelled`. Limits are checked against the
   header before any decode (`HeifError::LimitExceeded`); `strict`
@@ -47,8 +52,8 @@ All notable changes to this project will be documented in this file.
   / planar RGB sources are coded in on AV1 (the framework encoder's
   `chroma=444` option now reaches the library API). `EncodeOptions::new`
   takes it as its last argument.
-- `HeifError::{LimitExceeded, Io}` (+ `limit`, `io`, `From<std::io::Error>`);
-  `ItemDecoder::with_threads`.
+- `HeifError::{LimitExceeded, Io(std::io::Error)}` (+ `limit`, `io`,
+  `From<std::io::Error>`, `Error::source`); `ItemDecoder::with_threads`.
 - `layout` module: `hevc_layout` / `av1_layout` / `layered_layout` /
   `layered_base_layout` / `layout_of` / `predict_output` /
   `entry_layout` are standalone now (re-exported from `decode` /
@@ -75,6 +80,8 @@ All notable changes to this project will be documented in this file.
 - `HeifError::exhausted` builds `LimitExceeded`; `ResourceExhausted`
   is no longer produced (deprecated, see below). The `Display` text is
   `heif: limit exceeded: …`.
+- `HeifError` no longer derives `Clone` / `PartialEq` / `Eq` (its
+  `Io` variant wraps `std::io::Error`); match on variants or `Display`.
 - The `heifencbench` example requires `registry` (it always did).
 
 ### Fixed

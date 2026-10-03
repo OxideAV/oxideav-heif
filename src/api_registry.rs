@@ -790,11 +790,33 @@ impl HeifImage {
         )
     }
 
-    /// From a framework frame of known geometry and label: the planar
-    /// YCbCr / grey / `Gbrp*` layouts and packed `Rgb24` / `Rgba`
-    /// (planes copied). The colour description comes from the frame's
-    /// `ColorSignal` when it carries one (unspecified otherwise).
+    /// From a framework frame and the stream parameters that describe
+    /// it (`width`, `height`, `pixel_format`): the planar YCbCr / grey /
+    /// `Gbrp*` layouts and packed `Rgb24` / `Rgba` (planes copied). The
+    /// colour description comes from the frame's `ColorSignal`, else the
+    /// parameters' (unspecified when neither says).
     pub fn from_video_frame(
+        frame: &oxideav_core::VideoFrame,
+        params: &CodecParameters,
+    ) -> Result<Self> {
+        let (width, height) = match (params.width, params.height) {
+            (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
+            _ => return Err(HeifError::invalid("codec parameters without a geometry")),
+        };
+        let pf = params
+            .pixel_format
+            .ok_or_else(|| HeifError::invalid("codec parameters without a pixel format"))?;
+        let mut img = Self::from_video_frame_parts(frame, width, height, pf)?;
+        if frame.color_signal().is_none() {
+            img.color = ColorInfo::from_color_signal(&params.color_signal);
+        }
+        Ok(img)
+    }
+
+    /// [`HeifImage::from_video_frame`] with the geometry and label given
+    /// directly; the colour description is the frame's signal
+    /// (unspecified without one).
+    pub fn from_video_frame_parts(
         frame: &oxideav_core::VideoFrame,
         width: u32,
         height: u32,
@@ -817,13 +839,20 @@ impl HeifImage {
                 .iter()
                 .map(|p| Plane::new(p.stride, p.data.clone()))
                 .collect(),
-        );
+        )?;
         img.color = match frame.color_signal() {
             Some(s) => ColorInfo::from_color_signal(&s),
             None => ColorInfo::unspecified(),
         };
-        img.validate()?;
         Ok(img)
+    }
+}
+
+impl TryFrom<(&oxideav_core::VideoFrame, &CodecParameters)> for HeifImage {
+    type Error = HeifError;
+
+    fn try_from((frame, params): (&oxideav_core::VideoFrame, &CodecParameters)) -> Result<Self> {
+        Self::from_video_frame(frame, params)
     }
 }
 
@@ -907,8 +936,25 @@ mod tests {
             .with_color(ColorInfo::new(ColorRange::Limited, 9, 16, 9));
         let (vf, pf) = img.clone().into_video_frame();
         assert_eq!(pf, oxideav_core::PixelFormat::Rgba);
-        let back = HeifImage::from_video_frame(&vf, 2, 1, pf).unwrap();
+        let mut params = CodecParameters::video(CodecId::new("heif"));
+        params.width = Some(2);
+        params.height = Some(1);
+        params.pixel_format = Some(pf);
+        let back = HeifImage::from_video_frame(&vf, &params).unwrap();
         assert_eq!(back, img);
+        assert_eq!(HeifImage::try_from((&vf, &params)).unwrap(), img);
+        // Without a frame signal the parameters' colour is taken.
+        let bare = oxideav_core::VideoFrame {
+            pts: None,
+            planes: vf.planes.clone(),
+        };
+        let p2 = params
+            .clone()
+            .with_color_signal(ColorInfo::new(ColorRange::Limited, 9, 16, 9).to_color_signal());
+        assert_eq!(
+            HeifImage::from_video_frame(&bare, &p2).unwrap().color,
+            ColorInfo::new(ColorRange::Limited, 9, 16, 9)
+        );
         // Unspecified range survives the signal.
         let u = HeifImage::from_rgb8(1, 1, vec![0, 0, 0]).with_color(ColorInfo::unspecified());
         let (vf, _) = u.into_video_frame();
@@ -916,6 +962,14 @@ mod tests {
             vf.color_signal().unwrap().range,
             oxideav_core::ColorRange::Unspecified
         );
-        assert!(HeifImage::from_video_frame(&vf, 4, 4, oxideav_core::PixelFormat::Rgb24).is_err());
+        assert!(
+            HeifImage::from_video_frame_parts(&vf, 4, 4, oxideav_core::PixelFormat::Rgb24).is_err()
+        );
+        let mut p3 = CodecParameters::video(CodecId::new("heif"));
+        p3.pixel_format = Some(oxideav_core::PixelFormat::Rgb24);
+        assert!(
+            HeifImage::from_video_frame(&vf, &p3).is_err(),
+            "no geometry"
+        );
     }
 }

@@ -102,7 +102,9 @@ an alpha auxiliary track is also offered composed, as `"heif"`
 packets). The framework decoder and encoder are thin adapters over the
 contract functions — one implementation — and `HeifImage` converts
 both ways: `into_video_frame()` / `From<HeifImage> for VideoFrame`,
-`HeifImage::from_video_frame(&frame, w, h, pixel_format)`; the
+`HeifImage::from_video_frame(&frame, &codec_parameters)` (also
+`TryFrom<(&VideoFrame, &CodecParameters)>`; `from_video_frame_parts`
+takes the geometry and label directly); the
 `PixelFormat` enums map one to one by name (`From` / `TryFrom`), the
 8-bit YCbCr layouts carrying the framework's full-range `YuvJ*` label
 when `color.range` is full.
@@ -138,15 +140,19 @@ silently except what the codec's coding layout implies):
 | `Rgb24` / `Rgba` (packed) | RGB → 4:2:0 YCbCr through `opts.colr`'s matrix (the production path of `oxideav convert`), alpha as the `auxC` item | `EncodeOptions::chroma` (`None` = 4:2:0, `Some(Yuv444)` keeps full chroma) |
 
 `encode_rgb8` / `encode_rgba8` are the packed rows above without the
-`HeifImage` (the alpha channel becomes the alpha item). A malformed
-image (plane count / size) is `HeifError::InvalidData`; a layout the
-codec cannot take is `HeifError::Unsupported`.
+`HeifImage` (the alpha channel becomes the alpha item): an RGB image
+into this YCbCr container is converted to the natural layout exactly
+as `encode_rgb8` would, never refused. `HeifImage::new` validates the
+plane geometry (`HeifError::InvalidData`), so a malformed image is
+refused before anything is coded; a layout the codec cannot take is
+`HeifError::Unsupported`.
 
 ## Options
 
 `DecodeOptions` (`Default` + `with_*`): `max_width` / `max_height`
-(2²⁰), `max_pixels` (2³⁰), `max_bytes` (4 GiB) — checked against the
-header before any decode or allocation (`HeifError::LimitExceeded`);
+(`Some(2²⁰)`), `max_pixels` (`Some(2³⁰)`), `max_bytes` (`Some(4 GiB)`;
+`None` = unlimited) — checked against the header before any decode or
+allocation (`HeifError::LimitExceeded`);
 `strict` (a HEIF-family brand is required and a `miaf`-branded file
 must pass `miaf::check`; off, any ISOBMFF file with a `pict` item tree
 decodes); `item_id` (decode that item instead of `pitm`),
@@ -195,7 +201,9 @@ enforces before allocating: `MAX_ITEMS` 2²⁰, `MAX_PROPERTIES` 2¹⁵,
 `MAX_ILOC_DEPTH` 8, `MAX_SAMPLES` 2²⁴, `MAX_ITEM_DECODES` 4096,
 demuxer input ≤ 4 GiB in memory. Cycles in `dimg` / `auxl` / `thmb`
 graphs and construction-method-2 self-references are rejected. Every
-function returns `HeifError` on hostile input, never panics; the fuzz
+function returns `HeifError` on hostile input, never panics
+(`HeifError::Io` wraps the `std::io::Error` of `decode_from` /
+`encode_to`); the fuzz
 targets cover `probe` / `info` (standalone) and `decode` / `decode_all`
 (registry).
 

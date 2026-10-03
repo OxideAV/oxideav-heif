@@ -670,13 +670,26 @@ pub struct HeifImage {
 }
 
 impl HeifImage {
-    /// Build from planes in `format`'s layout, no metadata. The colour
-    /// is [`ColorInfo::srgb`] for packed / planar RGB layouts and
-    /// [`ColorInfo::unspecified`] otherwise (so `EncodeOptions::colr`
-    /// governs an encode, as for a bare frame); [`decode()`](crate::decode())
-    /// fills it from the file. The planes are taken as given; call
-    /// [`HeifImage::validate`] to check their geometry.
-    pub fn new(width: u32, height: u32, format: PixelFormat, planes: Vec<Plane>) -> Self {
+    /// Build from planes in `format`'s layout, no metadata; the plane
+    /// geometry is validated ([`HeifImage::validate`]) so an invalid
+    /// image cannot be built here. The colour is [`ColorInfo::srgb`]
+    /// for packed / planar RGB layouts and [`ColorInfo::unspecified`]
+    /// otherwise (so `EncodeOptions::colr` governs an encode, as for a
+    /// bare frame); [`decode()`](crate::decode()) fills it from the file.
+    pub fn new(width: u32, height: u32, format: PixelFormat, planes: Vec<Plane>) -> Result<Self> {
+        let img = Self::unchecked(width, height, format, planes);
+        img.validate()?;
+        Ok(img)
+    }
+
+    /// [`HeifImage::new`] without the geometry check (the colour and
+    /// metadata defaults are the same).
+    pub(crate) fn unchecked(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        planes: Vec<Plane>,
+    ) -> Self {
         Self {
             width,
             height,
@@ -711,9 +724,11 @@ impl HeifImage {
     }
 
     /// A packed `Rgb24` image over `data` (`3 × width × height` bytes,
-    /// row-major, stride `3 × width`).
+    /// row-major, stride `3 × width`). Not validated (the contract's
+    /// infallible constructor): a short buffer fails at
+    /// [`HeifImage::validate`] / `encode`, and the conversions pad it.
     pub fn from_rgb8(width: u32, height: u32, data: Vec<u8>) -> Self {
-        Self::new(
+        Self::unchecked(
             width,
             height,
             PixelFormat::Rgb24,
@@ -724,9 +739,10 @@ impl HeifImage {
         )
     }
 
-    /// A packed `Rgba` image over `data` (`4 × width × height` bytes).
+    /// A packed `Rgba` image over `data` (`4 × width × height` bytes);
+    /// see [`HeifImage::from_rgb8`] about validation.
     pub fn from_rgba8(width: u32, height: u32, data: Vec<u8>) -> Self {
-        Self::new(
+        Self::unchecked(
             width,
             height,
             PixelFormat::Rgba,
@@ -882,23 +898,50 @@ impl HeifImage {
     /// Tightly packed RGB, 3 bytes per pixel, `3 × width` bytes per
     /// row: exact H.273 conversion at the image's matrix and range,
     /// chroma replicated to its co-sited luma samples, deeper samples
-    /// scaled to 8 bits (round to nearest), alpha dropped.
+    /// scaled to 8 bits (round to nearest), alpha dropped. Infallible
+    /// on every image this crate decodes; a caller-assembled image with
+    /// bad geometry yields a black (or padded) picture — see
+    /// [`HeifImage::try_to_rgb8`].
     pub fn to_rgb8(&self) -> Vec<u8> {
         self.rgb8(false)
+            .unwrap_or_else(|_| self.fallback_rgb8(false))
     }
 
     /// Tightly packed RGBA, 4 bytes per pixel; alpha opaque (255) when
     /// the layout has none.
     pub fn to_rgba8(&self) -> Vec<u8> {
+        self.rgb8(true).unwrap_or_else(|_| self.fallback_rgb8(true))
+    }
+
+    /// [`HeifImage::to_rgb8`] reporting a bad plane geometry instead
+    /// of substituting.
+    pub fn try_to_rgb8(&self) -> Result<Vec<u8>> {
+        self.rgb8(false)
+    }
+
+    /// [`HeifImage::to_rgba8`] reporting a bad plane geometry instead
+    /// of substituting.
+    pub fn try_to_rgba8(&self) -> Result<Vec<u8>> {
         self.rgb8(true)
     }
 
-    fn rgb8(&self, alpha: bool) -> Vec<u8> {
+    fn fallback_rgb8(&self, alpha: bool) -> Vec<u8> {
+        let n = self.width as usize * self.height as usize;
+        let out_bpp = if alpha { 4 } else { 3 };
+        let mut v = vec![0u8; n * out_bpp];
+        if alpha {
+            v.iter_mut().skip(3).step_by(4).for_each(|a| *a = 255);
+        }
+        v
+    }
+
+    fn rgb8(&self, alpha: bool) -> Result<Vec<u8>> {
         let (w, h) = (self.width as usize, self.height as usize);
         let out_bpp = if alpha { 4 } else { 3 };
-        let Some(first) = self.planes.first() else {
-            return Vec::new();
-        };
+        let first = self
+            .planes
+            .first()
+            .ok_or_else(|| HeifError::invalid("image without planes"))?;
         match self.format {
             PixelFormat::Rgb24 | PixelFormat::Rgba => {
                 let bpp = self.format.packed_bytes_per_pixel().unwrap_or(3);
@@ -919,13 +962,13 @@ impl HeifImage {
                         }
                     }
                 }
-                out.resize(w * h * out_bpp, if alpha { 255 } else { 0 });
-                out
+                if out.len() != w * h * out_bpp {
+                    return Err(HeifError::invalid("packed plane shorter than its geometry"));
+                }
+                Ok(out)
             }
             _ => {
-                let Some(layout) = self.format.layout() else {
-                    return Vec::new();
-                };
+                let layout = HeifPixelFormat::try_from(self.format)?;
                 let colr = if self.format.is_planar_rgb() {
                     Colr::Nclx {
                         primaries: self.color.primaries as u16,
@@ -944,7 +987,6 @@ impl HeifImage {
                     Some(&colr),
                     alpha,
                 )
-                .unwrap_or_else(|_| vec![if alpha { 255 } else { 0 }; w * h * out_bpp])
             }
         }
     }
@@ -1102,15 +1144,17 @@ impl ImageInfo {
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct DecodeOptions {
-    /// Largest accepted output width (default 2²⁰).
-    pub max_width: u32,
-    /// Largest accepted output height (default 2²⁰).
-    pub max_height: u32,
+    /// Largest accepted output width (default 2²⁰; `None` = unlimited).
+    pub max_width: Option<u32>,
+    /// Largest accepted output height (default 2²⁰; `None` = unlimited).
+    pub max_height: Option<u32>,
     /// Largest accepted output pixel count (default
-    /// [`MAX_CANVAS_PIXELS`](crate::derived::MAX_CANVAS_PIXELS), 2³⁰).
-    pub max_pixels: u64,
-    /// Largest accepted input size in bytes (default 4 GiB).
-    pub max_bytes: u64,
+    /// [`MAX_CANVAS_PIXELS`](crate::derived::MAX_CANVAS_PIXELS), 2³⁰;
+    /// `None` = unlimited).
+    pub max_pixels: Option<u64>,
+    /// Largest accepted input size in bytes (default 4 GiB; `None` =
+    /// unlimited).
+    pub max_bytes: Option<u64>,
     /// Refuse files that do not declare a HEIF-family brand, and
     /// MIAF-branded files that violate the MIAF constraints
     /// ([`miaf::check`](crate::miaf::check)). Off, the reader is
@@ -1138,10 +1182,10 @@ pub struct DecodeOptions {
 impl Default for DecodeOptions {
     fn default() -> Self {
         Self {
-            max_width: 1 << 20,
-            max_height: 1 << 20,
-            max_pixels: crate::derived::MAX_CANVAS_PIXELS,
-            max_bytes: 1 << 32,
+            max_width: Some(1 << 20),
+            max_height: Some(1 << 20),
+            max_pixels: Some(crate::derived::MAX_CANVAS_PIXELS),
+            max_bytes: Some(1 << 32),
             strict: false,
             item_id: None,
             tone_mapped: false,
@@ -1156,10 +1200,10 @@ impl DecodeOptions {
     /// Every field as a positional argument, in declaration order.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        max_width: u32,
-        max_height: u32,
-        max_pixels: u64,
-        max_bytes: u64,
+        max_width: Option<u32>,
+        max_height: Option<u32>,
+        max_pixels: Option<u64>,
+        max_bytes: Option<u64>,
         strict: bool,
         item_id: Option<u32>,
         tone_mapped: bool,
@@ -1182,25 +1226,25 @@ impl DecodeOptions {
     }
 
     /// Set [`DecodeOptions::max_width`].
-    pub fn with_max_width(mut self, max_width: u32) -> Self {
+    pub fn with_max_width(mut self, max_width: Option<u32>) -> Self {
         self.max_width = max_width;
         self
     }
 
     /// Set [`DecodeOptions::max_height`].
-    pub fn with_max_height(mut self, max_height: u32) -> Self {
+    pub fn with_max_height(mut self, max_height: Option<u32>) -> Self {
         self.max_height = max_height;
         self
     }
 
     /// Set [`DecodeOptions::max_pixels`].
-    pub fn with_max_pixels(mut self, max_pixels: u64) -> Self {
+    pub fn with_max_pixels(mut self, max_pixels: Option<u64>) -> Self {
         self.max_pixels = max_pixels;
         self
     }
 
     /// Set [`DecodeOptions::max_bytes`].
-    pub fn with_max_bytes(mut self, max_bytes: u64) -> Self {
+    pub fn with_max_bytes(mut self, max_bytes: Option<u64>) -> Self {
         self.max_bytes = max_bytes;
         self
     }
@@ -1243,28 +1287,31 @@ impl DecodeOptions {
 
     /// Check an input size against [`DecodeOptions::max_bytes`].
     pub fn check_input(&self, len: usize) -> Result<()> {
-        if len as u64 > self.max_bytes {
-            return Err(HeifError::limit(format!(
-                "{len}-byte input exceeds max_bytes {}",
-                self.max_bytes
-            )));
+        if let Some(max) = self.max_bytes {
+            if len as u64 > max {
+                return Err(HeifError::limit(format!(
+                    "{len}-byte input exceeds max_bytes {max}"
+                )));
+            }
         }
         Ok(())
     }
 
     /// Check an output geometry against the dimension / pixel limits.
     pub fn check_dims(&self, width: u32, height: u32) -> Result<()> {
-        if width > self.max_width || height > self.max_height {
+        if self.max_width.is_some_and(|m| width > m) || self.max_height.is_some_and(|m| height > m)
+        {
             return Err(HeifError::limit(format!(
-                "{width}x{height} exceeds max_width {} / max_height {}",
+                "{width}x{height} exceeds max_width {:?} / max_height {:?}",
                 self.max_width, self.max_height
             )));
         }
-        if width as u64 * height as u64 > self.max_pixels {
-            return Err(HeifError::limit(format!(
-                "{width}x{height} exceeds max_pixels {}",
-                self.max_pixels
-            )));
+        if let Some(max) = self.max_pixels {
+            if width as u64 * height as u64 > max {
+                return Err(HeifError::limit(format!(
+                    "{width}x{height} exceeds max_pixels {max}"
+                )));
+            }
         }
         Ok(())
     }
@@ -1457,6 +1504,14 @@ mod tests {
         assert_eq!(rgba.clone().into_raw(), vec![1, 2, 3, 9, 4, 5, 6, 8]);
         let short = HeifImage::from_rgba8(2, 2, vec![0; 3]);
         assert!(short.validate().is_err());
+        assert!(short.try_to_rgba8().is_err());
+        assert_eq!(
+            short.to_rgba8(),
+            vec![0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]
+        );
+        assert!(
+            HeifImage::new(2, 2, PixelFormat::Yuv420P, vec![Plane::new(2, vec![0; 4])]).is_err()
+        );
         assert!(HeifImage::from_rgb8(0, 1, vec![]).validate().is_err());
     }
 
@@ -1503,10 +1558,10 @@ mod tests {
     #[test]
     fn decode_options_enforce_limits() {
         let o = DecodeOptions::default()
-            .with_max_width(10)
-            .with_max_height(10)
-            .with_max_pixels(50)
-            .with_max_bytes(100);
+            .with_max_width(Some(10))
+            .with_max_height(Some(10))
+            .with_max_pixels(Some(50))
+            .with_max_bytes(Some(100));
         o.check_dims(5, 5).unwrap();
         assert!(matches!(
             o.check_dims(11, 1),
@@ -1519,5 +1574,10 @@ mod tests {
         assert!(o.check_input(101).is_err());
         o.check_input(100).unwrap();
         assert!(!DecodeOptions::default().strict);
+        let unlimited = DecodeOptions::new(
+            None, None, None, None, false, None, false, false, None, None,
+        );
+        unlimited.check_dims(u32::MAX, u32::MAX).unwrap();
+        unlimited.check_input(usize::MAX).unwrap();
     }
 }

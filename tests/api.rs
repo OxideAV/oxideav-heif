@@ -81,8 +81,9 @@ fn error_type_has_the_contract_variants() {
     let e: oxideav_heif::Error = HeifError::limit("x");
     assert!(matches!(e, HeifError::LimitExceeded(_)));
     let e: HeifError = std::io::Error::other("disk").into();
-    assert!(matches!(e, HeifError::Io(_)));
-    assert!(std::error::Error::source(&e).is_none());
+    assert!(matches!(&e, HeifError::Io(io) if io.kind() == std::io::ErrorKind::Other));
+    assert!(std::error::Error::source(&e).is_some());
+    assert_eq!(e.to_string(), "heif: i/o: disk");
 }
 
 #[cfg(feature = "registry")]
@@ -250,17 +251,23 @@ mod registry {
         };
         let bytes = fixture_bytes(&root, "single-image-with-thumbnail");
         let i = info(&bytes).unwrap();
-        let too_narrow = DecodeOptions::default().with_max_width(i.width - 1);
+        let too_narrow = DecodeOptions::default().with_max_width(Some(i.width - 1));
         assert!(matches!(
             decode_with(&bytes, &too_narrow),
             Err(HeifError::LimitExceeded(_))
         ));
-        let too_many = DecodeOptions::default().with_max_pixels(1);
+        let too_many = DecodeOptions::default().with_max_pixels(Some(1));
         assert!(matches!(
             decode_with(&bytes, &too_many),
             Err(HeifError::LimitExceeded(_))
         ));
-        let too_big = DecodeOptions::default().with_max_bytes(bytes.len() as u64 - 1);
+        let too_big = DecodeOptions::default().with_max_bytes(Some(bytes.len() as u64 - 1));
+        let unlimited = DecodeOptions::default()
+            .with_max_width(None)
+            .with_max_height(None)
+            .with_max_pixels(None)
+            .with_max_bytes(None);
+        assert!(decode_with(&bytes, &unlimited).is_ok());
         assert!(matches!(
             decode_with(&bytes, &too_big),
             Err(HeifError::LimitExceeded(_))
@@ -427,7 +434,12 @@ mod registry {
         let back = decode(&encode(&img, &opts).unwrap()).unwrap();
         assert_eq!(back.metadata.xmp.as_deref(), Some(&b"<x>opts</x>"[..]));
         // A malformed image is refused before anything is coded.
-        let bad = HeifImage::new(4, 4, PixelFormat::Yuv420P, vec![Plane::new(4, vec![0; 16])]);
+        assert!(matches!(
+            HeifImage::new(4, 4, PixelFormat::Yuv420P, vec![Plane::new(4, vec![0; 16])]),
+            Err(HeifError::InvalidData(_))
+        ));
+        let mut bad = HeifImage::from_rgb8(4, 4, vec![0; 48]);
+        bad.planes[0].data.truncate(3);
         assert!(matches!(encode(&bad, &pcm), Err(HeifError::InvalidData(_))));
     }
 
@@ -501,7 +513,8 @@ mod registry {
         assert_eq!(vf.color_signal(), want.color_signal());
         assert_eq!(pf, oxideav_core::PixelFormat::Yuva420P);
         // And back through the bridge.
-        let back = HeifImage::from_video_frame(&vf, w, h, pf).unwrap();
+        dparams.pixel_format = Some(pf);
+        let back = HeifImage::from_video_frame(&vf, &dparams).unwrap();
         assert_eq!(back.planes, img.planes);
         assert_eq!(back.format, img.format);
         assert_eq!(back.color, img.color);

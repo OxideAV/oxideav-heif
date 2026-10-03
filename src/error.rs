@@ -13,7 +13,7 @@ use std::fmt;
 
 /// Errors raised by the HEIF container parser, the derivation /
 /// composition layer and the writer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum HeifError {
     /// The byte stream violates ISO/IEC 14496-12 / 23008-12 syntax or
@@ -28,8 +28,8 @@ pub enum HeifError {
     LimitExceeded(String),
     /// An I/O error from a [`Read`](std::io::Read) / [`Write`](std::io::Write)
     /// handed to [`decode_from`](crate::decode_from) /
-    /// [`encode_to`](crate::encode_to): the error's message.
-    Io(String),
+    /// [`encode_to`](crate::encode_to).
+    Io(std::io::Error),
     /// The pre-0.0.9 name of [`HeifError::LimitExceeded`]. No longer
     /// produced; kept one release so existing `match` arms compile.
     #[deprecated(
@@ -64,9 +64,9 @@ impl HeifError {
         Self::LimitExceeded(msg.into())
     }
 
-    /// Build an [`HeifError::Io`].
+    /// Build an [`HeifError::Io`] from a message (`ErrorKind::Other`).
     pub fn io(msg: impl Into<String>) -> Self {
-        Self::Io(msg.into())
+        Self::Io(std::io::Error::other(msg.into()))
     }
 
     /// The refusal for an L-HEVC (`lhv1`) item whose `tols` asks for
@@ -110,11 +110,18 @@ impl fmt::Display for HeifError {
     }
 }
 
-impl std::error::Error for HeifError {}
+impl std::error::Error for HeifError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            HeifError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for HeifError {
     fn from(e: std::io::Error) -> Self {
-        HeifError::Io(e.to_string())
+        HeifError::Io(e)
     }
 }
 
@@ -128,7 +135,7 @@ impl From<HeifError> for oxideav_core::Error {
             HeifError::InvalidData(m) => oxideav_core::Error::InvalidData(m),
             HeifError::Unsupported(m) => oxideav_core::Error::Unsupported(m),
             HeifError::LimitExceeded(m) => oxideav_core::Error::ResourceExhausted(m),
-            HeifError::Io(m) => oxideav_core::Error::Io(std::io::Error::other(m)),
+            HeifError::Io(e) => oxideav_core::Error::Io(e),
             #[allow(deprecated)]
             HeifError::ResourceExhausted(m) => oxideav_core::Error::ResourceExhausted(m),
         }
@@ -153,6 +160,8 @@ mod tests {
         assert!(matches!(HeifError::limit("z"), HeifError::LimitExceeded(_)));
         let io: HeifError = std::io::Error::other("disk").into();
         assert_eq!(io.to_string(), "heif: i/o: disk");
+        assert!(std::error::Error::source(&io).is_some());
+        assert!(matches!(HeifError::io("x"), HeifError::Io(_)));
         let e = HeifError::layered_hevc(7, 2);
         assert!(matches!(e, HeifError::Unsupported(_)));
         assert_eq!(e.layered_hevc_info(), Some((7, 2)));

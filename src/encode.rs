@@ -2826,7 +2826,7 @@ impl Encoder for HeifEncoder {
             // path, one implementation.
             Ok(_) => {
                 let image =
-                    crate::api::HeifImage::from_video_frame(vf, w, h, pf)?.with_color(color);
+                    crate::api::HeifImage::from_video_frame_parts(vf, w, h, pf)?.with_color(color);
                 if image.format.is_packed() {
                     // Borrowed rows straight into the coding layout.
                     let plane = &vf.image_planes()[0];
