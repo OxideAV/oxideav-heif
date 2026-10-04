@@ -19,7 +19,9 @@ This crate follows the workspace **image-crate API contract**
 (`IMAGE_CRATE_API.md` in the umbrella): the same root vocabulary every
 `oxideav-<format>` crate exposes — `probe`, `info`, `decode` /
 `decode_rgb8` / `decode_rgba8` / `decode_all`, `encode` / `encode_rgb8`
-/ `encode_rgba8`, `HeifImage`, `RgbImage` / `RgbaImage`, `PixelFormat`,
+/ `encode_rgba8` / `encode_all`, `HeifImage` (its `new` / `from_rgb8` /
+`from_rgba8` are `Result`s that refuse a zero dimension or planes that
+do not fit the layout with `InvalidData`), `RgbImage` / `RgbaImage`, `PixelFormat`,
 `ImageInfo`, `DecodeOptions` / `EncodeOptions`, `HeifError` (= `Error`).
 
 ## Standalone use
@@ -85,7 +87,15 @@ item id; `altr` groups collapse to their first decodable member) and
 every sample of the image-sequence tracks, each `Frame` with its
 `delay` from the track timing. `decode_with(&DecodeOptions)` adds
 limits, `strict`, `item_id`, `tone_mapped`, `threads`; `decode_from` /
-`encode_to` take a `Read` / `Write`. The deeper HEIF surface stays
+`encode_to` take a `Read` / `Write`. `encode_all(&[Frame],
+&EncodeOptions)` is the mirror of `decode_all`: frames without a
+`delay` become image items (the first is the primary, the rest a
+burst), frames with a `delay` the samples of an image-sequence track
+(timescale 1000, an alpha track when the pictures carry alpha, a MIAF
+cover item aliasing sample 0 when there are no item frames); both may
+be mixed as `decode_all` returns them, all sharing frame 0's geometry
+and codec. With the lossless HEVC mode (`with_hevc_mode("pcm")`) planar
+`Yuv420P` frames round-trip exactly. The deeper HEIF surface stays
 under its own names: `HeifFile`, `decode_primary` / `decode_item` →
 `DecodedImage` (depth map, thumbnails, gain map, layers, typed
 properties), `HeifWriter` / `SequenceWriter`, `encode_still*`.

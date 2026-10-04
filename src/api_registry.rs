@@ -23,7 +23,8 @@ use crate::compose::{apply_clap, attach_alpha};
 use crate::decode::{decode_item, frame_from_planes, DecodedImage, ItemDecoder, ToneMapOutput};
 use crate::derived::build_graph;
 use crate::encode::{
-    coded_depth, encode_still_owned, packed_bytes_to_planar, EncodeOptions, StillCodec,
+    coded_depth, encode_sequence, encode_still_into, encode_still_owned, packed_bytes_to_planar,
+    EncodeOptions, SequenceInput, StillCodec,
 };
 use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
@@ -31,6 +32,7 @@ use crate::image::{Chroma, HeifFrame, HeifPixelFormat, Plane};
 use crate::layout::entry_layout;
 use crate::props::Colr;
 use crate::sequence::{parse_movie, sample_bytes, Movie, SampleEntry, Track};
+use crate::writer::HeifWriter;
 
 // ---------------------------------------------------------------------
 // Decode
@@ -409,6 +411,117 @@ pub fn encode(image: &HeifImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
         );
     }
     encode_owned(image.clone(), opts)
+}
+
+/// Encode `frames` as one file — the mirror of [`decode_all`]. Frames
+/// without a `delay` become image items (the first is the primary, the
+/// rest a burst in order; one delay-less frame is exactly [`encode`]);
+/// frames with a `delay` become the samples of an image-sequence track
+/// (timescale 1000, every sample a sync sample, an alpha track when the
+/// pictures carry alpha), all sharing frame 0's geometry, codec and
+/// coding layout. Both kinds may be mixed, as [`decode_all`] returns
+/// them. Each image's `color` / `metadata` are written as for a still
+/// (item frames: per item; sequence frames: the first picture's `colr`
+/// / ICC on the sample entry).
+///
+/// `decode_all(encode_all(frames)) == frames` (planes, colour, delays)
+/// holds for planar `Yuv420P` frames coded with the lossless HEVC mode
+/// (`with_hevc_mode("pcm")`); the lossy defaults preserve geometry,
+/// delays and colour. Sequence frames read back with `track_id`
+/// `Some(1)` and item frames with their `item_id`.
+pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
+    if frames.is_empty() {
+        return Err(HeifError::invalid("encode_all needs at least one frame"));
+    }
+    if let [single] = frames {
+        if single.delay.is_none() {
+            return encode(&single.image, opts);
+        }
+    }
+    let mut still: Option<HeifWriter> = None;
+    for f in frames.iter().filter(|f| f.delay.is_none()) {
+        let (frame, o) = prepare_item(&f.image, opts)?;
+        let first = still.is_none();
+        let w = still.get_or_insert_with(HeifWriter::new);
+        let id = encode_still_into(w, &frame, &o)?;
+        if first {
+            w.set_primary(id);
+        }
+    }
+    let timed: Vec<SequenceInput> = frames
+        .iter()
+        .filter_map(|f| f.delay.map(|d| (f, d)))
+        .map(|(f, d)| {
+            let (frame, o) = prepare_item(&f.image, opts)?;
+            Ok(SequenceInput {
+                frame,
+                opts: o,
+                duration_ms: u32::try_from(d.as_millis()).unwrap_or(u32::MAX),
+            })
+        })
+        .collect::<Result<_>>()?;
+    match (timed.is_empty(), still) {
+        (true, Some(w)) => w.write_to_vec(),
+        (true, None) => unreachable!("frames are non-empty"),
+        (false, still) => encode_sequence(timed, still),
+    }
+}
+
+/// The planar frame [`encode`] codes for `image` (packed RGB converted
+/// through the effective `colr`, planar RGB converted or kept per the
+/// codec, YCbCr / grey copied) plus the options carrying the image's
+/// colour and metadata.
+fn prepare_item(image: &HeifImage, opts: &EncodeOptions) -> Result<(HeifFrame, EncodeOptions)> {
+    image.validate()?;
+    let colr = effective_colr(&image.color, image.format, opts);
+    let opts = effective_options(&image.metadata, colr.clone(), opts);
+    if image.format.is_packed() {
+        let plane = &image.planes[0];
+        let bpp = image.format.packed_bytes_per_pixel().unwrap_or(4);
+        let target = packed_target(&opts, false, 8, image.format == PixelFormat::Rgba)?;
+        let frame = packed_bytes_to_planar(
+            &plane.data,
+            plane.stride,
+            image.width,
+            image.height,
+            bpp,
+            [0, 1, 2, 3],
+            false,
+            false,
+            &colr,
+            target,
+        )?;
+        return Ok((frame, opts));
+    }
+    let planar = image.to_frame()?;
+    if image.format.is_planar_rgb() {
+        let (p, t) = match &colr {
+            Colr::Nclx {
+                primaries,
+                transfer,
+                ..
+            } => (*primaries, *transfer),
+            _ => (1, 13),
+        };
+        let identity = Colr::Nclx {
+            primaries: p,
+            transfer: t,
+            matrix: 0,
+            full_range: true,
+        };
+        if opts.codec == StillCodec::Av1 && planar.format.bit_depth <= 12 {
+            let opts = EncodeOptions {
+                colr: identity,
+                ..opts
+            };
+            return Ok((planar, opts));
+        }
+        let rgb = crate::rgb::to_rgb(&planar, Some(&identity))?;
+        drop(planar);
+        let ycc = crate::rgb::from_rgb(&rgb, Some(&opts.colr), Chroma::Yuv444)?;
+        return Ok((ycc, opts));
+    }
+    Ok((planar, opts))
 }
 
 /// [`encode`] taking the image by value: a planar image already in the
@@ -933,6 +1046,7 @@ mod tests {
     #[test]
     fn video_frame_round_trip_keeps_planes_and_signal() {
         let img = HeifImage::from_rgba8(2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8])
+            .unwrap()
             .with_color(ColorInfo::new(ColorRange::Limited, 9, 16, 9));
         let (vf, pf) = img.clone().into_video_frame();
         assert_eq!(pf, oxideav_core::PixelFormat::Rgba);
@@ -956,7 +1070,9 @@ mod tests {
             ColorInfo::new(ColorRange::Limited, 9, 16, 9)
         );
         // Unspecified range survives the signal.
-        let u = HeifImage::from_rgb8(1, 1, vec![0, 0, 0]).with_color(ColorInfo::unspecified());
+        let u = HeifImage::from_rgb8(1, 1, vec![0, 0, 0])
+            .unwrap()
+            .with_color(ColorInfo::unspecified());
         let (vf, _) = u.into_video_frame();
         assert_eq!(
             vf.color_signal().unwrap().range,

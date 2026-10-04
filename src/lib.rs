@@ -118,7 +118,8 @@ pub use miaf::{MiafProfile, MiafReport, MiafViolation};
 #[cfg(feature = "registry")]
 pub use api_registry::{
     decode, decode_all, decode_all_with, decode_file, decode_file_item, decode_from, decode_rgb8,
-    decode_rgba8, decode_with, encode, encode_owned, encode_rgb8, encode_rgba8, encode_to,
+    decode_rgba8, decode_with, encode, encode_all, encode_owned, encode_rgb8, encode_rgba8,
+    encode_to,
 };
 #[cfg(feature = "registry")]
 pub use decode::{decode_item, decode_primary, DecodedImage, ItemDecoder};

@@ -724,11 +724,11 @@ impl HeifImage {
     }
 
     /// A packed `Rgb24` image over `data` (`3 × width × height` bytes,
-    /// row-major, stride `3 × width`). Not validated (the contract's
-    /// infallible constructor): a short buffer fails at
-    /// [`HeifImage::validate`] / `encode`, and the conversions pad it.
-    pub fn from_rgb8(width: u32, height: u32, data: Vec<u8>) -> Self {
-        Self::unchecked(
+    /// row-major, stride `3 × width`), validated like
+    /// [`HeifImage::new`]: a zero dimension or a short buffer is
+    /// `InvalidData`.
+    pub fn from_rgb8(width: u32, height: u32, data: Vec<u8>) -> Result<Self> {
+        Self::new(
             width,
             height,
             PixelFormat::Rgb24,
@@ -739,10 +739,10 @@ impl HeifImage {
         )
     }
 
-    /// A packed `Rgba` image over `data` (`4 × width × height` bytes);
-    /// see [`HeifImage::from_rgb8`] about validation.
-    pub fn from_rgba8(width: u32, height: u32, data: Vec<u8>) -> Self {
-        Self::unchecked(
+    /// A packed `Rgba` image over `data` (`4 × width × height` bytes),
+    /// validated like [`HeifImage::new`].
+    pub fn from_rgba8(width: u32, height: u32, data: Vec<u8>) -> Result<Self> {
+        Self::new(
             width,
             height,
             PixelFormat::Rgba,
@@ -1489,7 +1489,7 @@ mod tests {
 
     #[test]
     fn packed_images_convert_and_validate() {
-        let rgb = HeifImage::from_rgb8(2, 1, vec![1, 2, 3, 4, 5, 6]);
+        let rgb = HeifImage::from_rgb8(2, 1, vec![1, 2, 3, 4, 5, 6]).unwrap();
         rgb.validate().unwrap();
         assert_eq!(rgb.as_bytes(), Some(&[1u8, 2, 3, 4, 5, 6][..]));
         assert_eq!(rgb.to_rgb8(), vec![1, 2, 3, 4, 5, 6]);
@@ -1499,10 +1499,24 @@ mod tests {
             rgb.to_frame().is_err(),
             "packed layouts have no planar frame"
         );
-        let rgba = HeifImage::from_rgba8(1, 2, vec![1, 2, 3, 9, 4, 5, 6, 8]);
+        let rgba = HeifImage::from_rgba8(1, 2, vec![1, 2, 3, 9, 4, 5, 6, 8]).unwrap();
         assert_eq!(rgba.to_rgb8(), vec![1, 2, 3, 4, 5, 6]);
         assert_eq!(rgba.clone().into_raw(), vec![1, 2, 3, 9, 4, 5, 6, 8]);
-        let short = HeifImage::from_rgba8(2, 2, vec![0; 3]);
+        // A short buffer cannot be built; the kernels stay defensive for
+        // an image assembled inside the crate.
+        assert!(matches!(
+            HeifImage::from_rgba8(2, 2, vec![0; 3]),
+            Err(HeifError::InvalidData(_))
+        ));
+        let short = HeifImage::unchecked(
+            2,
+            2,
+            PixelFormat::Rgba,
+            vec![Plane {
+                stride: 8,
+                data: vec![0; 3],
+            }],
+        );
         assert!(short.validate().is_err());
         assert!(short.try_to_rgba8().is_err());
         assert_eq!(
@@ -1512,7 +1526,7 @@ mod tests {
         assert!(
             HeifImage::new(2, 2, PixelFormat::Yuv420P, vec![Plane::new(2, vec![0; 4])]).is_err()
         );
-        assert!(HeifImage::from_rgb8(0, 1, vec![]).validate().is_err());
+        assert!(HeifImage::from_rgb8(0, 1, vec![]).is_err());
     }
 
     #[test]

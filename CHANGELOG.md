@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Fallible constructors (`IMAGE_CRATE_API` fleet sweep, breaking).**
+  `HeifImage::from_rgb8` / `from_rgba8` return `Result<HeifImage,
+  HeifError>` like `HeifImage::new` already did, refusing a zero
+  dimension or a short buffer with `InvalidData` at construction; the
+  infallible signatures are not kept.
+
+### Added
+
+- `encode_all(&[Frame], &EncodeOptions)`, the mirror of `decode_all`:
+  delay-less frames become image items (primary + burst), timed frames
+  the samples of an image-sequence track (timescale 1000, alpha track
+  when the pictures carry alpha, MIAF cover item aliasing sample 0),
+  mixed as `decode_all` returns them. `decode_all(encode_all(frames))
+  == frames` is pinned for planar `Yuv420P` frames in the lossless HEVC
+  mode; the sequence output passes the MIAF checker.
+
 ## [0.0.9](https://github.com/OxideAV/oxideav-heif/compare/v0.0.8...v0.0.9) - 2026-10-03
 
 ### Other

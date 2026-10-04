@@ -94,8 +94,8 @@ mod registry {
     use common::png::Png;
     use oxideav_heif::{
         decode, decode_all, decode_from, decode_rgb8, decode_rgba8, decode_with, encode,
-        encode_rgb8, encode_rgba8, encode_to, ColorInfo, DecodeOptions, EncodeOptions, HeifImage,
-        Metadata, Plane,
+        encode_all, encode_rgb8, encode_rgba8, encode_to, ColorInfo, DecodeOptions, EncodeOptions,
+        Frame, HeifImage, Metadata, Plane,
     };
 
     const MEAN_TOL: f64 = 1.5;
@@ -438,9 +438,160 @@ mod registry {
             HeifImage::new(4, 4, PixelFormat::Yuv420P, vec![Plane::new(4, vec![0; 16])]),
             Err(HeifError::InvalidData(_))
         ));
-        let mut bad = HeifImage::from_rgb8(4, 4, vec![0; 48]);
+        assert!(matches!(
+            HeifImage::from_rgb8(4, 4, vec![0; 3]),
+            Err(HeifError::InvalidData(_))
+        ));
+        let mut bad = HeifImage::from_rgb8(4, 4, vec![0; 48]).unwrap();
         bad.planes[0].data.truncate(3);
         assert!(matches!(encode(&bad, &pcm), Err(HeifError::InvalidData(_))));
+    }
+
+    /// A planar 4:2:0 picture with a per-frame pattern, limited BT.709.
+    fn yuv420_frame(w: u32, h: u32, seed: u8) -> HeifImage {
+        let (wu, hu) = (w as usize, h as usize);
+        let (cw, ch) = (wu.div_ceil(2), hu.div_ceil(2));
+        let y: Vec<u8> = (0..wu * hu)
+            .map(|i| 16 + ((i as u32 * 7 + seed as u32 * 31) % 220) as u8)
+            .collect();
+        let cb: Vec<u8> = (0..cw * ch)
+            .map(|i| 16 + ((i * 3 + seed as usize) % 224) as u8)
+            .collect();
+        let cr: Vec<u8> = (0..cw * ch)
+            .map(|i| 16 + ((i * 5 + seed as usize * 2) % 224) as u8)
+            .collect();
+        HeifImage::new(
+            w,
+            h,
+            PixelFormat::Yuv420P,
+            vec![Plane::new(wu, y), Plane::new(cw, cb), Plane::new(cw, cr)],
+        )
+        .unwrap()
+        .with_color(ColorInfo::new(oxideav_heif::ColorRange::Limited, 1, 1, 1))
+    }
+
+    #[test]
+    fn encode_all_mirrors_decode_all() {
+        use std::time::Duration;
+        let pcm = EncodeOptions::default().with_hevc_mode("pcm".into());
+        let (w, h) = (16u32, 8u32);
+
+        // One delay-less frame is exactly `encode`.
+        let f0 = yuv420_frame(w, h, 1);
+        let one = encode_all(&[Frame::new(f0.clone(), None, None, None)], &pcm).unwrap();
+        assert_eq!(one, encode(&f0, &pcm).unwrap());
+
+        // Delay-less frames: a burst of image items, the first primary;
+        // the lossless mode reads back the planes, colour and ids.
+        let burst: Vec<Frame> = (1..=3)
+            .map(|i| Frame::new(yuv420_frame(w, h, i), None, None, None))
+            .collect();
+        let bytes = encode_all(&burst, &pcm).unwrap();
+        let back = decode_all(&bytes).unwrap();
+        assert_eq!(back.len(), 3);
+        for (i, (got, want)) in back.iter().zip(&burst).enumerate() {
+            assert_eq!(got.image, want.image, "burst item {i}");
+            assert!(got.delay.is_none() && got.track_id.is_none());
+            assert!(got.item_id.is_some());
+        }
+        assert_eq!(
+            decode(&bytes).unwrap(),
+            burst[0].image,
+            "frame 0 is the primary"
+        );
+
+        // Timed frames: an image sequence; planes, colour and delays
+        // read back equal (with the MIAF cover still aliasing sample 0).
+        let delays = [40u64, 1500, 1];
+        let seq: Vec<Frame> = delays
+            .iter()
+            .enumerate()
+            .map(|(i, &ms)| {
+                Frame::new(
+                    yuv420_frame(w, h, 10 + i as u8),
+                    Some(Duration::from_millis(ms)),
+                    None,
+                    None,
+                )
+            })
+            .collect();
+        let bytes = encode_all(&seq, &pcm).unwrap();
+        let back = decode_all(&bytes).unwrap();
+        assert_eq!(back.len(), 4, "the cover item, then the three samples");
+        assert_eq!(back[0].image, seq[0].image, "the cover is sample 0");
+        assert!(back[0].delay.is_none() && back[0].item_id.is_some());
+        for (i, (got, want)) in back[1..].iter().zip(&seq).enumerate() {
+            assert_eq!(got.image, want.image, "sample {i}");
+            assert_eq!(got.delay, want.delay, "sample {i} delay");
+            assert_eq!(got.track_id, Some(1));
+            assert!(got.item_id.is_none());
+        }
+        let f = oxideav_heif::HeifFile::parse(&bytes).unwrap();
+        let rep = oxideav_heif::miaf::check(&f, oxideav_heif::miaf::MiafProfile::Miaf).unwrap();
+        assert!(rep.is_conformant(), "{:#?}", rep.violations);
+
+        // Mixed, as `decode_all` returns them: items first, then samples.
+        let mut mixed = burst[..2].to_vec();
+        mixed.extend(seq.iter().cloned());
+        let bytes = encode_all(&mixed, &pcm).unwrap();
+        let back = decode_all(&bytes).unwrap();
+        assert_eq!(back.len(), 5);
+        for (i, (got, want)) in back.iter().zip(&mixed).enumerate() {
+            assert_eq!(got.image, want.image, "mixed {i}");
+            assert_eq!(got.delay, want.delay, "mixed {i} delay");
+        }
+
+        // Packed RGBA frames with delays: the lossy default keeps the
+        // geometry, delays and alpha presence; alpha rides its own track.
+        let rgba: Vec<Frame> = (0..2u8)
+            .map(|i| {
+                let px: Vec<u8> = (0..(w * h) as usize)
+                    .flat_map(|p| {
+                        let v = ((p * 13 + i as usize * 50) % 256) as u8;
+                        [v, 255 - v, 128, if p % 2 == 0 { 255 } else { 64 }]
+                    })
+                    .collect();
+                Frame::new(
+                    HeifImage::from_rgba8(w, h, px).unwrap(),
+                    Some(Duration::from_millis(100)),
+                    None,
+                    None,
+                )
+            })
+            .collect();
+        let bytes = encode_all(&rgba, &EncodeOptions::default()).unwrap();
+        let back = decode_all(&bytes).unwrap();
+        assert_eq!(back.len(), 3);
+        for got in &back[1..] {
+            assert_eq!((got.image.width, got.image.height), (w, h));
+            assert!(got.image.format.has_alpha(), "{:?}", got.image.format);
+            assert_eq!(got.delay, Some(Duration::from_millis(100)));
+            let a: Vec<u8> = got.image.to_rgba8().chunks_exact(4).map(|p| p[3]).collect();
+            assert!(
+                a.iter().step_by(2).all(|&v| v >= 250),
+                "alpha even pixels opaque"
+            );
+            assert!(a.iter().skip(1).step_by(2).all(|&v| (60..=68).contains(&v)));
+        }
+
+        // Rejections: nothing, or frames that do not share frame 0's geometry.
+        assert!(matches!(
+            encode_all(&[], &pcm),
+            Err(HeifError::InvalidData(_))
+        ));
+        let odd = vec![
+            seq[0].clone(),
+            Frame::new(
+                yuv420_frame(w * 2, h, 3),
+                Some(Duration::from_millis(5)),
+                None,
+                None,
+            ),
+        ];
+        assert!(matches!(
+            encode_all(&odd, &pcm),
+            Err(HeifError::InvalidData(_))
+        ));
     }
 
     #[test]

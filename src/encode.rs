@@ -1426,6 +1426,178 @@ fn coding_picture_owned(
     ))
 }
 
+/// One timed picture of [`encode_sequence`]: a frame in the image's
+/// layout, the options carrying its colour / metadata, and its display
+/// duration in milliseconds.
+pub(crate) struct SequenceInput {
+    pub(crate) frame: HeifFrame,
+    pub(crate) opts: EncodeOptions,
+    pub(crate) duration_ms: u32,
+}
+
+/// Write `timed` as an image-sequence track (plus an alpha track when
+/// the pictures carry alpha) — the [`crate::encode_all`] shape. Every
+/// picture is coded as a sync sample with the first picture's codec and
+/// coding layout; `still`, when given, becomes the file-level `meta`
+/// (image items decoded before the sequence), otherwise a cover item
+/// aliasing sample 0 is written (MIAF §7.2.1.4). Timescale is 1000.
+pub(crate) fn encode_sequence(
+    timed: Vec<SequenceInput>,
+    still: Option<HeifWriter>,
+) -> Result<Vec<u8>> {
+    use crate::writer::{SequenceAlphaTrack, SequenceSample, SequenceWriter};
+
+    let Some(first) = timed.first() else {
+        return Err(HeifError::invalid("sequence: no timed frames"));
+    };
+    let vis = (first.frame.width, first.frame.height);
+    if vis.0 > u16::MAX as u32 || vis.1 > u16::MAX as u32 {
+        return Err(HeifError::unsupported(format!(
+            "sequence: {}x{} exceeds the 16-bit track size",
+            vis.0, vis.1
+        )));
+    }
+    let has_alpha = first.frame.format.has_alpha;
+    let first_opts = first.opts.clone();
+    let mut sw: Option<SequenceWriter> = None;
+    let mut alpha_track: Option<SequenceAlphaTrack> = None;
+    for (i, input) in timed.into_iter().enumerate() {
+        let SequenceInput {
+            frame,
+            opts,
+            duration_ms,
+        } = input;
+        if (frame.width, frame.height) != vis || frame.format.has_alpha != has_alpha {
+            return Err(HeifError::invalid(format!(
+                "sequence: frame {i} is {}x{} (alpha: {}), frame 0 is {}x{} (alpha: {}) — \
+                 encode_all frames share one geometry and alpha presence",
+                frame.width, frame.height, frame.format.has_alpha, vis.0, vis.1, has_alpha
+            )));
+        }
+        if opts.codec != first_opts.codec {
+            return Err(HeifError::invalid("sequence: frames must share one codec"));
+        }
+        let native_av1 = native_av1(&frame, &opts);
+        let (colour, alpha) = coding_picture_owned(frame, &opts)?;
+        let depth = colour.format.bit_depth;
+        let padded = pad_owned(colour, alignment(&opts))?;
+        let pic = encode_picture_for(padded, &opts, &opts.colr, &[])?;
+        let w = match sw.as_mut() {
+            Some(w) => {
+                if w.config != pic.config {
+                    return Err(HeifError::invalid(format!(
+                        "sequence: frame {i} codes with a different decoder configuration \
+                         (depth or chroma layout) than frame 0"
+                    )));
+                }
+                w
+            }
+            None => {
+                let mut w = SequenceWriter::new(
+                    pic.item_type,
+                    pic.config.clone(),
+                    pic.coded_width as u16,
+                    pic.coded_height as u16,
+                    1000,
+                );
+                let icc = opts.icc_profile.as_deref();
+                w.entry_properties.push(Property::Pixi(Pixi {
+                    bits_per_channel: vec![pic.layout.bit_depth; pic.layout.chroma.colour_planes()],
+                }));
+                w.entry_properties
+                    .push(Property::Colr(nclx_for_icc(&opts.colr, icc.is_some())));
+                if let Some(icc) = icc {
+                    w.entry_properties.push(Property::Colr(Colr::Icc {
+                        restricted: false,
+                        profile: icc.to_vec(),
+                    }));
+                }
+                if let Some((clap, _)) = clap_for(&pic, vis) {
+                    w.entry_properties.push(clap);
+                }
+                sw.insert(w)
+            }
+        };
+        w.push_sample(pic.data, duration_ms, true);
+        if let Some(alpha) = alpha {
+            let a_src = if native_av1 {
+                mono_at_depth(alpha, depth)?
+            } else {
+                to_yuv420(&alpha, depth)?
+            };
+            let extra: &[(&str, &str)] = if opts.codec == StillCodec::Hevc {
+                ALPHA_HEVC_OPTIONS
+            } else {
+                &[]
+            };
+            let padded = pad_owned(a_src, alignment(&opts))?;
+            let alpha_colr = Colr::Nclx {
+                primaries: 2,
+                transfer: 2,
+                matrix: 2,
+                full_range: true,
+            };
+            let apic = encode_picture_for(padded, &opts, &alpha_colr, extra)?;
+            let urn = match opts.codec {
+                StillCodec::Hevc => crate::props::AUX_URN_ALPHA_HEVC,
+                StillCodec::Av1 => crate::props::AUX_URN_ALPHA,
+            };
+            let at = alpha_track.get_or_insert_with(|| {
+                let mut props = vec![Property::Pixi(Pixi {
+                    bits_per_channel: vec![apic.layout.bit_depth],
+                })];
+                props.extend(clap_for(&apic, vis).map(|(c, _)| c));
+                SequenceAlphaTrack::new(
+                    apic.item_type,
+                    apic.config.clone(),
+                    apic.coded_width as u16,
+                    apic.coded_height as u16,
+                    urn.to_string(),
+                    Vec::new(),
+                    props,
+                )
+            });
+            if at.config != apic.config {
+                return Err(HeifError::invalid(format!(
+                    "sequence: alpha of frame {i} codes with a different decoder configuration"
+                )));
+            }
+            at.samples
+                .push(SequenceSample::new(apic.data, duration_ms, true));
+        }
+    }
+    let mut sw = sw.expect("at least one timed frame");
+    sw.alpha = alpha_track;
+    match still {
+        Some(still) => sw.still = Some(still),
+        None => {
+            // Cover image aliasing sample 0 (one copy of the bytes), so
+            // the file carries the file-level `meta` MIAF requires.
+            let mut still = HeifWriter::new();
+            let mut props: Vec<(Property, bool)> = vec![
+                (sw.config.clone(), true),
+                (
+                    Property::Ispe(Ispe {
+                        width: sw.width as u32,
+                        height: sw.height as u32,
+                    }),
+                    false,
+                ),
+            ];
+            props.extend(
+                sw.entry_properties
+                    .iter()
+                    .map(|p| (p.clone(), matches!(p, Property::Clap(_)))),
+            );
+            let cover = still.add_coded_item(sw.entry_type, Vec::new(), props);
+            still.set_primary(cover);
+            sw.still = Some(still);
+            sw.cover_sample = Some(0);
+        }
+    }
+    sw.write_to_vec()
+}
+
 /// Whether the items are AV1 (coded in the source's chroma layout,
 /// alpha as a monochrome item) rather than HEVC (4:2:0 items).
 fn native_av1(_frame: &HeifFrame, opts: &EncodeOptions) -> bool {
