@@ -58,6 +58,7 @@ if oxideav_heif::probe(&bytes) {
     //   apply_transforms} over HeifFrame, and HeifImage::from_frame(frame,
     //   color, metadata).to_rgba8() for the bytes.
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 With the default features the one-screen path is the contract's:
@@ -76,6 +77,7 @@ if oxideav_heif::probe(&bytes) {
     let out: Vec<u8> = oxideav_heif::encode_rgba8(w, h, &rgba, &opts)?;   // HEVC 4:2:0 + alpha item
     std::fs::write("out.heic", out)?;
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 `decode_all` yields every image of a burst (the primary first, then by
