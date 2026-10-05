@@ -94,8 +94,8 @@ mod registry {
     use common::png::Png;
     use oxideav_heif::{
         decode, decode_all, decode_from, decode_rgb8, decode_rgba8, decode_with, encode,
-        encode_all, encode_rgb8, encode_rgba8, encode_to, ColorInfo, DecodeOptions, EncodeOptions,
-        Frame, HeifImage, Metadata, Plane,
+        encode_all, encode_rgb8, encode_rgba8, encode_to, ColorInfo, ColorRange, DecodeOptions,
+        EncodeOptions, Frame, HeifImage, Metadata, Plane,
     };
 
     const MEAN_TOL: f64 = 1.5;
@@ -339,43 +339,45 @@ mod registry {
         rgba.chunks_exact(4).flat_map(|p| p[..3].to_vec()).collect()
     }
 
-    fn within(a: &[u8], b: &[u8], tol: i32) -> bool {
-        a.len() == b.len()
-            && a.iter()
-                .zip(b)
-                .all(|(x, y)| (*x as i32 - *y as i32).abs() <= tol)
-    }
-
     #[test]
     fn encode_rgb8_and_rgba8_round_trip_at_the_production_layout() {
         let (w, h) = (48u32, 40u32);
         let rgba = blocky_rgba(w, h);
         let rgb = rgb_of(&rgba);
+        // Lossless (`pcm`): an RGB source is an identity-matrix 4:4:4
+        // item — the file says what it holds and the round trip is exact.
         let pcm = EncodeOptions::default().with_hevc_mode("pcm".into());
         let bytes = encode_rgb8(w, h, &rgb, &pcm).unwrap();
         assert!(probe(&bytes));
         let i = info(&bytes).unwrap();
-        assert_eq!((i.width, i.height, i.format), (w, h, PixelFormat::Yuv420P));
-        assert_eq!(i.color, ColorInfo::default(), "the MIAF default colr");
-        let back = decode_rgb8(&bytes).unwrap();
-        assert!(
-            within(&back.data, &rgb, 1),
-            "RGB round trip within one code"
+        assert_eq!((i.width, i.height, i.format), (w, h, PixelFormat::Gbrp8));
+        assert_eq!(
+            i.color,
+            ColorInfo::new(ColorRange::Full, 1, 13, 0),
+            "BT.709 / sRGB code points, identity matrix, full range"
         );
+        let back = decode_rgb8(&bytes).unwrap();
+        assert_eq!(back.data, rgb, "lossless RGB round trip is exact");
         // Alpha rides as the auxiliary item, exactly.
         let bytes = encode_rgba8(w, h, &rgba, &pcm).unwrap();
         let i = info(&bytes).unwrap();
         assert!(i.has_alpha);
-        assert_eq!(i.format, PixelFormat::Yuva420P);
+        assert_eq!(i.format, PixelFormat::Gbrap8);
         let back = decode_rgba8(&bytes).unwrap();
-        assert!(within(&back.data, &rgba, 1));
-        for (got, want) in back.data.chunks_exact(4).zip(rgba.chunks_exact(4)) {
-            assert_eq!(got[3], want[3], "alpha is exact");
-        }
-        // The lossy default writes a decodable file too.
+        assert_eq!(back.data, rgba, "lossless RGBA round trip is exact");
+        // The production (lossy) layout: 4:2:0 YCbCr through the MIAF
+        // default colr, a smaller and decodable file.
         let lossy = encode_rgb8(w, h, &rgb, &EncodeOptions::default()).unwrap();
         assert!(lossy.len() < bytes.len());
+        let i = info(&lossy).unwrap();
+        assert_eq!((i.width, i.height, i.format), (w, h, PixelFormat::Yuv420P));
+        assert_eq!(i.color, ColorInfo::default(), "the MIAF default colr");
         assert_eq!(decode_rgb8(&lossy).unwrap().width, w);
+        let lossy = encode_rgba8(w, h, &rgba, &EncodeOptions::default()).unwrap();
+        assert_eq!(info(&lossy).unwrap().format, PixelFormat::Yuva420P);
+        let back = decode_rgba8(&lossy).unwrap();
+        assert_eq!((back.width, back.height), (w, h));
+        assert_eq!(back.data.len(), rgba.len());
         // Bad input sizes are refused, not read past.
         assert!(matches!(
             encode_rgb8(w, h, &rgb[..rgb.len() - 1], &pcm),
@@ -598,19 +600,27 @@ mod registry {
     fn av1_keeps_the_requested_chroma_for_rgb_sources() {
         let (w, h) = (32u32, 24u32);
         let rgb = rgb_of(&blocky_rgba(w, h));
+        // Lossless (the standalone default: no quality) codes an RGB
+        // source as an identity-matrix 4:4:4 item, exactly.
         let av1 = EncodeOptions::default().with_codec(oxideav_heif::encode::StillCodec::Av1);
         let bytes = encode_rgb8(w, h, &rgb, &av1).unwrap();
+        assert_eq!(info(&bytes).unwrap().format, PixelFormat::Gbrp8);
+        assert_eq!(decode_rgb8(&bytes).unwrap().data, rgb);
+        // Lossy coding converts to YCbCr at the requested chroma.
+        let lossy = av1.with_av1_quality(Some(60));
+        let bytes = encode_rgb8(w, h, &rgb, &lossy).unwrap();
         assert_eq!(info(&bytes).unwrap().format, PixelFormat::Yuv420P);
-        assert!(within(&decode_rgb8(&bytes).unwrap().data, &rgb, 1));
+        assert_eq!(info(&bytes).unwrap().color.matrix, 6);
+        assert_eq!(decode_rgb8(&bytes).unwrap().data.len(), rgb.len());
         let bytes = encode_rgb8(
             w,
             h,
             &rgb,
-            &av1.with_chroma(Some(oxideav_heif::Chroma::Yuv444)),
+            &lossy.with_chroma(Some(oxideav_heif::Chroma::Yuv444)),
         )
         .unwrap();
         assert_eq!(info(&bytes).unwrap().format, PixelFormat::Yuv444P);
-        assert!(within(&decode_rgb8(&bytes).unwrap().data, &rgb, 1));
+        assert_eq!(decode_rgb8(&bytes).unwrap().data.len(), rgb.len());
     }
 
     #[test]
@@ -662,7 +672,8 @@ mod registry {
             assert_eq!((a.stride, &a.data), (b.stride, &b.data));
         }
         assert_eq!(vf.color_signal(), want.color_signal());
-        assert_eq!(pf, oxideav_core::PixelFormat::Yuva420P);
+        // Lossless RGBA: the identity-matrix 4:4:4 item, planar RGB + alpha.
+        assert_eq!(pf, oxideav_core::PixelFormat::Gbrap8);
         // And back through the bridge.
         dparams.pixel_format = Some(pf);
         let back = HeifImage::from_video_frame(&vf, &dparams).unwrap();

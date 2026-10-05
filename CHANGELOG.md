@@ -6,6 +6,38 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **Framework demuxer: bursts are frames.** Stream 0 (`"heif"`) emits
+  one packet per displayable image item — the primary first, then the
+  other items in `decode_all`'s order (MIAF display order, `altr`
+  groups once, thumbnails / auxiliaries / hidden items excluded, only
+  items whose predicted layout and geometry match the primary's) —
+  each the whole file with its `pitm` patched to the item, so the
+  `"heif"` decoder reconstructs it with its own derivations, transforms
+  and alpha. Item packets are untimed: `pts` = item index, duration 1,
+  time base 1/1; `StreamInfo::duration` is the item count and
+  `metadata` carries `stream:<n>:item_ids`. Image-sequence tracks were
+  already one stream each (one packet per sample, `pts` / `dts` /
+  `duration` from the sample table in the track timescale); both are
+  now pinned byte-identical to `decode_all` over every corpus bundle,
+  every interop file and the two real-world `.heics`. `seek_to` on the
+  still stream lands on the item index; `HeifDemuxer::still_items()`
+  lists the carried items. A plain still is unchanged (one packet).
+- **Lossless RGB is lossless — the file signals what it holds.** With
+  `mode=pcm` (and AV1 at quality 100 / without a quality) a packed
+  RGB / RGBA / BGR(A) or planar RGB (`Gbrp*`, ≤ 12 bit) source is coded
+  as a 4:4:4 item with `matrix_coefficients = 0` (identity: the G, B, R
+  planes as they are, full range) on HEVC too, instead of BT.601 4:2:0
+  YCbCr, which the gateway suite measured at mean 8 / max 22 after the
+  round trip (chroma subsampling, not a matrix mismatch). The written
+  `nclx` is therefore primaries / transfer of the source (BT.709 /
+  sRGB by default), matrix 0, full range — what the encoder does;
+  `decode` yields `Gbrp8` / `Gbrap8`, the registry stream and frames
+  are labelled the same, and `decode(encode(rgb)).to_rgba8() == rgb`
+  exactly (0 LSB) on both codecs, pinned. Lossy coding (`intra`, AV1
+  with a quality) keeps the 4:2:0 BT.601 default; 16-bit RGB sources
+  still convert at the coded depth, and an explicit `range=limited`
+  keeps the YCbCr conversion (identity items are full range).
+
 - **Fallible constructors (`IMAGE_CRATE_API` fleet sweep, breaking).**
   `HeifImage::from_rgb8` / `from_rgba8` return `Result<HeifImage,
   HeifError>` like `HeifImage::new` already did, refusing a zero

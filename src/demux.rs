@@ -3,14 +3,23 @@
 //!
 //! A `.heic` / `.heif` / `.avif` file opens as a demuxer with:
 //!
-//! * **stream 0 — the still image** (when the file-level `meta` box has
+//! * **stream 0 — the still images** (when the file-level `meta` box has
 //!   a `pict` handler and a primary item): codec id `"heif"`, one
-//!   keyframe packet carrying the whole file. The `"heif"` decoder
-//!   ([`HeifCodec`], registered by [`crate::registry::register`])
-//!   reconstructs the primary item — derivations, transformative
-//!   properties, alpha — and emits one `VideoFrame`. The stream's
+//!   keyframe packet per displayable image item — the primary first,
+//!   then the rest of a burst in [`crate::decode_all`]'s order — each
+//!   carrying the whole file with its `pitm` naming that item. The
+//!   `"heif"` decoder ([`HeifCodec`], registered by
+//!   [`crate::registry::register`]) reconstructs the item —
+//!   derivations, transformative properties, alpha — and emits one
+//!   `VideoFrame` per packet. Item packets are untimed: `pts` is the
+//!   item index in a 1/1 time base, duration 1. The stream's
 //!   [`CodecParameters`] announce the predicted output geometry and
-//!   pixel format so pipelines can allocate before decoding.
+//!   pixel format so pipelines can allocate before decoding; items
+//!   whose output differs from the primary's are not part of it
+//!   (`metadata` key `stream:<n>:item_ids` lists the carried items).
+//!   Alpha / depth auxiliaries, thumbnails, hidden items and the gain
+//!   map are composed into or attached to their master, never frames
+//!   of their own.
 //! * **one stream per visual track** (`pict` / `vide` / `auxv`
 //!   handlers of the `moov` box, image sequences): codec id resolved
 //!   from the sample-entry type (`hvc1` → `"h265"`, `av01` → `"av1"`,
@@ -28,7 +37,7 @@ use oxideav_core::{
 };
 
 use crate::decode;
-use crate::derived::{build_primary_graph, ImageKind, ImageNode};
+use crate::derived::{build_graph, build_primary_graph, ImageKind, ImageNode};
 use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
 use crate::image::{Chroma, HeifPixelFormat};
@@ -307,11 +316,85 @@ pub struct HeifDemuxer {
     file: HeifFile,
     movie: Option<Movie>,
     streams: Vec<StreamInfo>,
-    still_pending: bool,
+    /// The pictures of the still stream, one packet each: the primary
+    /// item first, then the other displayable image items (a burst) in
+    /// [`crate::decode_all`]'s order.
+    still_items: Vec<u32>,
+    /// Next still packet to emit (an index into `still_items`).
+    still_cursor: usize,
+    /// Absolute offset and width (2 / 4 bytes) of the `pitm` item id
+    /// field, patched to name the item a burst packet carries.
+    pitm_field: Option<(usize, usize)>,
     still_stream: Option<u32>,
     tracks: Vec<(u32, TrackStream)>,
     active: Option<Vec<u32>>,
     metadata: Vec<(String, String)>,
+}
+
+/// The displayable image items of `file` in [`crate::decode_all`]'s
+/// order — the primary first, then every other entry of the viewer's
+/// display order (MIAF Annex A: non-hidden masters, thumbnails and
+/// auxiliaries excluded, an `altr` group counting once) by ascending
+/// first id — restricted to the items whose predicted output (layout
+/// and geometry) equals the primary's, so one stream description fits
+/// every packet. An `altr` group contributes its first member whose
+/// derivation graph builds.
+fn still_item_order<D: AsRef<[u8]>>(file: &HeifFile<D>, primary: &ImageNode) -> Vec<u32> {
+    let pid = primary.item.id;
+    let mut out = vec![pid];
+    let Ok(meta) = file.meta() else {
+        return out;
+    };
+    let Ok(want) = predict_output(primary) else {
+        return out;
+    };
+    let mut entries = meta.display_order();
+    entries.sort_by_key(|e| (!e.contains(&pid), e.first().copied().unwrap_or(u32::MAX)));
+    for alternatives in entries {
+        if alternatives.contains(&pid) {
+            continue;
+        }
+        let pick = alternatives.iter().copied().find_map(|id| {
+            let node = build_graph(file, id).ok()?;
+            (predict_output(&node).ok()? == want).then_some(id)
+        });
+        if let Some(id) = pick {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// Absolute offset and byte width of the `pitm` item id inside the
+/// file bytes every reader works on, when the `meta` box carries one.
+fn pitm_field_of<D: AsRef<[u8]>>(file: &HeifFile<D>) -> Option<(usize, usize)> {
+    use crate::boxes::{iter_boxes, parse_full_box, payload};
+    let bytes = file.bytes();
+    let meta = file.top_level.iter().find(|h| &h.box_type == b"meta")?;
+    let meta_payload = payload(bytes, meta);
+    let (_, _, inner) = parse_full_box(meta_payload).ok()?;
+    let inner_start = meta.payload_start + (meta_payload.len() - inner.len());
+    for h in iter_boxes(inner) {
+        let h = h.ok()?;
+        if &h.box_type != b"pitm" {
+            continue;
+        }
+        let p = payload(inner, &h);
+        let (version, _, body) = parse_full_box(p).ok()?;
+        let width = match version {
+            0 => 2,
+            1 => 4,
+            _ => return None,
+        };
+        if body.len() < width {
+            return None;
+        }
+        return Some((
+            inner_start + h.payload_start + (p.len() - body.len()),
+            width,
+        ));
+    }
+    None
 }
 
 impl HeifDemuxer {
@@ -321,6 +404,8 @@ impl HeifDemuxer {
         let movie = parse_movie(&file)?;
         let mut streams = Vec::new();
         let mut still_stream = None;
+        let mut still_items: Vec<u32> = Vec::new();
+        let mut pitm_field: Option<(usize, usize)> = None;
         let mut metadata = vec![
             (
                 "major_brand".to_string(),
@@ -377,11 +462,32 @@ impl HeifDemuxer {
                     "primary_item_type".into(),
                     crate::boxes::fourcc_str(&node.item.item_type),
                 ));
-                still_stream = Some(streams.len() as u32);
+                // Every displayable item is a packet; the ones after the
+                // primary need the `pitm` patched to name them, so
+                // without a patchable `pitm` (or an id too wide for
+                // it) the stream is the primary alone.
+                pitm_field = pitm_field_of(&file);
+                still_items = still_item_order(&file, &node);
+                match pitm_field {
+                    Some((_, width)) => still_items.retain(|&id| {
+                        id == node.item.id || width == 4 || u16::try_from(id).is_ok()
+                    }),
+                    None => still_items.truncate(1),
+                }
+                let index = streams.len() as u32;
+                metadata.push((
+                    format!("stream:{index}:item_ids"),
+                    still_items
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ));
+                still_stream = Some(index);
                 streams.push(StreamInfo {
-                    index: streams.len() as u32,
+                    index,
                     time_base: TimeBase::new(1, 1),
-                    duration: Some(1),
+                    duration: Some(still_items.len() as i64),
                     start_time: Some(0),
                     params,
                 });
@@ -523,12 +629,45 @@ impl HeifDemuxer {
             file,
             movie,
             streams,
-            still_pending: still_stream.is_some(),
+            still_items,
+            still_cursor: 0,
+            pitm_field,
             still_stream,
             tracks,
             active: None,
             metadata,
         })
+    }
+
+    /// The image items the still stream carries, one packet each, in
+    /// packet order (the primary first; see [`crate::decode_all`]).
+    pub fn still_items(&self) -> &[u32] {
+        &self.still_items
+    }
+
+    /// Packet `index` of the still stream: the whole file, with the
+    /// `pitm` naming the picture's item so the `"heif"` decoder
+    /// reconstructs that item (its own derivations, transforms and
+    /// auxiliaries) exactly as the primary. Untimed: `pts` is the
+    /// index in a 1/1 time base, duration 1.
+    fn still_packet(&self, stream: u32, index: usize) -> CoreResult<Packet> {
+        let id = self.still_items[index];
+        let mut data = self.file.bytes().to_vec();
+        let primary = self.file.primary_item().map(|i| i.id).ok();
+        if Some(id) != primary {
+            let (off, width) = self
+                .pitm_field
+                .ok_or_else(|| CoreError::invalid("heif: burst item without a pitm to patch"))?;
+            match width {
+                2 => data[off..off + 2].copy_from_slice(&(id as u16).to_be_bytes()),
+                _ => data[off..off + 4].copy_from_slice(&id.to_be_bytes()),
+            }
+        }
+        Ok(Packet::new(stream, TimeBase::new(1, 1), data)
+            .with_pts(index as i64)
+            .with_dts(index as i64)
+            .with_duration(1)
+            .with_keyframe(true))
     }
 
     /// The parsed file.
@@ -567,18 +706,15 @@ impl oxideav_core::Demuxer for HeifDemuxer {
     }
 
     fn next_packet(&mut self) -> CoreResult<Packet> {
-        if self.still_pending {
-            self.still_pending = false;
-            if let Some(idx) = self.still_stream {
+        if let Some(idx) = self.still_stream {
+            if self.still_cursor < self.still_items.len() {
                 if self.is_active(idx) {
-                    return Ok(
-                        Packet::new(idx, TimeBase::new(1, 1), self.file.bytes().to_vec())
-                            .with_pts(0)
-                            .with_dts(0)
-                            .with_duration(1)
-                            .with_keyframe(true),
-                    );
+                    let i = self.still_cursor;
+                    self.still_cursor += 1;
+                    return self.still_packet(idx, i);
                 }
+                // An inactive still stream is skipped altogether.
+                self.still_cursor = self.still_items.len();
             }
         }
         // Pick the active track whose next sample has the earliest
@@ -635,8 +771,10 @@ impl oxideav_core::Demuxer for HeifDemuxer {
 
     fn seek_to(&mut self, stream_index: u32, pts: i64) -> CoreResult<i64> {
         if Some(stream_index) == self.still_stream {
-            self.still_pending = true;
-            return Ok(0);
+            // Still packets are the item index (1/1 time base).
+            let last = self.still_items.len().saturating_sub(1);
+            self.still_cursor = usize::try_from(pts.max(0)).unwrap_or(last).min(last);
+            return Ok(self.still_cursor as i64);
         }
         let Some(pos) = self.tracks.iter().position(|(i, _)| *i == stream_index) else {
             return Err(CoreError::invalid(format!("no stream {stream_index}")));

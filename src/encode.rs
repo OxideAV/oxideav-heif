@@ -476,13 +476,29 @@ impl EncodeOptions {
 
     /// The layout HEVC items of a `source`-depth picture are coded in:
     /// 4:2:0 at [`EncodeOptions::hevc_depth`] or the depth the source
-    /// implies (8 → 8, 9–10 → 10, 11+ → 12).
+    /// implies (8 → 8, 9–10 → 10, 11+ → 12) — except a lossless
+    /// (`pcm`) identity-matrix picture ([`EncodeOptions::colr`] with
+    /// `matrix_coefficients = 0`, i.e. an RGB source kept as G, B, R
+    /// planes), which stays 4:4:4 at its own depth (≤ 12) so the
+    /// lossless mode is lossless on RGB too.
     pub fn hevc_coded_format(&self, source: HeifPixelFormat) -> Result<HeifPixelFormat> {
+        if self.hevc_lossless_identity(source) {
+            return HeifPixelFormat::new(Chroma::Yuv444, source.bit_depth, false);
+        }
         HeifPixelFormat::new(
             Chroma::Yuv420,
             coded_depth(source.bit_depth, self.hevc_depth)?,
             false,
         )
+    }
+
+    /// `source` is a 4:4:4 picture (≤ 12 bits) coded losslessly under
+    /// an identity-matrix `colr`: planar RGB that HEVC keeps as-is.
+    pub(crate) fn hevc_lossless_identity(&self, source: HeifPixelFormat) -> bool {
+        self.hevc_mode == "pcm"
+            && crate::image::core_bridge::identity_matrix(&self.colr)
+            && source.chroma == Chroma::Yuv444
+            && source.bit_depth <= 12
     }
 }
 
@@ -1343,7 +1359,12 @@ fn coding_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<HeifFrame> 
         ),
         StillCodec::Hevc => {
             let coded = opts.hevc_coded_format(frame.format)?;
-            to_yuv420(frame, coded.bit_depth)
+            if coded.chroma == Chroma::Yuv444 {
+                // Lossless identity-matrix RGB: the planes as they are.
+                to_depth(&frame.without_alpha(), coded.bit_depth)
+            } else {
+                to_yuv420(frame, coded.bit_depth)
+            }
         }
     }
 }
@@ -3026,17 +3047,24 @@ impl Encoder for HeifEncoder {
                     crate::api::PixelFormat::Rgb24,
                     &self.opts,
                 );
-                let target = crate::api_registry::packed_target(
-                    &self.opts,
-                    grey,
-                    if wide { 16 } else { 8 },
-                    alpha,
-                )?;
-                let hf = packed_to_planar_for(vf, w, h, pf, &colr, target)?;
-                let opts = EncodeOptions {
-                    colr,
-                    ..self.opts.clone()
+                let (colr, opts, target) = if !wide && !grey {
+                    // 8-bit BGR(A): the same lossless identity rule as
+                    // RGB(A).
+                    crate::api_registry::packed_coding(colr, self.opts.clone(), alpha)?
+                } else {
+                    let target = crate::api_registry::packed_target(
+                        &self.opts,
+                        grey,
+                        if wide { 16 } else { 8 },
+                        alpha,
+                    )?;
+                    let opts = EncodeOptions {
+                        colr: colr.clone(),
+                        ..self.opts.clone()
+                    };
+                    (colr, opts, target)
                 };
+                let hf = packed_to_planar_for(vf, w, h, pf, &colr, target)?;
                 encode_still_owned(hf, &opts)?
             }
         };

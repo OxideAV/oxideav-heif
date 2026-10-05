@@ -107,11 +107,19 @@ properties), `HeifWriter` / `SequenceWriter`, `encode_still*`.
 / `.heifs` / `.hif` / `.hmg` / `.avif` / `.avifs` hints), the `"heif"`
 sequence muxer and the `"heif"` codec (decoder + encoder; direct
 factories `make_decoder` / `make_encoder`). A `.heic` opens as stream 0
-= the still image (one `"heif"` packet → one composed `VideoFrame`)
-plus one stream per image-sequence track (`"h265"` / `"av1"` /
-`"h264"` packets with `hvcC` / `av1C` / `avcC` extradata; a track with
-an alpha auxiliary track is also offered composed, as `"heif"`
-packets). The framework decoder and encoder are thin adapters over the
+= the still images (one `"heif"` packet per displayable image item →
+one composed `VideoFrame` each: the primary first, then the rest of a
+burst in `decode_all`'s order; item packets are untimed — `pts` = item
+index, duration 1, time base 1/1 — and `metadata` lists them under
+`stream:0:item_ids`; alpha / depth / gain-map auxiliaries and
+thumbnails are never frames of their own) plus one stream per
+image-sequence track (`"h265"` / `"av1"` / `"h264"` packets with
+`hvcC` / `av1C` / `avcC` extradata, one per sample, `pts` / `dts` /
+`duration` from the sample table in the track's timescale; a track
+with an alpha auxiliary track is also offered composed, as `"heif"`
+packets). Every still-stream frame and every sequence frame is
+byte-identical to the corresponding `decode_all` frame (pinned over
+the corpus and the real-world interop set). The framework decoder and encoder are thin adapters over the
 contract functions — one implementation — and `HeifImage` converts
 both ways: `into_video_frame()` / `From<HeifImage> for VideoFrame`,
 `HeifImage::from_video_frame(&frame, &codec_parameters)` (also
@@ -148,8 +156,8 @@ silently except what the codec's coding layout implies):
 | `HeifImage::format` | HEVC (`codec: Hevc`, the default) | AV1 |
 |---|---|---|
 | planar YCbCr / grey (`Yuv*`, `Gray*`) | 4:2:0 at the coded depth (`hevc_depth`: 8-bit sources at 8, 9–10 at 10, 11–12 at 12, deeper at 10), alpha as the `auxC` item | the image's own chroma layout and depth (≤ 12; deeper at the coded depth) |
-| `Gbrp*` / `Gbrap*` (planar RGB) | RGB → YCbCr through `opts.colr`'s matrix, then as above | ≤ 12 bit: coded as-is, `matrix_coefficients = 0` (lossless stays lossless); 16-bit: converted |
-| `Rgb24` / `Rgba` (packed) | RGB → 4:2:0 YCbCr through `opts.colr`'s matrix (the production path of `oxideav convert`), alpha as the `auxC` item | `EncodeOptions::chroma` (`None` = 4:2:0, `Some(Yuv444)` keeps full chroma) |
+| `Gbrp*` / `Gbrap*` (planar RGB) | lossy (`intra`): RGB → YCbCr through `opts.colr`'s matrix, then as above; lossless (`pcm`, ≤ 12 bit): coded as-is, 4:4:4 with `matrix_coefficients = 0` | ≤ 12 bit: coded as-is, `matrix_coefficients = 0` (lossless stays lossless); 16-bit: converted |
+| `Rgb24` / `Rgba` (packed) | lossy (`intra`): RGB → 4:2:0 YCbCr through `opts.colr`'s matrix (the production path of `oxideav convert`), alpha as the `auxC` item; lossless (`pcm`): the G, B, R planes as a 4:4:4 identity-matrix item (`decode` yields `Gbrp8` / `Gbrap8`, `to_rgba8` exact) | lossy: `EncodeOptions::chroma` (`None` = 4:2:0, `Some(Yuv444)` keeps full chroma); lossless (no quality / 100): identity-matrix 4:4:4 as HEVC |
 
 `encode_rgb8` / `encode_rgba8` are the packed rows above without the
 `HeifImage` (the alpha channel becomes the alpha item): an RGB image
@@ -525,7 +533,10 @@ writes:
   picture (501 → 95 MiB for 12 MP), and the tiles are the parallel
   unit. `grid=none` forces a single item, `grid=N` a tile size.
 * **Thumbnail off**, **4:2:0 for packed RGB sources** (`chroma=444`
-  keeps 4:4:4 on AV1; HEVC items are always 4:2:0), **Exif / ICC
+  keeps 4:4:4 on AV1; lossy HEVC items are always 4:2:0; the lossless
+  mode — `mode=pcm`, AV1 at quality 100 — keeps a full-range RGB
+  source as an identity-matrix 4:4:4 item so `decode(encode(rgb)) ==
+  rgb`; `range=limited` asks for the YCbCr conversion), **Exif / ICC
   carried when the caller supplies them** (`EncodeOptions::exif` /
   `icc_profile` — the framework frame has no side-channel for either:
   core carries palette / significant-bits / colour-signal / layer

@@ -478,7 +478,7 @@ fn prepare_item(image: &HeifImage, opts: &EncodeOptions) -> Result<(HeifFrame, E
     if image.format.is_packed() {
         let plane = &image.planes[0];
         let bpp = image.format.packed_bytes_per_pixel().unwrap_or(4);
-        let target = packed_target(&opts, false, 8, image.format == PixelFormat::Rgba)?;
+        let (colr, opts, target) = packed_coding(colr, opts, image.format == PixelFormat::Rgba)?;
         let frame = packed_bytes_to_planar(
             &plane.data,
             plane.stride,
@@ -495,21 +495,8 @@ fn prepare_item(image: &HeifImage, opts: &EncodeOptions) -> Result<(HeifFrame, E
     }
     let planar = image.to_frame()?;
     if image.format.is_planar_rgb() {
-        let (p, t) = match &colr {
-            Colr::Nclx {
-                primaries,
-                transfer,
-                ..
-            } => (*primaries, *transfer),
-            _ => (1, 13),
-        };
-        let identity = Colr::Nclx {
-            primaries: p,
-            transfer: t,
-            matrix: 0,
-            full_range: true,
-        };
-        if opts.codec == StillCodec::Av1 && planar.format.bit_depth <= 12 {
+        let identity = identity_colr(&colr);
+        if keeps_planar_rgb(&opts, planar.format.bit_depth) {
             let opts = EncodeOptions {
                 colr: identity,
                 ..opts
@@ -536,24 +523,12 @@ pub fn encode_owned(image: HeifImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     if image.format.is_planar_rgb() {
         // Planar RGB in: AV1 codes the G, B, R planes as a 4:4:4 item
         // with `matrix_coefficients = 0` (H.273 identity, no conversion
-        // — lossless stays lossless); the HEVC path, which codes 4:2:0,
-        // converts through the configured matrix first.
+        // — lossless stays lossless), and so does lossless HEVC
+        // (`pcm`); lossy HEVC, which codes 4:2:0, converts through the
+        // configured matrix first.
         let planar = image.into_frame()?;
-        let (p, t) = match &colr {
-            Colr::Nclx {
-                primaries,
-                transfer,
-                ..
-            } => (*primaries, *transfer),
-            _ => (1, 13),
-        };
-        let identity = Colr::Nclx {
-            primaries: p,
-            transfer: t,
-            matrix: 0,
-            full_range: true,
-        };
-        return if opts.codec == StillCodec::Av1 && planar.format.bit_depth <= 12 {
+        let identity = identity_colr(&colr);
+        return if keeps_planar_rgb(&opts, planar.format.bit_depth) {
             let opts = EncodeOptions {
                 colr: identity,
                 ..opts
@@ -637,7 +612,7 @@ pub(crate) fn encode_packed_bytes(
     }
     let colr = effective_colr(color, format, opts);
     let opts = effective_options(metadata, colr.clone(), opts);
-    let target = packed_target(&opts, false, 8, format == PixelFormat::Rgba)?;
+    let (colr, opts, target) = packed_coding(colr, opts, format == PixelFormat::Rgba)?;
     let frame = packed_bytes_to_planar(
         data,
         stride,
@@ -651,6 +626,82 @@ pub(crate) fn encode_packed_bytes(
         target,
     )?;
     encode_still_owned(frame, &opts)
+}
+
+/// The colour information and coding layout a packed 8-bit RGB(A)
+/// source is converted to: under a lossless mode ([`lossless_mode`])
+/// at full range the identity matrix and 4:4:4 — the G, B, R planes as
+/// they are, so `decode(encode(rgb)) == rgb` — otherwise
+/// [`packed_target`]'s layout through the effective `colr` (an
+/// explicitly limited range asks for that YCbCr conversion).
+pub(crate) fn packed_coding(
+    colr: Colr,
+    opts: EncodeOptions,
+    alpha: bool,
+) -> Result<(Colr, EncodeOptions, HeifPixelFormat)> {
+    if lossless_mode(&opts) && full_range(&colr) {
+        let identity = identity_colr(&colr);
+        let opts = EncodeOptions {
+            colr: identity.clone(),
+            ..opts
+        };
+        let target = HeifPixelFormat::new(Chroma::Yuv444, 8, alpha)?;
+        return Ok((identity, opts, target));
+    }
+    let target = packed_target(&opts, false, 8, alpha)?;
+    Ok((colr, opts, target))
+}
+
+/// The configured coding is lossless: HEVC `pcm`, or AV1 without a
+/// quality (`mode=pcm`) / at quality 100.
+pub(crate) fn lossless_mode(opts: &EncodeOptions) -> bool {
+    match opts.codec {
+        StillCodec::Hevc => opts.hevc_mode == "pcm",
+        StillCodec::Av1 => !matches!(opts.av1_quality, Some(q) if q < 100),
+    }
+}
+
+/// A planar RGB source of `depth` bits is coded as it is — a 4:4:4
+/// item with `matrix_coefficients = 0` (H.273 identity) — rather than
+/// converted to YCbCr: always by AV1, and by HEVC in its lossless mode
+/// at full range (both ≤ 12 bits; deeper sources convert at the coded
+/// depth, and an explicitly limited range asks for the YCbCr
+/// conversion).
+pub(crate) fn keeps_planar_rgb(opts: &EncodeOptions, depth: u8) -> bool {
+    depth <= 12
+        && (opts.codec == StillCodec::Av1 || (lossless_mode(opts) && full_range(&opts.colr)))
+}
+
+/// `colr` describes full-range samples (an ICC / absent description
+/// counts as full: the MIAF default).
+fn full_range(colr: &Colr) -> bool {
+    !matches!(
+        colr,
+        Colr::Nclx {
+            full_range: false,
+            ..
+        }
+    )
+}
+
+/// `colr` with the identity matrix and full range (the RGB planes'
+/// own description), keeping its primaries / transfer (BT.709 / sRGB
+/// for an ICC or absent description).
+pub(crate) fn identity_colr(colr: &Colr) -> Colr {
+    let (p, t) = match colr {
+        Colr::Nclx {
+            primaries,
+            transfer,
+            ..
+        } => (*primaries, *transfer),
+        _ => (1, 13),
+    };
+    Colr::Nclx {
+        primaries: p,
+        transfer: t,
+        matrix: 0,
+        full_range: true,
+    }
 }
 
 /// The coding layout a packed source of `depth` bits is converted to
