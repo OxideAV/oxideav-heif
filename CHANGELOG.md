@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.10](https://github.com/OxideAV/oxideav-heif/compare/v0.0.9...v0.0.10) - 2026-10-05
+
+### Other
+
+- demuxer emits bursts (one still packet per displayable item); lossless RGB codes as identity-matrix 4:4:4
+- fallible from_rgb8/from_rgba8, encode_all (items + image sequence) — image-crate API fleet sweep
+- README examples use the current registry API
+
 ### Changed
 
 - **Framework demuxer: bursts are frames.** Stream 0 (`"heif"`) emits
