@@ -1318,6 +1318,30 @@ pub(crate) mod tests {
         assert_eq!(h.cropped_size(), (4, 8));
     }
 
+    /// The Fuzz workflow's `heif_records` crash unit (r473): a record
+    /// head whose bytes, read as an SPS RBSP, carry conformance-window
+    /// offsets near 2^32 — `SubWidthC × (left + right)` overflowed.
+    /// Every parser the target drives must return, not panic.
+    #[test]
+    fn fuzz_unit_conformance_window_overflow_returns() {
+        const UNIT: [u8; 27] = [
+            0xff, 0x01, 0x0c, 0x00, 0x00, 0x01, 0x00, 0x00, 0xfe, 0x03, 0x00, 0x1b, 0x00, 0x00,
+            0x00, 0x00, 0x86, 0x00, 0x01, 0x2c, 0x66, 0x72, 0x65, 0x65, 0x00, 0x00, 0x03,
+        ];
+        if let Ok(c) = VvcConfig::parse(&UNIT) {
+            let _ = c.sample_format();
+            let again = VvcConfig::parse(&c.serialize()).unwrap();
+            assert_eq!(again.serialize(), c.serialize());
+            let _ = access_unit_annex_b(&c, &UNIT, None);
+        }
+        if let Ok(h) = SpsHead::parse_rbsp(&UNIT) {
+            let (w, hgt) = h.cropped_size();
+            assert!(w >= 1 && hgt >= 1);
+        }
+        let _ = CompactVvcConfig::parse(&UNIT);
+        let _ = vps_first_ptl(&UNIT);
+    }
+
     #[test]
     fn nal_header_helpers() {
         let h = nal_header(NAL_IDR_N_LP, 0, 1);
