@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/OxideAV/oxideav-heif/compare/v0.0.10...v0.0.11) - 2026-10-06
+
+### Other
+
+- frame_from_planes refuses zero output dimensions (fuzz-found subtract overflow on a 5x0 sample entry) and sizes planes with saturating arithmetic
+- seed the heif_records fuzz corpus with the vvcC conformance-window overflow unit (tracked as a minimal.* seed)
+- track the heif_records fuzz crash unit (vvcC SPS head conformance-window overflow) and pin it at the parser level
+- vvcC SPS head — saturate the conformance-window derivation (fuzz-found multiply overflow on hostile ue(v) offsets)
+- README — VVC image items (Annex L) across the layout tables, options, capability matrix; a plainly stated HEVC / AVC / AV1 / VVC codec matrix with the VVC validator findings
+- VVC verification matrix — VVC vs HEVC at the same QP, vvcC / compact-record / SPS-head fuzz round trips, validator survey
+- VVC image items encode — StillCodec::Vvc through oxideav-h266's IDR encoder (items, alpha, grid, gain map, mini, sequences, framework encoder + muxer), vvcC from the encoder's parameter sets, vvic / vvis brands
+- VVC image items decode (HEIF Annex L) — vvcC record model, vvc1 items through oxideav-h266's stream decoder, vvic/vvis/vvi3 brands, Annex L MIAF rules, vvi3 compact-record expansion
+- oxideav-h265 >=0.0.13, <0.1 (an exact 0.0.x pin duplicated h265 in the umbrella graph)
+
 ### Added
 
 - **VVC image items decode (HEIF Annex L).** `vvc1` items are coded
