@@ -651,11 +651,23 @@ pub(crate) fn frame_from_planes(
         }
         None => (dec_w, dec_h),
     };
+    // A zero output dimension (an `ispe` or a sample entry declaring
+    // 0, a decoder emitting an empty picture) is hostile input, not a
+    // picture: refuse before the per-plane arithmetic.
+    if w == 0 || h == 0 {
+        return Err(HeifError::invalid(format!(
+            "item {item_id}: zero output dimension {w}x{h}"
+        )));
+    }
     let mut out = Vec::with_capacity(need);
     for (p, src) in vf.planes.into_iter().take(need).enumerate() {
         let (pw, ph) = layout.plane_dims(p, w, h);
         let row_bytes = pw as usize * bps;
-        if src.stride < row_bytes || src.data.len() < src.stride * (ph as usize - 1) + row_bytes {
+        let needed = (ph as usize)
+            .saturating_sub(1)
+            .saturating_mul(src.stride)
+            .saturating_add(row_bytes);
+        if pw == 0 || ph == 0 || src.stride < row_bytes || src.data.len() < needed {
             return Err(HeifError::invalid(format!(
                 "item {item_id}: plane {p} too small for {pw}x{ph} ({} bytes, stride {})",
                 src.data.len(),

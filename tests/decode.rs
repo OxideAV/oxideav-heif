@@ -207,3 +207,21 @@ fn parallel_grid_decode_is_byte_identical_to_serial() {
     }
     assert!(grids >= 2, "grid fixtures present ({grids})");
 }
+
+/// The Fuzz workflow's `heif_decode` crash unit (r473): an image
+/// sequence whose `hvc1` sample entry declares a 5×0 picture — the
+/// output-plane size arithmetic underflowed. Every decode path must
+/// return an error (or frames), never panic; the unit is a tracked
+/// corpus seed.
+#[test]
+fn fuzz_unit_zero_height_sample_entry_returns() {
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fuzz/corpus/heif_decode/minimal.track-entry-zero-height.heic"),
+    )
+    .unwrap();
+    let _ = oxideav_heif::decode(&bytes);
+    let _ = oxideav_heif::decode_all(&bytes);
+    let _ = oxideav_heif::decode_rgba8(&bytes);
+    let _ = oxideav_heif::info(&bytes);
+}
