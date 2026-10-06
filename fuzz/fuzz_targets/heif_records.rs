@@ -16,6 +16,7 @@ use oxideav_heif::lhvc::{LhevcConfig, OperatingPoints};
 use oxideav_heif::meta::RawProperty;
 use oxideav_heif::props::{write::property_box, Property};
 use oxideav_heif::sequence::{parse_csgp, parse_prft, parse_sbgp, parse_sgpd, parse_ssix};
+use oxideav_heif::vvcc::{CompactVvcConfig, SpsHead, VvcConfig};
 
 const TYPES: &[&[u8; 4]] = &[
     b"clli", b"mdcv", b"cclv", b"amve", b"avcC", b"lhvC", b"oinf", b"tols", b"ispe", b"pixi",
@@ -68,11 +69,16 @@ fuzz_target!(|data: &[u8]| {
             let again = oxideav_heif::mini::MinimizedImage::parse(&b[8..]).unwrap();
             assert_eq!(again, m, "mini must round-trip");
         }
-        let ft = oxideav_heif::FileType::new(*b"ftyp", *b"mif3", if sel & 1 == 1 {
+        let ft = oxideav_heif::FileType::new(
+            *b"ftyp",
+            *b"mif3",
+            if sel & 1 == 1 {
                 u32::from_be_bytes(*b"vvi3")
             } else {
                 0
-            }, vec![]);
+            },
+            vec![],
+        );
         if let Ok(eq) = m.equivalent_file(&ft) {
             let f = oxideav_heif::HeifFile::parse(&eq).expect("equivalent file parses");
             let _ = oxideav_heif::miaf::check(&f, oxideav_heif::MiafProfile::Miaf);
@@ -81,7 +87,14 @@ fuzz_target!(|data: &[u8]| {
     }
     // deti data reference (Amd 2 §6.11.5) + its offset table over the
     // same bytes.
-    let dref = oxideav_heif::meta::DataReference::new(*b"deti", (sel >> 7) & 1 == 0, String::new(), String::new(), sel as u32, body.to_vec());
+    let dref = oxideav_heif::meta::DataReference::new(
+        *b"deti",
+        (sel >> 7) & 1 == 0,
+        String::new(),
+        String::new(),
+        sel as u32,
+        body.to_vec(),
+    );
     if let Ok(d) = oxideav_heif::tiled::DataEntryTiledItem::parse(&dref) {
         let _ = d.tile_spans(body, (sel % 7) as u64);
     }
@@ -106,6 +119,29 @@ fuzz_target!(|data: &[u8]| {
         let again = LhevcConfig::parse(&c.serialize()).unwrap();
         assert_eq!(again.serialize(), c.serialize());
     }
+    if let Ok(c) = VvcConfig::parse(body) {
+        let _ = c.sample_format();
+        let _ = c.nal_count();
+        // A DCI / OPI array codes exactly one NAL unit, so the first
+        // serialization may drop surplus entries; from there on the
+        // bytes are a fixed point.
+        let first = c.serialize();
+        let again = VvcConfig::parse(&first).unwrap();
+        assert_eq!(again.serialize(), first);
+        let _ = oxideav_heif::vvcc::access_unit_annex_b(&c, body, None);
+    }
+    if let Ok(c) = CompactVvcConfig::parse(body) {
+        let _ = c.to_full(1, 8, 64, 64);
+        let _ = c.item_data(body);
+        let _ = c.strip_item_data(body);
+        if let Ok(bytes) = c.serialize() {
+            assert_eq!(CompactVvcConfig::parse(&bytes).unwrap(), c);
+        }
+    }
+    if let Ok(h) = SpsHead::parse_rbsp(body) {
+        let _ = h.cropped_size();
+    }
+    let _ = oxideav_heif::vvcc::vps_first_ptl(body);
     if let Ok(o) = OperatingPoints::parse(body) {
         let _ = o.output_layers(0);
         let again = OperatingPoints::parse(&o.serialize()).unwrap();

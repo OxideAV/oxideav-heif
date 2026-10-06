@@ -117,7 +117,16 @@ fuzz_target!(|data: &[u8]| {
 
 fn transforms(f: &HeifFrame, steer: &[u8]) {
     let s = |i: usize| steer.get(i).copied().unwrap_or(0);
-    let clap = Clap::new(1 + (s(4) as u32) % MAX_DIM, 1 + (s(5) as u32) % 3, 1 + (s(6) as u32) % MAX_DIM, 1 + (s(7) as u32) % 3, s(8) as i8 as i32, 1 + (s(9) as u32) % 3, s(10) as i8 as i32, 1 + (s(11) as u32) % 3);
+    let clap = Clap::new(
+        1 + (s(4) as u32) % MAX_DIM,
+        1 + (s(5) as u32) % 3,
+        1 + (s(6) as u32) % MAX_DIM,
+        1 + (s(7) as u32) % 3,
+        s(8) as i8 as i32,
+        1 + (s(9) as u32) % 3,
+        s(10) as i8 as i32,
+        1 + (s(11) as u32) % 3,
+    );
     let cur = apply_clap(f, &clap).unwrap_or_else(|_| f.clone());
     let cur = apply_irot(&cur, &Irot::new(s(12) & 3)).unwrap_or(cur);
     let cur = apply_imir(&cur, &Imir::new(s(13) & 1)).unwrap_or(cur);

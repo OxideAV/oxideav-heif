@@ -61,6 +61,17 @@ All notable changes to this project will be documented in this file.
   + `clap`), every tool axis, alpha / grid / overlay / gain map /
   sequence / mini / framework-encoder parity, MIAF + Annex L
   conformance, and every coded item byte-exact in ffmpeg's VVC decoder.
+- **VVC verification matrix.** `tests/vvc.rs` prints VVC against HEVC
+  at the same QP (bytes / luma PSNR) and holds both to the 30 dB bound;
+  the `heif_records` fuzz target round-trips `VvcConfig`,
+  `CompactVvcConfig`, `SpsHead` and the VPS PTL walk. No staged
+  conformance or device-sample file carries a VVC item (334 files
+  swept), so the workspace encoder's output is the corpus; of the
+  black-box tools on the reference machine ffmpeg's VVC decoder is
+  byte-exact on every coded item, `heif-info` opens the `vvic` files
+  (structure, layout, alpha), and `heif-convert` / `magick` (libheif
+  without a vvdec plugin), `sips` and ffmpeg's HEIF demuxer do not
+  decode `vvc1` items.
 
 ### Changed
 

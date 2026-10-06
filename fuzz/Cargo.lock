@@ -133,14 +133,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxideav-heif"
+name = "oxideav-h266"
 version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9373d3ab2b02793779346a5b152a4322474fab254755062bff956b13c5b6edb8"
+dependencies = [
+ "oxideav-core",
+ "oxideav-pixfmt",
+]
+
+[[package]]
+name = "oxideav-heif"
+version = "0.0.10"
 dependencies = [
  "compcol",
  "oxideav-av1",
  "oxideav-core",
  "oxideav-h264",
  "oxideav-h265",
+ "oxideav-h266",
 ]
 
 [[package]]
@@ -149,6 +160,15 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "oxideav-heif",
+]
+
+[[package]]
+name = "oxideav-pixfmt"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fbee8f240eca20422eed4cc28ae23979796bf416df1b69f69da4f96f937b4e2"
+dependencies = [
+ "oxideav-core",
 ]
 
 [[package]]

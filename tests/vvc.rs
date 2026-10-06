@@ -689,3 +689,66 @@ fn vvc_image_sequence_round_trips() {
         Some(oxideav_core::PixelFormat::Yuv420P)
     );
 }
+
+/// VVC against HEVC at the same QP on the same pictures: bytes and
+/// luma PSNR, printed for the README's codec matrix; both codings
+/// must hold the 30 dB bound on the gentle picture. The 512×512 smooth
+/// gradient is the probe picture the round measured the published VVC
+/// encoder on.
+#[test]
+fn vvc_vs_hevc_at_the_same_qp() {
+    let smooth = |w: u32, h: u32| {
+        let mut f = HeifFrame::zeroed(
+            w,
+            h,
+            HeifPixelFormat::new(oxideav_heif::Chroma::Yuv420, 8, false).unwrap(),
+        )
+        .unwrap();
+        for y in 0..h {
+            for x in 0..w {
+                f.set_sample(
+                    0,
+                    x,
+                    y,
+                    ((x * 255 / w.max(1) + y * 255 / h.max(1)) / 2) as u16,
+                );
+            }
+        }
+        let (cw, ch) = f.plane_dims(1);
+        for y in 0..ch {
+            for x in 0..cw {
+                f.set_sample(1, x, y, (128 + x * 40 / cw.max(1)) as u16);
+                f.set_sample(2, x, y, (128 - y * 40 / ch.max(1)) as u16);
+            }
+        }
+        f
+    };
+    let hevc = EncodeOptions::default();
+    for (name, src) in [
+        ("gentle 128x128", gentle(128, 128)),
+        ("smooth 512x512", smooth(512, 512)),
+    ] {
+        let qps: &[u8] = if name.starts_with("gentle") {
+            &[18, 30]
+        } else {
+            &[18]
+        };
+        for &qp in qps {
+            let mut row = format!("{name} qp {qp}:");
+            for (codec, opts) in [
+                ("hevc", hevc.clone().with_qp(qp)),
+                ("vvc", vvc().with_qp(qp)),
+            ] {
+                let bytes = encode_still(&src, &opts).unwrap();
+                let f = HeifFile::parse(&bytes).unwrap();
+                let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+                let p = psnr_y(&src, &img.frame.tight());
+                row.push_str(&format!("  {codec} {} B / {p:.2} dB", bytes.len()));
+                if name.starts_with("gentle") {
+                    assert!(p >= 30.0, "{name} {codec} qp {qp}: {p:.2} dB");
+                }
+            }
+            eprintln!("{row}");
+        }
+    }
+}
