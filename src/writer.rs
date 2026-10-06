@@ -39,11 +39,11 @@ use crate::derived::{GridDescriptor, OverlayDescriptor};
 use crate::error::{HeifError, Result};
 use crate::ftyp::{
     BRAND_AVIF, BRAND_AVIS, BRAND_HEIC, BRAND_HEIX, BRAND_HEVC, BRAND_HEVX, BRAND_ISO8, BRAND_MIAF,
-    BRAND_MIF1, BRAND_MSF1, BRAND_TMAP,
+    BRAND_MIF1, BRAND_MSF1, BRAND_TMAP, BRAND_VVIC, BRAND_VVIS,
 };
 use crate::meta::{
     reference, ITEM_TYPE_AV01, ITEM_TYPE_EXIF, ITEM_TYPE_GRID, ITEM_TYPE_HVC1, ITEM_TYPE_IDEN,
-    ITEM_TYPE_IOVL, ITEM_TYPE_MIME,
+    ITEM_TYPE_IOVL, ITEM_TYPE_MIME, ITEM_TYPE_VVC1,
 };
 use crate::props::{write::property_box, AuxC, Property, AUX_URN_ALPHA, AUX_URN_DEPTH};
 
@@ -136,8 +136,8 @@ impl HeifWriter {
     }
 
     /// Override the brands (otherwise selected from the item types:
-    /// `heic` / `heix` for HEVC, `avif` for AV1, `mif1` + `miaf`
-    /// always).
+    /// `heic` / `heix` for HEVC, `avif` for AV1, `vvic` for VVC (HEIF
+    /// L.4.1), `mif1` + `miaf` always).
     pub fn with_brands(mut self, major: FourCc, compatible: Vec<FourCc>) -> Self {
         self.major_brand = Some(major);
         self.compatible_brands = Some(compatible);
@@ -778,6 +778,14 @@ impl HeifWriter {
             }
             compat.push(BRAND_AVIF);
         }
+        if has(&ITEM_TYPE_VVC1) {
+            // HEIF L.4.1.2: `vvic` among the compatible brands (with
+            // `mif1`); the major brand when no other codec claims it.
+            if major == BRAND_MIF1 {
+                major = BRAND_VVIC;
+            }
+            compat.push(BRAND_VVIC);
+        }
         compat.push(BRAND_MIAF);
         if has_tmap {
             compat.push(BRAND_TMAP);
@@ -1400,7 +1408,8 @@ pub struct SequenceWriter {
 impl SequenceWriter {}
 
 impl SequenceWriter {
-    /// New sequence writer; `config` must be an `HvcC` or `Av1C` property.
+    /// New sequence writer; `config` must be an `HvcC`, `Av1C`, `AvcC`
+    /// or `VvcC` property.
     pub fn new(
         entry_type: FourCc,
         config: Property,
@@ -1481,6 +1490,8 @@ impl SequenceWriter {
                 _ => BRAND_HEVC,
             },
             b"av01" => BRAND_AVIS,
+            // HEIF L.4.2: `vvis` for a VVC image sequence.
+            b"vvc1" | b"vvi1" => BRAND_VVIS,
             _ => BRAND_MSF1,
         };
         let (major, compat) = match &self.brands {

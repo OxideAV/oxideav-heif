@@ -28,6 +28,8 @@ use crate::error::{HeifError, Result};
 use crate::hvcc::{join_length_prefixed, split_length_prefixed, HevcConfig};
 use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_HVC1};
 use crate::props::{Colr, Ispe, Pixi, Property};
+use crate::vvcc::VvcConfig;
+use crate::vvcdec::vvc_item_from_annex_b;
 use crate::writer::{HeifWriter, SequenceWriter};
 
 /// Container name the muxer is registered under.
@@ -36,6 +38,9 @@ pub const MUXER_NAME: &str = "heif";
 enum Codec {
     Hevc,
     Av1,
+    /// VVC (`"h266"`): Annex B access units or length-prefixed samples
+    /// with a `vvcC` extradata (HEIF Annex L.3).
+    Vvc,
     /// A `"heif"` still stream: one whole-file packet.
     Still,
 }
@@ -47,6 +52,7 @@ pub struct HeifSequenceMuxer {
     codec: Codec,
     hvcc: Option<HevcConfig>,
     av1c: Option<Av1Config>,
+    vvcc: Option<VvcConfig>,
     coded_size: Option<(u32, u32)>,
     samples: Vec<(Vec<u8>, u32, bool)>,
     /// The whole-file packet of a still stream.
@@ -66,6 +72,7 @@ impl HeifSequenceMuxer {
         let codec = match stream.params.codec_id.as_str() {
             "h265" | "hevc" => Codec::Hevc,
             "av1" => Codec::Av1,
+            "h266" | "vvc" => Codec::Vvc,
             crate::demux::CODEC_ID => Codec::Still,
             other => {
                 return Err(HeifError::unsupported(format!(
@@ -75,6 +82,7 @@ impl HeifSequenceMuxer {
         };
         let mut hvcc = None;
         let mut av1c = None;
+        let mut vvcc = None;
         if !stream.params.extradata.is_empty() {
             match codec {
                 Codec::Hevc => {
@@ -83,6 +91,11 @@ impl HeifSequenceMuxer {
                     }
                 }
                 Codec::Av1 => av1c = Some(Av1Config::parse(&stream.params.extradata)?),
+                Codec::Vvc => {
+                    if let Ok(c) = VvcConfig::parse(&stream.params.extradata) {
+                        vvcc = Some(c);
+                    }
+                }
                 Codec::Still => {}
             }
         }
@@ -96,6 +109,7 @@ impl HeifSequenceMuxer {
             codec,
             hvcc,
             av1c,
+            vvcc,
             coded_size,
             samples: Vec::new(),
             still: None,
@@ -156,6 +170,31 @@ impl HeifSequenceMuxer {
                 self.samples
                     .push((packet.data.clone(), duration, packet.is_keyframe()));
             }
+            Codec::Vvc => {
+                let annex_b =
+                    packet.data.starts_with(&[0, 0, 1]) || packet.data.starts_with(&[0, 0, 0, 1]);
+                if annex_b {
+                    let (cfg, data, w, h, _) = vvc_item_from_annex_b(&packet.data)?;
+                    if self.vvcc.is_none() {
+                        self.vvcc = Some(cfg);
+                        self.coded_size.get_or_insert((w, h));
+                    }
+                    self.samples.push((data, duration, packet.is_keyframe()));
+                } else {
+                    let cfg = self.vvcc.as_ref().ok_or_else(|| {
+                        HeifError::invalid(
+                            "heif muxer: length-prefixed VVC packets need a vvcC extradata",
+                        )
+                    })?;
+                    let nals = split_length_prefixed(&packet.data, cfg.length_size)?;
+                    let data = if cfg.length_size == 4 {
+                        packet.data.clone()
+                    } else {
+                        join_length_prefixed(&nals, 4)?
+                    };
+                    self.samples.push((data, duration, packet.is_keyframe()));
+                }
+            }
         }
         Ok(())
     }
@@ -194,6 +233,13 @@ impl HeifSequenceMuxer {
                 let c = self.av1c.clone().expect("checked in push");
                 let layout = crate::decode::av1_layout(&c)?;
                 (ITEM_TYPE_AV01, Property::Av1C(c), layout)
+            }
+            Codec::Vvc => {
+                let c = self.vvcc.clone().ok_or_else(|| {
+                    HeifError::invalid("heif muxer: VVC stream without a vvcC record")
+                })?;
+                let layout = crate::decode::vvc_layout(&c)?;
+                (crate::meta::ITEM_TYPE_VVC1, Property::VvcC(c), layout)
             }
             Codec::Still => unreachable!("handled above"),
         };

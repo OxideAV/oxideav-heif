@@ -2,7 +2,7 @@
 //! a synthetic test picture, for feeding third-party readers.
 //!
 //! ```text
-//! heifenc out.heic [--size WxH] [--codec hevc|av1] [--mode pcm|intra]
+//! heifenc out.heic [--size WxH] [--codec hevc|av1|vvc] [--mode pcm|intra]
 //!         [--qp N] [--grid TILE] [--thumb MAXDIM] [--alpha] [--gray]
 //!         [--irot ANGLE] [--imir AXIS] [--clap] [--exif] [--xmp] [--icc]
 //!         [--framework] [--png reference.png]
@@ -48,6 +48,7 @@ fn main() {
             "--codec" => {
                 opts.codec = match next(&mut i).as_str() {
                     "av1" => StillCodec::Av1,
+                    "vvc" | "h266" => StillCodec::Vvc,
                     _ => StillCodec::Hevc,
                 }
             }
@@ -177,6 +178,7 @@ fn encode_via_framework(src: &HeifFrame, opts: &EncodeOptions) -> Vec<u8> {
             "codec",
             match opts.codec {
                 StillCodec::Av1 => "av1",
+                StillCodec::Vvc => "vvc",
                 _ => "hevc",
             },
         )

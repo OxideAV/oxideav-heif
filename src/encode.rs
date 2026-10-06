@@ -11,7 +11,11 @@
 //! length prefixes (HEIF Annex B.2.2). AV1 items come from
 //! `oxideav-av1`'s key-frame encoder (an IVF buffer): the temporal unit
 //! is extracted and the `av1C` record built from the Sequence Header
-//! OBU.
+//! OBU. VVC items come from `oxideav-h266`'s IDR encoder (an Annex B
+//! access unit, 8-bit 4:2:0, pictures padded to a multiple of 64 and
+//! cropped back with `clap`): [`crate::vvcdec::vvc_item_from_annex_b`]
+//! lifts the parameter sets into the `vvcC` record and re-frames the
+//! picture header + slices as `VVCItemData` (HEIF Annex L).
 
 use oxideav_core::{
     CodecId, CodecOptions, CodecParameters, Encoder, Error as CoreError, Frame, Packet,
@@ -23,7 +27,7 @@ use crate::derived::GridDescriptor;
 use crate::error::{HeifError, Result};
 use crate::hvcc::{join_length_prefixed, HevcConfig, NalArray, NAL_PPS, NAL_SPS, NAL_VPS};
 use crate::image::{Chroma, HeifFrame, HeifPixelFormat};
-use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_HVC1};
+use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_HVC1, ITEM_TYPE_VVC1};
 use crate::props::{Clap, Colr, CropRect, Ispe, Pixi, Property};
 use crate::writer::HeifWriter;
 
@@ -36,6 +40,10 @@ pub enum StillCodec {
     /// AV1 (`av01` items, `avif` brand); lossless or quality-dialled
     /// reduced-header stills at every (depth, chroma) pairing.
     Av1,
+    /// VVC (`vvc1` items, `vvic` brand; HEIF Annex L) through
+    /// `oxideav-h266`: CABAC intra at `qp`, 8-bit 4:2:0 (the encoder's
+    /// line); no lossless mode.
+    Vvc,
 }
 
 /// Encoding options.
@@ -45,9 +53,10 @@ pub struct EncodeOptions {
     /// Codec.
     pub codec: StillCodec,
     /// HEVC: `"pcm"` (lossless), `"intra"` (CABAC intra at `qp`).
+    /// VVC has no lossless mode: `"pcm"` is refused there.
     pub hevc_mode: String,
-    /// HEVC intra QP (0..=51). The default, [`DEFAULT_QP`], is the
-    /// production setting (see the README's defaults section).
+    /// HEVC / VVC intra QP (0..=51). The default, [`DEFAULT_QP`], is
+    /// the production setting (see the README's defaults section).
     pub qp: u8,
     /// Split the picture into a grid of `tile × tile` tiles (`grid`
     /// derived item): `Some(tile)` always (tiles are at least 64
@@ -116,8 +125,16 @@ pub struct EncodeOptions {
     /// Chroma layout packed / planar RGB sources are coded in on AV1
     /// (`None` = 4:2:0; `Some(Chroma::Yuv444)` keeps full chroma).
     /// HEVC items are always 4:2:0; planar YCbCr sources keep their
-    /// own layout on AV1 regardless.
+    /// own layout on AV1 regardless. VVC items are 8-bit 4:2:0 always.
     pub chroma: Option<Chroma>,
+    /// VVC encoder tools (`oxideav-h266` `EncoderConfig` knobs, every
+    /// value `0` / `1` unless noted): `tiles` (`"CxR"`), `wpp`,
+    /// `dep_quant`, `sdh` (sign data hiding; exclusive with
+    /// `dep_quant`), `palette`, `mtt_bt`, `mtt_tt`, `alf_clip_rdo`,
+    /// `chroma_sao_merge`, `loop_filter_across_tiles`,
+    /// `slice_per_tile`, `raster_slices` (a count). Expert knob;
+    /// unknown keys are refused.
+    pub vvc_options: Vec<(String, String)>,
 }
 impl EncodeOptions {
     /// Every field as a positional argument, in declaration order
@@ -146,6 +163,7 @@ impl EncodeOptions {
         hevc_filters: Option<bool>,
         hevc_options: Vec<(String, String)>,
         chroma: Option<Chroma>,
+        vvc_options: Vec<(String, String)>,
     ) -> Self {
         Self {
             codec,
@@ -169,7 +187,14 @@ impl EncodeOptions {
             hevc_filters,
             hevc_options,
             chroma,
+            vvc_options,
         }
+    }
+
+    /// Set `vvc_options`.
+    pub fn with_vvc_options(mut self, vvc_options: Vec<(String, String)>) -> Self {
+        self.vvc_options = vvc_options;
+        self
     }
 
     /// Set `chroma`.
@@ -443,6 +468,7 @@ impl Default for EncodeOptions {
             hevc_filters: None,
             hevc_options: Vec::new(),
             chroma: None,
+            vvc_options: Vec::new(),
         }
     }
 }
@@ -1133,6 +1159,126 @@ pub fn encode_av1_picture_owned(frame: HeifFrame, opts: &EncodeOptions) -> Resul
     })
 }
 
+/// The `oxideav-h266` encoder configuration for a `width × height`
+/// picture under [`EncodeOptions::vvc_options`].
+fn vvc_encoder_config(
+    width: u32,
+    height: u32,
+    opts: &EncodeOptions,
+) -> Result<oxideav_h266::encoder::EncoderConfig> {
+    let mut cfg = oxideav_h266::encoder::EncoderConfig::new(width, height);
+    let flag = |k: &str, v: &str| -> Result<bool> {
+        match v {
+            "1" | "true" | "on" => Ok(true),
+            "0" | "false" | "off" => Ok(false),
+            other => Err(HeifError::invalid(format!(
+                "VVC option {k}: '{other}' (0 / 1)"
+            ))),
+        }
+    };
+    for (k, v) in &opts.vvc_options {
+        match k.as_str() {
+            "tiles" => {
+                let (c, r) = v
+                    .split_once(['x', 'X'])
+                    .and_then(|(c, r)| {
+                        Some((c.trim().parse::<u8>().ok()?, r.trim().parse::<u8>().ok()?))
+                    })
+                    .ok_or_else(|| HeifError::invalid(format!("VVC option tiles: '{v}' (CxR)")))?;
+                cfg.tile_columns = c.max(1);
+                cfg.tile_rows = r.max(1);
+            }
+            "wpp" => cfg.wpp = flag(k, v)?,
+            "dep_quant" => cfg.dep_quant = flag(k, v)?,
+            "sdh" => cfg.sign_data_hiding = flag(k, v)?,
+            "palette" => cfg.palette = flag(k, v)?,
+            "mtt_bt" => cfg.enable_mtt_bt_picker = flag(k, v)?,
+            "mtt_tt" => cfg.enable_mtt_tt_picker = flag(k, v)?,
+            "alf_clip_rdo" => cfg.enable_alf_clip_rdo = flag(k, v)?,
+            "chroma_sao_merge" => cfg.enable_chroma_sao_merge = flag(k, v)?,
+            "loop_filter_across_tiles" => cfg.loop_filter_across_tiles = flag(k, v)?,
+            "slice_per_tile" => cfg.slice_per_tile = flag(k, v)?,
+            "raster_slices" => {
+                cfg.raster_slice_count = v.trim().parse::<u8>().map_err(|_| {
+                    HeifError::invalid(format!("VVC option raster_slices: '{v}' (a count)"))
+                })?;
+            }
+            other => {
+                return Err(HeifError::invalid(format!(
+                    "unknown VVC encoder option '{other}'"
+                )))
+            }
+        }
+    }
+    Ok(cfg)
+}
+
+/// Alignment of VVC coded pictures: `oxideav-h266`'s IDR encoder
+/// codes pictures whose dimensions are multiples of 64 (or a single
+/// CTU) conformantly; smaller remainders at the right / bottom edge
+/// produce streams no decoder accepts, so pictures are padded to 64
+/// and cropped back with `clap`.
+pub const VVC_ALIGNMENT: u32 = 64;
+
+#[doc(hidden)]
+/// Encode one 8-bit 4:2:0 picture as a VVC item (HEIF Annex L)
+/// through `oxideav-h266`'s IDR encoder at `opts.qp`, with
+/// [`EncodeOptions::vvc_options`]; `w` / `h` must be multiples of
+/// [`VVC_ALIGNMENT`] (see [`pad_frame`]). The encoder is serial.
+pub fn encode_vvc_picture_owned(frame: HeifFrame, opts: &EncodeOptions) -> Result<CodedPicture> {
+    if frame.format.has_alpha {
+        return Err(HeifError::unsupported(
+            "VVC item encoding takes a colour-only picture (drop the alpha plane)",
+        ));
+    }
+    if frame.format.chroma != Chroma::Yuv420 || frame.format.bit_depth != 8 {
+        return Err(HeifError::unsupported(format!(
+            "VVC items code 8-bit 4:2:0 pictures, not {:?} {}-bit",
+            frame.format.chroma, frame.format.bit_depth
+        )));
+    }
+    if opts.hevc_mode == "pcm" {
+        return Err(HeifError::unsupported(
+            "VVC items have no lossless (pcm) mode; code with `intra` at a QP",
+        ));
+    }
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    let mut pb = oxideav_h266::reconstruct::PictureBuffer::yuv420_filled(w, h, 0);
+    let fmt = frame.format;
+    for (i, dst) in [&mut pb.luma, &mut pb.cb, &mut pb.cr]
+        .into_iter()
+        .enumerate()
+    {
+        let (pw, ph) = fmt.plane_dims(i, frame.width, frame.height);
+        let src = &frame.planes[i];
+        for y in 0..ph as usize {
+            let row = &src.data[y * src.stride..y * src.stride + pw as usize];
+            let out = &mut dst.samples[y * dst.stride..y * dst.stride + pw as usize];
+            for (o, s) in out.iter_mut().zip(row) {
+                *o = *s as u16;
+            }
+        }
+    }
+    drop(frame);
+    let cfg = vvc_encoder_config(w as u32, h as u32, opts)?;
+    let (annex_b, _rec) = oxideav_h266::encoder_pipeline::encode_idr_with_residuals_cfg(
+        &pb,
+        i32::from(opts.qp.min(63)),
+        cfg,
+    )
+    .map_err(|e| HeifError::unsupported(format!("VVC encoder: {e}")))?;
+    drop(pb);
+    let (cfg, data, cw, ch, layout) = crate::vvcdec::vvc_item_from_annex_b(&annex_b)?;
+    Ok(CodedPicture {
+        item_type: ITEM_TYPE_VVC1,
+        data,
+        config: Property::VvcC(cfg),
+        coded_width: cw,
+        coded_height: ch,
+        layout,
+    })
+}
+
 fn encode_picture(frame: HeifFrame, opts: &EncodeOptions) -> Result<CodedPicture> {
     encode_picture_with(frame, opts, &[])
 }
@@ -1212,6 +1358,7 @@ fn encode_picture_for(
             encode_hevc_picture_owned(frame, &opts.hevc_mode, opts.qp, &all, opts.workers())
         }
         StillCodec::Av1 => encode_av1_picture_owned(frame, opts),
+        StillCodec::Vvc => encode_vvc_picture_owned(frame, opts),
     }
 }
 
@@ -1219,6 +1366,7 @@ fn alignment(opts: &EncodeOptions) -> u32 {
     match opts.codec {
         StillCodec::Hevc => 16,
         StillCodec::Av1 => 8,
+        StillCodec::Vvc => VVC_ALIGNMENT,
     }
 }
 
@@ -1366,6 +1514,8 @@ fn coding_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<HeifFrame> 
                 to_yuv420(frame, coded.bit_depth)
             }
         }
+        // VVC: 8-bit 4:2:0, the encoder's line.
+        StillCodec::Vvc => to_yuv420(frame, 8),
     }
 }
 
@@ -1413,6 +1563,7 @@ fn coding_picture_owned(
             false,
         )?,
         StillCodec::Hevc => opts.hevc_coded_format(frame.format)?,
+        StillCodec::Vvc => HeifPixelFormat::new(Chroma::Yuv420, 8, false)?,
     };
     let bps = frame.format.bytes_per_sample();
     let tight = frame
@@ -1561,7 +1712,7 @@ pub(crate) fn encode_sequence(
             let apic = encode_picture_for(padded, &opts, &alpha_colr, extra)?;
             let urn = match opts.codec {
                 StillCodec::Hevc => crate::props::AUX_URN_ALPHA_HEVC,
-                StillCodec::Av1 => crate::props::AUX_URN_ALPHA,
+                StillCodec::Av1 | StillCodec::Vvc => crate::props::AUX_URN_ALPHA,
             };
             let at = alpha_track.get_or_insert_with(|| {
                 let mut props = vec![Property::Pixi(Pixi {
@@ -1879,7 +2030,7 @@ fn encode_still_planes(
         // CICP URN (§7.5.3.1).
         let urn = match opts.codec {
             StillCodec::Hevc => crate::props::AUX_URN_ALPHA_HEVC,
-            StillCodec::Av1 => crate::props::AUX_URN_ALPHA,
+            StillCodec::Av1 | StillCodec::Vvc => crate::props::AUX_URN_ALPHA,
         };
         props.push((
             Property::AuxC(crate::props::AuxC {
@@ -2055,6 +2206,7 @@ pub fn encode_still_minimized(frame: &HeifFrame, opts: &EncodeOptions) -> Result
     let codec_types = match opts.codec {
         StillCodec::Hevc => (ITEM_TYPE_HVC1, *b"hvcC"),
         StillCodec::Av1 => (crate::meta::ITEM_TYPE_AV01, *b"av1C"),
+        StillCodec::Vvc => (ITEM_TYPE_VVC1, *b"vvcC"),
     };
     let chroma_of = |c: Chroma| MiniChroma {
         subsampling: c.idc(),
@@ -2239,6 +2391,10 @@ pub fn encode_still_minimized(frame: &HeifFrame, opts: &EncodeOptions) -> Result
     let minor = match opts.codec {
         StillCodec::Hevc => crate::ftyp::BRAND_HEIC,
         StillCodec::Av1 => crate::ftyp::BRAND_AVIF,
+        // Explicit codec types ride along, so the full `vvcC` is
+        // carried and `vvic` (not the compact-record `vvi3`) names
+        // the equivalent file.
+        StillCodec::Vvc => crate::ftyp::BRAND_VVIC,
     };
     m.to_file_with_minor(u32::from_be_bytes(minor))
 }
@@ -2547,7 +2703,7 @@ struct PackedRows<'a> {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct HeifEncoderOptions {
-    /// `codec`: `hevc` (alias `h265`) or `av1`.
+    /// `codec`: `hevc` (alias `h265`), `av1` or `vvc` (alias `h266`).
     pub codec: String,
     /// `mode` (HEVC): `intra` (CABAC at `qp`) or `pcm` (lossless).
     pub mode: String,
@@ -2744,7 +2900,7 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
     const SCHEMA: &'static [oxideav_core::OptionField] = &[
         oxideav_core::OptionField {
             name: "codec",
-            kind: oxideav_core::OptionKind::Enum(&["hevc", "h265", "av1"]),
+            kind: oxideav_core::OptionKind::Enum(&["hevc", "h265", "av1", "vvc", "h266"]),
             default: oxideav_core::OptionValue::String(String::new()),
             help: "Coded item codec: hevc (heic file) or av1 (avif file)",
         },
@@ -2882,6 +3038,7 @@ impl HeifEncoderOptions {
             codec: match self.codec.as_str() {
                 "hevc" | "h265" => StillCodec::Hevc,
                 "av1" => StillCodec::Av1,
+                "vvc" | "h266" => StillCodec::Vvc,
                 other => {
                     return Err(CoreError::invalid(format!(
                         "heif: unknown codec option '{other}'"

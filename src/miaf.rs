@@ -733,7 +733,23 @@ pub fn check<D: AsRef<[u8]>>(file: &HeifFile<D>, profile: MiafProfile) -> Result
         }
         // Codec profile constraints.
         check_codec(&mut rep, profile, it.item_type, &props, id);
-        check_vvc_item(&mut rep, &file.file_type, it.item_type, &props, id);
+        // L.4.1.2: the vvic brand is carried by the primary item or a
+        // member of its alternate group; L.4.1.1's essential-property
+        // set binds those items (an alpha auxiliary keeps its essential
+        // auxC).
+        let carries_brand = id == primary.id
+            || meta
+                .groups_containing(primary.id, b"altr")
+                .iter()
+                .any(|g| g.entity_ids.contains(&id));
+        check_vvc_item(
+            &mut rep,
+            &file.file_type,
+            it.item_type,
+            &props,
+            id,
+            carries_brand,
+        );
     }
     // §7.3.3 thumbnail factor.
     for it in meta.items.iter().filter(|i| i.is_image()) {
@@ -869,15 +885,17 @@ fn check_codec(
 
 /// HEIF Annex L: `vvc1` items carry an essential `vvcC` (L.2.3.1),
 /// `vvs1` subpicture items an essential `vvnC` (L.2.4.3), and under
-/// the `vvic` brand a `vvc1` item's essential properties are limited
-/// to `vvcC` / `colr` / `irot` / `clap` / `imir` / `lsel` / `tols` /
-/// `spor` (L.4.1.1).
+/// the `vvic` brand the essential properties of the item carrying the
+/// brand (`carries_brand`: the primary or an alternate of it, L.4.1.2)
+/// are limited to `vvcC` / `colr` / `irot` / `clap` / `imir` / `lsel`
+/// / `tols` / `spor` (L.4.1.1).
 fn check_vvc_item(
     rep: &mut MiafReport,
     file_type: &crate::ftyp::FileType,
     item_type: FourCc,
     props: &crate::props::ItemProperties,
     id: u32,
+    carries_brand: bool,
 ) {
     use crate::meta::{ITEM_TYPE_VVC1, ITEM_TYPE_VVS1};
     if item_type == ITEM_TYPE_VVC1 {
@@ -892,7 +910,7 @@ fn check_vvc_item(
             }
             Some(_) => {}
         }
-        if file_type.has_brand(&crate::ftyp::BRAND_VVIC) {
+        if carries_brand && file_type.has_brand(&crate::ftyp::BRAND_VVIC) {
             const ALLOWED: [&[u8; 4]; 8] = [
                 b"vvcC", b"colr", b"irot", b"clap", b"imir", b"lsel", b"tols", b"spor",
             ];

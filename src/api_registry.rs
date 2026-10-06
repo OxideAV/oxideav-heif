@@ -662,6 +662,8 @@ pub(crate) fn lossless_mode(opts: &EncodeOptions) -> bool {
     match opts.codec {
         StillCodec::Hevc => opts.hevc_mode == "pcm",
         StillCodec::Av1 => !matches!(opts.av1_quality, Some(q) if q < 100),
+        // The VVC encoder has no lossless mode.
+        StillCodec::Vvc => false,
     }
 }
 
@@ -719,10 +721,12 @@ pub(crate) fn packed_target(
     alpha: bool,
 ) -> Result<HeifPixelFormat> {
     let coded = coded_depth(depth, opts.hevc_depth)?;
-    let chroma = match opts.codec {
-        StillCodec::Hevc => Chroma::Yuv420,
-        StillCodec::Av1 if grey => Chroma::Mono,
-        StillCodec::Av1 => opts.chroma.unwrap_or(Chroma::Yuv420),
+    let (chroma, coded) = match opts.codec {
+        StillCodec::Hevc => (Chroma::Yuv420, coded),
+        StillCodec::Av1 if grey => (Chroma::Mono, coded),
+        StillCodec::Av1 => (opts.chroma.unwrap_or(Chroma::Yuv420), coded),
+        // VVC items are 8-bit 4:2:0.
+        StillCodec::Vvc => (Chroma::Yuv420, 8),
     };
     HeifPixelFormat::new(chroma, coded, alpha)
 }

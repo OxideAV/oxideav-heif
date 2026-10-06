@@ -35,6 +35,32 @@ All notable changes to this project will be documented in this file.
   (previously the compact bytes were written as the property verbatim).
   New optional dependency `oxideav-h266 >=0.0.9, <0.1` behind
   `registry`.
+- **VVC image items encode.** `StillCodec::Vvc` codes `vvc1` items
+  through `oxideav-h266`'s IDR encoder (CABAC intra at `qp`, 8-bit
+  4:2:0 — the encoder's line; `hevc_mode = "pcm"` is refused, there is
+  no lossless VVC mode) in every shape the HEVC / AV1 paths take:
+  `encode` / `encode_rgb8` / `encode_rgba8` / `encode_all`
+  (`vvis` image sequences with `vvc1` sample entries), `encode_still`
+  (+ `_owned` / `_into`), `encode_still_minimized` (`mif3` + `vvic`
+  minor with explicit `vvc1` / `vvcC` types), grid tiling, thumbnails,
+  alpha (CICP `auxC` URN), gain maps, transforms, Exif / XMP / ICC, the
+  `"heif"` framework encoder (`codec=vvc` / `h266`) and the `"heif"`
+  sequence muxer (`"h266"` streams, Annex B or length-prefixed with a
+  `vvcC` extradata). Pictures are padded to 64 (`VVC_ALIGNMENT`) and
+  cropped back with `clap`: the published encoder codes 64-multiples
+  (or a single CTU) conformantly and nothing else. `vvcC` is written
+  from the encoder's parameter sets (VPS + SPS + PPS complete arrays,
+  PTL from the VPS, `ptl_present_flag` 1, 4-byte lengths), brands
+  `vvic` + `mif1` + `miaf` (`vvis` + `msf1` for sequences).
+  `EncodeOptions::vvc_options` (`with_vvc_options`) passes the
+  encoder's tool knobs (`tiles`, `wpp`, `dep_quant`, `sdh`, `palette`,
+  `mtt_bt`, `mtt_tt`, `alf_clip_rdo`, `chroma_sao_merge`,
+  `loop_filter_across_tiles`, `slice_per_tile`, `raster_slices`);
+  `EncodeOptions::new` gained that positional field. `heifenc` takes
+  `--codec vvc`. `tests/vvc.rs`: round trips at 1×1 … 320×192 (padding
+  + `clap`), every tool axis, alpha / grid / overlay / gain map /
+  sequence / mini / framework-encoder parity, MIAF + Annex L
+  conformance, and every coded item byte-exact in ffmpeg's VVC decoder.
 
 ### Changed
 
