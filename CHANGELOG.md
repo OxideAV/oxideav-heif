@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- `oxideav-h265` requirement is `>=0.0.13, <0.1` (a `0.0.x` caret requirement is exact and left two h265 versions in the umbrella graph).
+
 ## [0.0.10](https://github.com/OxideAV/oxideav-heif/compare/v0.0.9...v0.0.10) - 2026-10-05
 
 ### Other

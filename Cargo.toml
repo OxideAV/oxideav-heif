@@ -23,7 +23,9 @@ exclude = ["/tests", "/fuzz"]
 # HeifPixelFormat / HeifError) and never references the framework or a
 # codec crate.
 oxideav-core = { version = "0.1", optional = true }
-oxideav-h265 = { version = "0.0.13", optional = true }
+# A 0.0.x caret requirement is exact; the range keeps heif on the latest
+# h265 0.0 line (0.0.13 brought the Annex F/G/H surface heif needs).
+oxideav-h265 = { version = ">=0.0.13, <0.1", optional = true }
 oxideav-h264 = { version = "0.1", optional = true }
 oxideav-av1 = { version = "0.1.19", optional = true }
 # Inflate for deflate-compressed metadata items (`dExf`, deflated XMP;
