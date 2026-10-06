@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **VVC image items decode (HEIF Annex L).** `vvc1` items are coded
+  images: the `vvcC` property (ISO/IEC 14496-15:2024 §11.2.4
+  `VvcDecoderConfigurationRecord` as a FullBox) is modelled by
+  `VvcConfig` / `VvcPtlRecord` (`vvcc` module, standalone; byte-exact
+  rewrite, `ptl_present_flag = 0` records take their sample layout from
+  the SPS in the arrays), `Property::VvcC` / `ItemProperties::vvcc`,
+  `layout::vvc_layout`, `SampleEntry::vvcc` (`vvc1` / `vvi1` entries),
+  the `vvic` / `vvis` / `vvi3` brands (`BrandClass::vvc`), and
+  `miaf::check` rules `HEIF L.2.3.1` (essential `vvcC`), `HEIF L.2.4.3`
+  (`vvs1` + `vvnC`) and `HEIF L.4.1.1` (the `vvic` essential-property
+  set). With `registry`, `vvc1` items decode through the new `vvcdec`
+  module — a framework `Decoder` over `oxideav-h266`'s Annex B stream
+  decoder (its registry factory is a parser-only placeholder on the
+  published 0.0 line): the record's NAL units are re-assembled with the
+  item's length-prefixed ones (`vvcc::access_unit_annex_b`, AUD / OPI
+  first, the L.2.2.1.2 `tols` OPI rule), the conformance window
+  applied, 4:2:0 / 4:0:0 at the SPS bit depth. The contract path, the
+  direct item decoder and the `"heif"` framework codec are byte-identical
+  on VVC stills, and ffmpeg's VVC decoder is byte-exact against ours on
+  the same access units (`tests/vvc.rs`). `vvcdec::vvc_item_from_annex_b`
+  splits an encoder's access unit into the record (DCI / OPI / VPS /
+  SPS / PPS / prefix APS / SEI, complete arrays) and the `VVCItemData`,
+  taking the PTL from the SPS or the VPS. Low-overhead `vvi3` files
+  (Amd 2 L.4.3): the `CompactVvcDecoderConfigurationRecord`
+  (`CompactVvcConfig`) expands to the equivalent `vvcC` (L.4.3.3.4) and
+  a single-layer item's header-less `IDR_N_LP` payload to `VVCItemData`
+  (previously the compact bytes were written as the property verbatim).
+  New optional dependency `oxideav-h266 >=0.0.9, <0.1` behind
+  `registry`.
+
 ### Changed
 
 - `oxideav-h265` requirement is `>=0.0.13, <0.1` (a `0.0.x` caret requirement is exact and left two h265 versions in the umbrella graph).

@@ -65,6 +65,8 @@ pub struct SampleEntry {
     pub avcc: Option<crate::avcc::AvcConfig>,
     /// `lhvC` child, when present (`lhv1` / `hvc2` entries).
     pub lhvc: Option<crate::lhvc::LhevcConfig>,
+    /// `vvcC` child, when present (`vvc1` / `vvi1` entries, HEIF L.3.2).
+    pub vvcc: Option<crate::vvcc::VvcConfig>,
     /// `ccst` child (mandatory for `pict` tracks).
     pub ccst: Option<CodingConstraints>,
     /// `auxi` `aux_track_type` URN (auxiliary tracks).
@@ -120,6 +122,7 @@ impl SampleEntry {
             av1c,
             avcc,
             lhvc,
+            vvcc: None,
             ccst,
             aux_track_type,
             colr,
@@ -1195,6 +1198,7 @@ fn parse_visual_entry(entry_type: FourCc, p: &[u8]) -> Result<SampleEntry> {
         av1c: None,
         avcc: None,
         lhvc: None,
+        vvcc: None,
         ccst: None,
         aux_track_type: None,
         colr: Vec::new(),
@@ -1243,6 +1247,15 @@ fn parse_visual_entry(entry_type: FourCc, p: &[u8]) -> Result<SampleEntry> {
             b"av1C" => entry.av1c = Some(Av1Config::parse(body)?),
             b"avcC" => entry.avcc = Some(crate::avcc::AvcConfig::parse(body)?),
             b"lhvC" => entry.lhvc = Some(crate::lhvc::LhevcConfig::parse(body)?),
+            b"vvcC" => {
+                let (v, f, b) = parse_full_box(body)?;
+                if v != 0 {
+                    return Err(HeifError::invalid(format!("vvcC version {v}")));
+                }
+                let mut c = crate::vvcc::VvcConfig::parse(b)?;
+                c.flags = f;
+                entry.vvcc = Some(c);
+            }
             b"ccst" => {
                 let (_v, _f, b) = parse_full_box(body)?;
                 let mut cr = Reader::new(b);

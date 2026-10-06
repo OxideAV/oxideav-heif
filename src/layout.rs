@@ -15,6 +15,7 @@ use crate::error::{HeifError, Result};
 use crate::hvcc::HevcConfig;
 use crate::image::{Chroma, HeifPixelFormat};
 use crate::props::{ItemProperties, Property};
+use crate::vvcc::VvcConfig;
 
 /// Sample layout an `hvcC` record announces.
 pub fn hevc_layout(cfg: &HevcConfig) -> Result<HeifPixelFormat> {
@@ -22,6 +23,16 @@ pub fn hevc_layout(cfg: &HevcConfig) -> Result<HeifPixelFormat> {
         HeifError::invalid(format!("hvcC chroma_format_idc {}", cfg.chroma_format_idc))
     })?;
     HeifPixelFormat::new(chroma, cfg.bit_depth_luma(), false)
+}
+
+/// Sample layout a `vvcC` record announces: its `chroma_format_idc` /
+/// `bit_depth_minus8` head, or the SPS in its arrays when
+/// `ptl_present_flag` is 0.
+pub fn vvc_layout(cfg: &VvcConfig) -> Result<HeifPixelFormat> {
+    let (idc, depth) = cfg.sample_format()?;
+    let chroma = Chroma::from_idc(idc)
+        .ok_or_else(|| HeifError::invalid(format!("vvcC chroma_format_idc {idc}")))?;
+    HeifPixelFormat::new(chroma, depth, false)
 }
 
 /// Sample layout an `av1C` record announces.
@@ -45,6 +56,9 @@ pub fn layout_of(props: &ItemProperties) -> Option<HeifPixelFormat> {
     }
     if let Some(a) = props.avcc() {
         return a.layout().ok();
+    }
+    if let Some(v) = props.vvcc() {
+        return vvc_layout(v).ok();
     }
     None
 }
@@ -226,6 +240,9 @@ pub fn entry_layout(entry: &crate::sequence::SampleEntry) -> Option<HeifPixelFor
     }
     if let Some(a) = &entry.avcc {
         return a.layout().ok();
+    }
+    if let Some(v) = &entry.vvcc {
+        return vvc_layout(v).ok();
     }
     None
 }

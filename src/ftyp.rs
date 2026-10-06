@@ -84,6 +84,13 @@ pub const BRAND_TMAP: FourCc = *b"tmap";
 /// `mif3` — low-overhead image file structural brand (ISO/IEC
 /// 23008-12:2025/Amd 2:2026 Annex O.2.1: `ftyp` + `mini`).
 pub const BRAND_MIF3: FourCc = *b"mif3";
+/// VVC image / image collection brand (HEIF Annex L.4.1).
+pub const BRAND_VVIC: FourCc = *b"vvic";
+/// VVC image sequence brand (HEIF Annex L.4.2).
+pub const BRAND_VVIS: FourCc = *b"vvis";
+/// `vvi3` — VVC codec brand of a low-overhead `mif3` file (HEIF Amd
+/// 2:2026 L.4.3; carried in `minor_version`, infers `vvc1` / `vvcC`).
+pub const BRAND_VVI3: FourCc = *b"vvi3";
 
 /// Brands that identify a file as one this crate owns (HEIF structural,
 /// HEVC-specific, MIAF, AV1/AVIF). Presence of any of them as the major
@@ -92,7 +99,7 @@ pub const HEIF_FAMILY_BRANDS: &[FourCc] = &[
     BRAND_MIF1, BRAND_MIF2, BRAND_MSF1, BRAND_HEIC, BRAND_HEIX, BRAND_HEVC, BRAND_HEVX, BRAND_HEIM,
     BRAND_HEIS, BRAND_HEVM, BRAND_HEVS, BRAND_MIAF, BRAND_MIHB, BRAND_MIHA, BRAND_MIHE, BRAND_MIAB,
     BRAND_AVIF, BRAND_AVIS, BRAND_AVIO, BRAND_MA1B, BRAND_MA1A, BRAND_JPEG, BRAND_JPGS, BRAND_AVCI,
-    BRAND_AVCS, BRAND_1PIC, BRAND_PRED, BRAND_TMAP, BRAND_MIF3,
+    BRAND_AVCS, BRAND_1PIC, BRAND_PRED, BRAND_TMAP, BRAND_MIF3, BRAND_VVIC, BRAND_VVIS, BRAND_VVI3,
 ];
 
 /// Parsed `ftyp` / `styp` box.
@@ -190,6 +197,7 @@ impl FileType {
                 || has(&BRAND_AVIF)
                 || has(&BRAND_JPEG)
                 || has(&BRAND_AVCI)
+                || has(&BRAND_VVIC)
                 || has(&BRAND_MIAF),
             image_sequence: has(&BRAND_MSF1)
                 || has(&BRAND_HEVC)
@@ -199,7 +207,8 @@ impl FileType {
                 || has(&BRAND_AVIS)
                 || has(&BRAND_AVIO)
                 || has(&BRAND_JPGS)
-                || has(&BRAND_AVCS),
+                || has(&BRAND_AVCS)
+                || has(&BRAND_VVIS),
             miaf: has(&BRAND_MIAF)
                 || has(&BRAND_MIHB)
                 || has(&BRAND_MIHA)
@@ -224,6 +233,7 @@ impl FileType {
                 || has(&BRAND_MA1B)
                 || has(&BRAND_MA1A),
             predictive_items: has(&BRAND_PRED),
+            vvc: has(&BRAND_VVIC) || has(&BRAND_VVIS) || has(&BRAND_VVI3),
         }
     }
 
@@ -255,6 +265,8 @@ pub struct BrandClass {
     pub av1: bool,
     /// `pred` (predictively coded image items) declared.
     pub predictive_items: bool,
+    /// Any VVC codec brand (`vvic` / `vvis` / `vvi3`).
+    pub vvc: bool,
 }
 impl BrandClass {
     /// Every field as a positional argument, in declaration order.
@@ -265,6 +277,7 @@ impl BrandClass {
         hevc: bool,
         av1: bool,
         predictive_items: bool,
+        vvc: bool,
     ) -> Self {
         Self {
             image_collection,
@@ -273,6 +286,7 @@ impl BrandClass {
             hevc,
             av1,
             predictive_items,
+            vvc,
         }
     }
 }

@@ -53,6 +53,11 @@ pub const ITEM_TYPE_AV01: FourCc = *b"av01";
 pub const ITEM_TYPE_AVC1: FourCc = *b"avc1";
 /// Item type of JPEG image items (Annex H).
 pub const ITEM_TYPE_JPEG: FourCc = *b"jpeg";
+/// Item type of VVC image items (Annex L.2.2.1.2).
+pub const ITEM_TYPE_VVC1: FourCc = *b"vvc1";
+/// Item type of VVC subpicture items that are not decodable on their
+/// own (Annex L.2.4.1); referenced by a VVC base item through `subp`.
+pub const ITEM_TYPE_VVS1: FourCc = *b"vvs1";
 /// Grid derived image item (§6.6.2.3).
 pub const ITEM_TYPE_GRID: FourCc = *b"grid";
 /// Overlay derived image item (§6.6.2.2).
@@ -220,6 +225,7 @@ impl ItemInfo {
                 | ITEM_TYPE_AV01
                 | ITEM_TYPE_AVC1
                 | ITEM_TYPE_JPEG
+                | ITEM_TYPE_VVC1
         )
     }
 

@@ -23,8 +23,8 @@
 //! * **one stream per visual track** (`pict` / `vide` / `auxv`
 //!   handlers of the `moov` box, image sequences): codec id resolved
 //!   from the sample-entry type (`hvc1` → `"h265"`, `av01` → `"av1"`,
-//!   …) through the [`CodecResolver`], `extradata` = the `hvcC` /
-//!   `av1C` record, packets = the samples in decode order with `pts`
+//!   `vvc1` → `"h266"`, …) through the [`CodecResolver`], `extradata`
+//!   = the `hvcC` / `av1C` / `avcC` / `vvcC` record, packets = the samples in decode order with `pts`
 //!   / `dts` / `duration` in the media time base and the `stss` sync
 //!   flags; `seek_to` lands on sync samples.
 
@@ -175,6 +175,7 @@ fn codec_id_for_entry(entry_type: &[u8; 4], codecs: &dyn CodecResolver) -> Optio
         }
         b"av01" => Some(CodecId::new(decode::CODEC_ID_AV1)),
         b"avc1" | b"avc3" => Some(CodecId::new(decode::CODEC_ID_AVC)),
+        b"vvc1" | b"vvi1" => Some(CodecId::new(decode::CODEC_ID_VVC)),
         _ => None,
     }
 }
@@ -208,6 +209,7 @@ fn entry_item(
         b"hvc1" | b"hev1" => (*b"hvc1", Property::HvcC(entry.hvcc.clone()?)),
         b"av01" => (*b"av01", Property::Av1C(entry.av1c.clone()?)),
         b"avc1" | b"avc3" => (*b"avc1", Property::AvcC(entry.avcc.clone()?)),
+        b"vvc1" | b"vvi1" => (*b"vvc1", Property::VvcC(entry.vvcc.clone()?)),
         _ => return None,
     };
     let mut extra = Vec::new();
@@ -577,6 +579,9 @@ impl HeifDemuxer {
                     params.pixel_format = a.layout().ok().and_then(|f| f.to_core());
                 } else if let Some(l) = &entry.lhvc {
                     params.extradata = l.raw.clone();
+                } else if let Some(v) = &entry.vvcc {
+                    params.extradata = v.to_bytes();
+                    params.pixel_format = decode::vvc_layout(v).ok().and_then(|f| f.to_core());
                 }
                 if let Some(c) = entry
                     .colr

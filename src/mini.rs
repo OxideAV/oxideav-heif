@@ -31,7 +31,7 @@ use crate::ftyp::FileType;
 /// `mif3` structural brand (Annex O.2.1).
 pub const BRAND_MIF3: FourCc = crate::ftyp::BRAND_MIF3;
 /// `vvi3` codec brand for VVC under `mif3` (L.4.3).
-pub const BRAND_VVI3: FourCc = *b"vvi3";
+pub const BRAND_VVI3: FourCc = crate::ftyp::BRAND_VVI3;
 /// MIME type of the low-overhead format (Annex P).
 pub const MIME_TYPE: &str = "image/hif2";
 /// File extension of the low-overhead format (Annex P).
@@ -879,7 +879,43 @@ impl MinimizedImage {
             }
             None => Vec::new(),
         };
-        let gm_data: &[u8] = gm.map(|g| g.data.as_slice()).unwrap_or(&[]);
+        // L.4.3.3: under an inferred `vvi3` the codec configurations
+        // are CompactVvcDecoderConfigurationRecords and a single-layer
+        // item's data is one header-less, length-less IDR_N_LP NAL
+        // unit; the equivalent file carries the VvcDecoderConfigurationRecord
+        // (L.4.3.3.4) and the VVCItemData (L.2.2.2).
+        let inferred_vvc =
+            self.explicit_codec_types.is_none() && infe_type == crate::meta::ITEM_TYPE_VVC1;
+        let expand_cfg = |cfg: &[u8], chroma: u8, bits: u8, w: u32, h: u32| -> Result<Vec<u8>> {
+            if inferred_vvc {
+                let compact = crate::vvcc::CompactVvcConfig::parse(cfg)?;
+                let full = compact.to_full(chroma, bits, w, h)?;
+                Ok(full_boxed(&cc_type, 0, 0, &full.serialize()))
+            } else {
+                Ok(boxed(&cc_type, cfg))
+            }
+        };
+        let expand_data = |cfg: &[u8], data: &[u8]| -> Result<Vec<u8>> {
+            if inferred_vvc && !data.is_empty() {
+                crate::vvcc::CompactVvcConfig::parse(cfg)?.item_data(data)
+            } else {
+                Ok(data.to_vec())
+            }
+        };
+        let main_data = expand_data(&self.main_codec_config, &self.main_data)?;
+        let alpha_cfg_bytes: &[u8] = self
+            .alpha_codec_config
+            .as_deref()
+            .unwrap_or(&self.main_codec_config);
+        let alpha_data = expand_data(alpha_cfg_bytes, &self.alpha_data)?;
+        let gm_data: Vec<u8> = match gm {
+            Some(g) => expand_data(
+                g.codec_config.as_deref().unwrap_or(&self.main_codec_config),
+                &g.data,
+            )?,
+            None => Vec::new(),
+        };
+        let gm_data: &[u8] = &gm_data;
         let has_alpha_item = !self.alpha_data.is_empty();
         let has_gm_item = !gm_data.is_empty();
         let exif_type: FourCc = if self.exif_xmp_compressed {
@@ -1010,7 +1046,13 @@ impl MinimizedImage {
         let orient = self.orientation - 1;
         let mut slots: Vec<Option<Vec<u8>>> = vec![None; 32];
         if !self.main_codec_config.is_empty() {
-            slots[0] = Some(boxed(&cc_type, &self.main_codec_config));
+            slots[0] = Some(expand_cfg(
+                &self.main_codec_config,
+                self.chroma.subsampling,
+                self.format.bits(),
+                self.width,
+                self.height,
+            )?);
         }
         slots[1] = Some(ispe(self.width, self.height));
         slots[2] = Some(pixi_box(main_components, false, self.chroma, self.format));
@@ -1024,7 +1066,13 @@ impl MinimizedImage {
                 .as_ref()
                 .unwrap_or(&self.main_codec_config);
             if !cfg.is_empty() {
-                slots[5] = Some(boxed(&cc_type, cfg));
+                slots[5] = Some(expand_cfg(
+                    cfg,
+                    0,
+                    self.format.bits(),
+                    self.width,
+                    self.height,
+                )?);
             }
             let mut aux = crate::props::AUX_URN_ALPHA.as_bytes().to_vec();
             aux.push(0);
@@ -1068,7 +1116,13 @@ impl MinimizedImage {
             if has_gm_item {
                 let cfg = g.codec_config.as_ref().unwrap_or(&self.main_codec_config);
                 if !cfg.is_empty() {
-                    slots[16] = Some(boxed(&cc_type, cfg));
+                    slots[16] = Some(expand_cfg(
+                        cfg,
+                        g.chroma.subsampling,
+                        g.format.bits(),
+                        g.width,
+                        g.height,
+                    )?);
                 }
                 slots[17] = Some(ispe(g.width, g.height));
                 let gcomp = if g.chroma.subsampling == 0 { 1 } else { 3 };
@@ -1156,10 +1210,10 @@ impl MinimizedImage {
         let iprp = boxed(b"iprp", &iprp_body);
         // ── mdat payload order (O.4.10) and iloc (O.4.9).
         let chunks: [(u32, &[u8]); 6] = [
-            (item_id::ALPHA, &self.alpha_data),
+            (item_id::ALPHA, &alpha_data),
             (item_id::TMAP, &tmap_data),
             (item_id::GAIN_MAP, gm_data),
-            (item_id::MAIN, &self.main_data),
+            (item_id::MAIN, &main_data),
             (item_id::EXIF, self.exif.as_deref().unwrap_or(&[])),
             (item_id::XMP, self.xmp.as_deref().unwrap_or(&[])),
         ];
@@ -1720,14 +1774,53 @@ mod tests {
         let mut n = sample();
         n.explicit_codec_types = None;
         assert!(n.equivalent_file(&ft).is_err());
+        // Under `vvi3` the codec configuration is a compact VVC record
+        // (L.4.3.3) and a single-layer item's data is one header-less
+        // IDR_N_LP NAL unit payload; the equivalent file carries the
+        // full `vvcC` FullBox and the restored VVCItemData.
         let vvc = FileType {
             minor_version: u32::from_be_bytes(*b"vvi3"),
             ..ft
         };
+        assert!(
+            n.equivalent_file(&vvc).is_err(),
+            "an av1C body is no compact VVC record"
+        );
+        use crate::vvcc::tests::{PPS, SPS, VPS};
+        let compact = crate::vvcc::CompactVvcConfig::new(
+            false,
+            4,
+            vec![VPS.to_vec(), SPS.to_vec(), PPS.to_vec()],
+        );
+        n.main_codec_config = compact.serialize().unwrap();
+        n.main_data = vec![0xaa, 0xbb, 0xcc];
+        n.width = 8;
+        n.height = 8;
         let eq = n.equivalent_file(&vvc).unwrap();
         let f = crate::HeifFile::parse(&eq).unwrap();
         assert_eq!(f.file_type.major_brand, *b"vvic");
         assert_eq!(f.primary_item().unwrap().item_type, *b"vvc1");
+        let props =
+            crate::props::ItemProperties::resolve(f.meta().unwrap(), item_id::MAIN).unwrap();
+        let cfg = props.vvcc().expect("full vvcC");
+        assert!(cfg.ptl_present_flag);
+        assert_eq!((cfg.chroma_format_idc, cfg.bit_depth()), (1, 8));
+        assert_eq!((cfg.max_picture_width, cfg.max_picture_height), (8, 8));
+        assert_eq!(cfg.constant_frame_rate, 1);
+        assert_eq!(cfg.nal_count(), 3);
+        assert_eq!(cfg.native_ptl.as_ref().unwrap().general_profile_idc, 1);
+        assert_eq!(
+            f.item_data(item_id::MAIN).unwrap().as_ref(),
+            &[0, 0, 0, 5, 0x00, 0x41, 0xaa, 0xbb, 0xcc]
+        );
+        let rep = crate::miaf::check(&f, crate::miaf::MiafProfile::Miaf).unwrap();
+        assert!(
+            rep.violations
+                .iter()
+                .all(|v| !v.clause.starts_with("HEIF L.")),
+            "{:#?}",
+            rep.violations
+        );
     }
 
     #[test]

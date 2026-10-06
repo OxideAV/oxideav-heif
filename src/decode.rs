@@ -7,7 +7,11 @@
 //! (the `hvcC` record as `extradata`, length-prefixed packets). An
 //! `av01` item is one AV1 temporal unit (AVIF §2.1) with the `av1C`
 //! record as `extradata`; `oxideav-av1`'s registry decoder consumes it
-//! verbatim.
+//! verbatim. A `vvc1` item is one VVC access unit (HEIF L.2.2) with
+//! the `vvcC` record as `extradata`; it is decoded by this crate's
+//! [`crate::vvcdec`] wrapper over `oxideav-h266`'s stream decoder
+//! (that crate's registry factory is a parser-only placeholder), so
+//! VVC never goes through a caller-supplied registry.
 //!
 //! Decoding goes through the direct codec factories by default, or
 //! through a caller-supplied [`CodecRegistry`] so alternative
@@ -29,10 +33,15 @@ use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
 use crate::hvcc::HevcConfig;
 use crate::image::{HeifFrame, HeifPixelFormat, Plane};
-use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_AVC1, ITEM_TYPE_HEV1, ITEM_TYPE_HVC1, ITEM_TYPE_LHV1};
+use crate::meta::{
+    ITEM_TYPE_AV01, ITEM_TYPE_AVC1, ITEM_TYPE_HEV1, ITEM_TYPE_HVC1, ITEM_TYPE_LHV1, ITEM_TYPE_VVC1,
+};
 use crate::props::{Colr, ItemProperties};
+use crate::vvcc::VvcConfig;
 
-pub use crate::layout::{av1_layout, hevc_layout, layered_base_layout, layered_layout, layout_of};
+pub use crate::layout::{
+    av1_layout, hevc_layout, layered_base_layout, layered_layout, layout_of, vvc_layout,
+};
 
 /// Codec id the HEVC decoder is registered under.
 pub const CODEC_ID_HEVC: &str = "h265";
@@ -40,6 +49,8 @@ pub const CODEC_ID_HEVC: &str = "h265";
 pub const CODEC_ID_AV1: &str = "av1";
 /// Codec id the AVC decoder is registered under.
 pub const CODEC_ID_AVC: &str = "h264";
+/// Codec id the VVC decoder is reached under (see [`crate::vvcdec`]).
+pub const CODEC_ID_VVC: &str = crate::vvcdec::CODEC_ID;
 
 /// Upper bound on the number of coded items decoded for one image.
 pub const MAX_ITEM_DECODES: usize = 4096;
@@ -170,6 +181,13 @@ impl<'r> ItemDecoder<'r> {
             CodedKind::Hevc(cfg) => (CODEC_ID_HEVC, cfg.raw.clone(), hevc_layout(cfg)?),
             CodedKind::Av1(cfg) => (CODEC_ID_AV1, cfg.raw.clone(), av1_layout(cfg)?),
             CodedKind::Avc(cfg) => (CODEC_ID_AVC, cfg.raw.clone(), cfg.layout()?),
+            CodedKind::Vvc(cfg) => {
+                // HEIF L.2.2.1.2: the item's tols steers the OPI rule.
+                if let Some(t) = node.properties.tols() {
+                    options = options.set("tols", t.to_string());
+                }
+                (CODEC_ID_VVC, cfg.to_bytes(), vvc_layout(cfg)?)
+            }
             CodedKind::LayeredHevc(cfg) => {
                 let plan = LayeredPlan::of(node, cfg)?;
                 match &plan.extradata {
@@ -200,6 +218,15 @@ impl<'r> ItemDecoder<'r> {
     }
 
     fn make(&self, params: &CodecParameters) -> Result<Box<dyn Decoder>> {
+        // VVC always decodes through this crate's wrapper over
+        // oxideav-h266's stream decoder: that crate's registry factory
+        // is a parser-only placeholder on its published line, so a
+        // registry route would resolve to a decoder that rejects every
+        // packet.
+        if params.codec_id.as_str() == CODEC_ID_VVC {
+            return crate::vvcdec::make_decoder(params)
+                .map_err(|e| HeifError::unsupported(format!("{}: {e}", params.codec_id)));
+        }
         let r = match self.registry {
             Some(reg) => reg.first_decoder(params),
             None => match params.codec_id.as_str() {
@@ -256,6 +283,7 @@ impl<'r> ItemDecoder<'r> {
             CodedKind::Hevc(c) => (hevc_layout(c)?, owned(node.item.id)?),
             CodedKind::Av1(c) => (av1_layout(c)?, owned(node.item.id)?),
             CodedKind::Avc(c) => (c.layout()?, owned(node.item.id)?),
+            CodedKind::Vvc(c) => (vvc_layout(c)?, owned(node.item.id)?),
             CodedKind::LayeredHevc(cfg) => {
                 let plan = LayeredPlan::of(node, cfg)?;
                 match &plan.extradata {
@@ -484,6 +512,8 @@ pub enum CodedKind<'a> {
     Avc(&'a crate::avcc::AvcConfig),
     /// `lhv1` with its `lhvC` (base layer decoded).
     LayeredHevc(&'a crate::lhvc::LhevcConfig),
+    /// `vvc1` with its `vvcC` (HEIF Annex L).
+    Vvc(&'a VvcConfig),
 }
 
 /// The base layer (`nuh_layer_id` 0) of an `lhv1` access unit as an
@@ -561,6 +591,15 @@ pub fn classify(node: &ImageNode) -> Result<ItemKind<'_>> {
                     ))
                 })?;
                 Ok(ItemKind::Coded(CodedKind::LayeredHevc(cfg)))
+            }
+            ITEM_TYPE_VVC1 => {
+                let cfg = node.properties.vvcc().ok_or_else(|| {
+                    HeifError::invalid(format!(
+                        "item {}: vvc1 item without a vvcC property (HEIF L.2.3.1)",
+                        node.item.id
+                    ))
+                })?;
+                Ok(ItemKind::Coded(CodedKind::Vvc(cfg)))
             }
             other => Err(HeifError::unsupported(format!(
                 "item {}: coded image type '{}' has no decoder in this crate",

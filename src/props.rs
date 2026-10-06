@@ -21,6 +21,7 @@ use crate::error::{HeifError, Result};
 use crate::hvcc::HevcConfig;
 use crate::lhvc::{LhevcConfig, OperatingPoints};
 use crate::meta::{Meta, RawProperty};
+use crate::vvcc::VvcConfig;
 
 /// Alpha plane URN, codec-independent (HEIF §6.9.1, MIAF §7.3.5.1).
 pub const AUX_URN_ALPHA: &str = "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha";
@@ -1046,6 +1047,8 @@ pub enum Property {
     LhvC(LhevcConfig),
     /// `avcC` — AVC configuration (HEIF E.2.3).
     AvcC(AvcConfig),
+    /// `vvcC` — VVC decoder configuration (HEIF L.2.3.1; a FullBox).
+    VvcC(VvcConfig),
     /// `oinf` — operating points information (HEIF B.2.3.3).
     Oinf(OperatingPoints),
     /// `tols` — target output layer set (HEIF §6.5.29).
@@ -1112,6 +1115,7 @@ impl Property {
             Property::Av1C(_) => *b"av1C",
             Property::LhvC(_) => *b"lhvC",
             Property::AvcC(_) => *b"avcC",
+            Property::VvcC(_) => *b"vvcC",
             Property::Oinf(_) => *b"oinf",
             Property::Tols(_) => *b"tols",
             Property::Clli(_) => *b"clli",
@@ -1147,7 +1151,11 @@ impl Property {
     pub fn is_decoder_config(&self) -> bool {
         matches!(
             self,
-            Property::HvcC(_) | Property::Av1C(_) | Property::LhvC(_) | Property::AvcC(_)
+            Property::HvcC(_)
+                | Property::Av1C(_)
+                | Property::LhvC(_)
+                | Property::AvcC(_)
+                | Property::VvcC(_)
         )
     }
 
@@ -1173,6 +1181,15 @@ impl Property {
             b"av1C" => Property::Av1C(Av1Config::parse(b)?),
             b"lhvC" => Property::LhvC(LhevcConfig::parse(b)?),
             b"avcC" => Property::AvcC(AvcConfig::parse(b)?),
+            b"vvcC" => {
+                let (v, f, body) = parse_full_box(b)?;
+                if v != 0 {
+                    return Err(HeifError::invalid(format!("vvcC version {v}")));
+                }
+                let mut c = VvcConfig::parse(body)?;
+                c.flags = f;
+                Property::VvcC(c)
+            }
             b"oinf" => {
                 let (v, _f, body) = parse_full_box(b)?;
                 if v != 0 {
@@ -1474,6 +1491,14 @@ impl ItemProperties {
     pub fn avcc(&self) -> Option<&AvcConfig> {
         self.descriptive().find_map(|e| match &e.property {
             Property::AvcC(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// `vvcC`.
+    pub fn vvcc(&self) -> Option<&VvcConfig> {
+        self.descriptive().find_map(|e| match &e.property {
+            Property::VvcC(v) => Some(v),
             _ => None,
         })
     }
@@ -2195,6 +2220,7 @@ pub mod write {
             Property::Av1C(a) => boxed(b"av1C", &a.to_bytes()),
             Property::LhvC(c) => boxed(b"lhvC", &c.serialize()),
             Property::AvcC(c) => boxed(b"avcC", &c.serialize()),
+            Property::VvcC(c) => full_boxed(b"vvcC", 0, c.flags, &c.to_bytes()),
             Property::Oinf(o) => full_boxed(b"oinf", 0, 0, &o.serialize()),
             Property::Tols(t) => full_boxed(b"tols", 0, 0, &t.to_be_bytes()),
             Property::Clli(c) => {

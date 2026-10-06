@@ -733,6 +733,7 @@ pub fn check<D: AsRef<[u8]>>(file: &HeifFile<D>, profile: MiafProfile) -> Result
         }
         // Codec profile constraints.
         check_codec(&mut rep, profile, it.item_type, &props, id);
+        check_vvc_item(&mut rep, &file.file_type, it.item_type, &props, id);
     }
     // §7.3.3 thumbnail factor.
     for it in meta.items.iter().filter(|i| i.is_image()) {
@@ -863,6 +864,64 @@ fn check_codec(
             }
         }
         MiafProfile::Miaf | MiafProfile::AvcBasic => {}
+    }
+}
+
+/// HEIF Annex L: `vvc1` items carry an essential `vvcC` (L.2.3.1),
+/// `vvs1` subpicture items an essential `vvnC` (L.2.4.3), and under
+/// the `vvic` brand a `vvc1` item's essential properties are limited
+/// to `vvcC` / `colr` / `irot` / `clap` / `imir` / `lsel` / `tols` /
+/// `spor` (L.4.1.1).
+fn check_vvc_item(
+    rep: &mut MiafReport,
+    file_type: &crate::ftyp::FileType,
+    item_type: FourCc,
+    props: &crate::props::ItemProperties,
+    id: u32,
+) {
+    use crate::meta::{ITEM_TYPE_VVC1, ITEM_TYPE_VVS1};
+    if item_type == ITEM_TYPE_VVC1 {
+        match props
+            .entries
+            .iter()
+            .find(|e| matches!(e.property, crate::props::Property::VvcC(_)))
+        {
+            None => rep.push("HEIF L.2.3.1", Some(id), "vvc1 item without vvcC"),
+            Some(e) if !e.essential => {
+                rep.push("HEIF L.2.3.1", Some(id), "vvcC shall be essential")
+            }
+            Some(_) => {}
+        }
+        if file_type.has_brand(&crate::ftyp::BRAND_VVIC) {
+            const ALLOWED: [&[u8; 4]; 8] = [
+                b"vvcC", b"colr", b"irot", b"clap", b"imir", b"lsel", b"tols", b"spor",
+            ];
+            for e in props.entries.iter().filter(|e| e.essential) {
+                let t = e.property.box_type();
+                if !ALLOWED.contains(&&t) {
+                    rep.push(
+                        "HEIF L.4.1.1",
+                        Some(id),
+                        format!(
+                            "vvic: essential property '{}' is not among those permitted on a vvc1 item",
+                            crate::boxes::fourcc_str(&t)
+                        ),
+                    );
+                }
+            }
+        }
+    } else if item_type == ITEM_TYPE_VVS1 {
+        match props
+            .entries
+            .iter()
+            .find(|e| e.property.box_type() == *b"vvnC")
+        {
+            None => rep.push("HEIF L.2.4.3", Some(id), "vvs1 item without vvnC"),
+            Some(e) if !e.essential => {
+                rep.push("HEIF L.2.4.3", Some(id), "vvnC shall be essential")
+            }
+            Some(_) => {}
+        }
     }
 }
 

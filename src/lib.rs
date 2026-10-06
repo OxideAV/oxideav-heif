@@ -5,10 +5,10 @@
 //! item model (items, locations, references, properties, entity
 //! groups), derived images (`grid` / `iovl` / `iden`), auxiliaries
 //! (alpha / depth), thumbnails, Exif / XMP / ICC metadata and the
-//! `moov` image-sequence tracks. It never decodes an HEVC or AV1
-//! bitstream itself — coded items are handed to `oxideav-h265` /
-//! `oxideav-av1` through the registry when the default-on `registry`
-//! feature is enabled.
+//! `moov` image-sequence tracks. It never decodes an HEVC, AV1, AVC
+//! or VVC bitstream itself — coded items are handed to `oxideav-h265`
+//! / `oxideav-av1` / `oxideav-h264` / `oxideav-h266` when the
+//! default-on `registry` feature is enabled.
 //!
 //! # Layers
 //!
@@ -22,7 +22,9 @@
 //!   `av1C`, `clli`, `mdcv`, `cclv`, `amve`, `rloc`, `lsel`, `a1op`,
 //!   `a1lx`, `rref`, `crtt`, `mdft`, `udes`, `altt`) with the §6.5.1
 //!   descriptive / transformative / essential semantics.
-//! * [`hvcc`] / [`av1c`] — the decoder configuration records.
+//! * [`hvcc`] / [`av1c`] / [`avcc`] / [`lhvc`] / [`vvcc`] — the decoder
+//!   configuration records (`vvcc` also holds the Amd 2 compact VVC
+//!   record of `vvi3` low-overhead files).
 //! * [`derived`] — `grid` / `iovl` / `iden` descriptors and the bounded
 //!   derivation graph ([`derived::build_graph`]).
 //! * [`miaf`] — MIAF constraints as typed checks ([`miaf::check`]).
@@ -35,8 +37,12 @@
 //! * [`sequence`] — `moov` / `trak` / `stbl` image-sequence tracks
 //!   (sample tables, visual sample entries, `ccst`, the §7.2.1 matrix).
 //! * [`decode`](mod@decode) (`registry`) — coded items → pixels through
-//!   `oxideav-h265` / `oxideav-av1` ([`decode::ItemDecoder`]) and the
-//!   whole-image driver ([`decode::decode_item`] → [`DecodedImage`]).
+//!   `oxideav-h265` / `oxideav-av1` / `oxideav-h264` / `oxideav-h266`
+//!   ([`decode::ItemDecoder`]) and the whole-image driver
+//!   ([`decode::decode_item`] → [`DecodedImage`]).
+//! * [`vvcdec`] (`registry`) — the VVC item decoder over
+//!   `oxideav-h266`'s stream decoder and the Annex B → `vvcC` + item
+//!   data split the encoder uses.
 //! * [`demux`] (`registry`) — the framework [`Demuxer`](oxideav_core::Demuxer)
 //!   (still stream + sequence tracks) and the `"heif"` codec.
 //! * [`registry`] (`registry`) — [`register`] / the `oxideav_core::register!`
@@ -76,6 +82,9 @@ pub mod props;
 pub mod rgb;
 pub mod sequence;
 pub mod tiled;
+pub mod vvcc;
+#[cfg(feature = "registry")]
+pub mod vvcdec;
 pub mod writer;
 
 #[cfg(feature = "registry")]
@@ -143,6 +152,7 @@ pub use registry::__oxideav_entry;
 pub use registry::{register, register_codecs, register_containers};
 pub use rgb::{to_rgb, RgbImage16};
 pub use sequence::{Movie, Sample, SampleEntry, Track};
+pub use vvcc::{CompactVvcConfig, VvcConfig, VvcPtlRecord};
 pub use writer::{HeifWriter, SequenceAlphaTrack, SequenceWriter};
 
 /// Parse a HEIF file held in memory. Direct entry point of the

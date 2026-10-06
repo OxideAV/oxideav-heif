@@ -232,6 +232,10 @@ fn track_params(entry: &SampleEntry, layout: HeifPixelFormat) -> Result<CodecPar
             crate::decode::CODEC_ID_AVC,
             entry.avcc.as_ref().map(|a| a.raw.clone()),
         ),
+        b"vvc1" | b"vvi1" => (
+            crate::decode::CODEC_ID_VVC,
+            entry.vvcc.as_ref().map(|v| v.to_bytes()),
+        ),
         other => {
             return Err(HeifError::unsupported(format!(
                 "sample entry type {}",

@@ -6,7 +6,7 @@ rust-version = "1.80"
 license = "MIT"
 repository = "https://github.com/OxideAV/oxideav-heif"
 authors = ["Mark Karpeles"]
-description = "Pure-Rust HEIF / HEIC / MIAF image container (ISO/IEC 23008-12, 23000-22) for oxideav — items, derivations (grid / overlay / identity), auxiliaries, properties, sequences; HEVC and AV1 items decoded through the oxideav registry"
+description = "Pure-Rust HEIF / HEIC / MIAF image container (ISO/IEC 23008-12, 23000-22) for oxideav — items, derivations (grid / overlay / identity), auxiliaries, properties, sequences; HEVC, AV1, AVC and VVC items decoded through the oxideav codec crates"
 
 readme = "README.md"
 homepage = "https://github.com/OxideAV/oxideav-heif"
@@ -28,6 +28,10 @@ oxideav-core = { version = "0.1", optional = true }
 oxideav-h265 = { version = ">=0.0.13, <0.1", optional = true }
 oxideav-h264 = { version = "0.1", optional = true }
 oxideav-av1 = { version = "0.1.19", optional = true }
+# VVC items (HEIF Annex L) decode / encode through the workspace's own
+# VVC crate; its registry factory is a parser-only placeholder on the
+# 0.0 line, so `vvcdec` drives `stream::StreamDecoder` directly.
+oxideav-h266 = { version = ">=0.0.9, <0.1", optional = true }
 # Inflate for deflate-compressed metadata items (`dExf`, deflated XMP;
 # HEIF Amd 2:2026 A.2.1 / O.4.3). Optional: `deflate` feature.
 compcol = { version = "0.6", default-features = false, features = ["deflate"], optional = true }
@@ -40,7 +44,13 @@ compcol = { version = "0.6", default-features = false, features = ["zlib"] }
 [features]
 default = ["registry", "deflate"]
 deflate = ["dep:compcol"]
-registry = ["dep:oxideav-core", "dep:oxideav-h265", "dep:oxideav-h264", "dep:oxideav-av1"]
+registry = [
+    "dep:oxideav-core",
+    "dep:oxideav-h265",
+    "dep:oxideav-h264",
+    "dep:oxideav-av1",
+    "dep:oxideav-h266",
+]
 
 [[example]]
 name = "heifdump"
