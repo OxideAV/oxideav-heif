@@ -821,18 +821,22 @@ impl SpsHead {
     /// window applied at the chroma format's `SubWidthC` /
     /// `SubHeightC`).
     pub fn cropped_size(&self) -> (u32, u32) {
-        let (sw, sh) = match self.chroma_format_idc {
+        let (sw, sh): (u32, u32) = match self.chroma_format_idc {
             1 => (2, 2),
             2 => (2, 1),
             _ => (1, 1),
         };
         match self.conformance_window {
+            // Hostile ue(v) offsets may be anything up to 2^32 - 2:
+            // saturate the whole derivation (a conformant window is a
+            // few samples; a non-conformant one yields a 1×1 picture
+            // rather than a panic).
             Some((l, r, t, b)) => (
                 self.pic_width
-                    .saturating_sub(sw * l.saturating_add(r))
+                    .saturating_sub(sw.saturating_mul(l.saturating_add(r)))
                     .max(1),
                 self.pic_height
-                    .saturating_sub(sh * t.saturating_add(b))
+                    .saturating_sub(sh.saturating_mul(t.saturating_add(b)))
                     .max(1),
             ),
             None => (self.pic_width, self.pic_height),
@@ -1303,6 +1307,15 @@ pub(crate) mod tests {
         assert_eq!(opi_ols_idx(&opi), Some(1));
         assert!(access_unit_annex_b(&c, &[], None).is_ok());
         assert!(access_unit_annex_b(&c, &[0, 0], None).is_err());
+    }
+
+    #[test]
+    fn hostile_conformance_window_saturates() {
+        let mut h = SpsHead::parse_nal(&SPS).unwrap();
+        h.conformance_window = Some((u32::MAX - 1, u32::MAX - 1, 7, u32::MAX / 2));
+        assert_eq!(h.cropped_size(), (1, 1));
+        h.conformance_window = Some((1, 1, 0, 0));
+        assert_eq!(h.cropped_size(), (4, 8));
     }
 
     #[test]
