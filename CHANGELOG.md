@@ -30,6 +30,14 @@ All notable changes to this project will be documented in this file.
   byte-exact in the black-box AVC decoder; `heif-info` / `sips` open
   the files.
 
+### Changed
+
+- Conformance matrix refreshed (r474, same machine): every r464 cell
+  unchanged; the writer direction gains this crate's AVC and VVC items
+  (`heif-info` opens them, Apple ImageIO renders the AVC items, the
+  other readers have no decoder for those item types here — reported,
+  not judged).
+
 ### Fixed
 
 - `fuzz/Cargo.lock` is no longer tracked (and is ignored): the nightly

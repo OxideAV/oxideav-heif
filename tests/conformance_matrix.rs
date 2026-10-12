@@ -1050,6 +1050,26 @@ fn writer_shapes() -> Vec<(String, &'static str, HeifFrame, EncodeOptions)> {
             av1(Some(60)),
         ));
     }
+    // The other two codecs' writers at the two telling sizes: aligned,
+    // and odd (padding + clap).
+    for (w, h) in [(63, 61), (96, 80)] {
+        v.push((
+            format!("avc {w}×{h}"),
+            "heif",
+            frame_from_source(w, h, 3, 8),
+            EncodeOptions::default()
+                .with_codec(StillCodec::Avc)
+                .with_qp(22),
+        ));
+        v.push((
+            format!("vvc {w}×{h}"),
+            "heif",
+            frame_from_source(w, h, 3, 8),
+            EncodeOptions::default()
+                .with_codec(StillCodec::Vvc)
+                .with_qp(27),
+        ));
+    }
     if twelve_mp() {
         v.push((
             "hevc 4032×3024 grid (12 MP)".into(),
@@ -1499,15 +1519,25 @@ fn conformance_matrix_both_directions() {
         let size_refused = oracle_refused
             .iter()
             .any(|(w, h)| name.contains(&format!("{w}×{h}")));
+        // No third-party decoder on this machine renders `avc1` or
+        // `vvc1` items (libheif without plugins, ImageMagick, ffmpeg's
+        // HEIF demuxer): those rows are measurements — `heif-info` must
+        // still open the file, and any renderer that does decode (Apple
+        // ImageIO on AVC) is reported.
+        let no_third_party_decoder = name.starts_with("avc ") || name.starts_with("vvc ");
         for (r, c) in row {
             if let RCell::Refused(_) = c {
                 assert!(
-                    *r == Reader::Ffmpeg && size_refused,
+                    (*r == Reader::Ffmpeg && size_refused)
+                        || (no_third_party_decoder && *r != Reader::HeifInfo),
                     "{name}: {} {}",
                     r.name(),
                     c.md()
                 );
             }
+        }
+        if no_third_party_decoder {
+            continue;
         }
         // Consensus: at least one rendering reader agrees with our
         // decode within 2 codes (readers' own colour pipelines may
