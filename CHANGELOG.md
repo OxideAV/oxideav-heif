@@ -6,6 +6,33 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Packed `cfen` inputs (HEIF Amd 1:2025 §6.6.2.5.2 `is_packed_flag`,
+  Amd 2:2026 §6.6.2.5.3 regions).** A `cfen` input whose luma plane
+  carries `rows × cols` channel partitions separated by guard bands now
+  composes: `compose::plan_colour_format_enhancement_regions` plans
+  every region (`CfenRegionPlan` / `CfenRegion`, the partition cells cut
+  as `image_width / (num_cols_minus1 + 1)` — the clause's own
+  "(num_cols_minus1+1) × (num_rows_minus1+1) regions" sentence; the
+  printed `/ num_cols_minus1` divides by zero — with the `OrigX` /
+  `EndX` guard-band offsets, a remainder ignored),
+  `composite_colour_format_enhancement` copies the regions,
+  `compose::pack_colour_format_channels` builds a packed picture from
+  channel pictures, `HeifWriter::add_colour_format_enhancement_inputs`
+  writes `CfenInput::Packed` entries, and `layout::predict_output`
+  predicts the result. `packed_channel_id` 0 (unused) and 1
+  (unspecified) are skipped; depth (6), K (7 — the Amd 2 CMYK column,
+  whose selecting `colr` signalling the clause does not name) and
+  reserved values are refused typed. `miaf::check` reports a channel
+  above 1 signalled twice (`HEIF-A1 6.6.2.5.1`) and an unpacked
+  `channel_id` 0 (`HEIF-A2 6.6.2.5.3`). `plan_colour_format_enhancement`
+  keeps its shape (unpacked inputs; packed ones refer to the regions
+  planner). Tests: `tests/tiled.rs`
+  `packed_colour_format_enhancement_round_trips` (4:2:0 / 4:2:2 / 4:4:4
+  / RGB / RGBA / mono+alpha, guard bands, odd sizes with a remainder
+  column, serial and parallel decode) and `_refusals`; the
+  `heif_records` fuzz target plans regions from parsed bodies (every
+  region inside its input), composes them and checks the pack → cut
+  identity.
 - **VVC image items decode (HEIF Annex L).** `vvc1` items are coded
   images: the `vvcC` property (ISO/IEC 14496-15:2024 §11.2.4
   `VvcDecoderConfigurationRecord` as a FullBox) is modelled by

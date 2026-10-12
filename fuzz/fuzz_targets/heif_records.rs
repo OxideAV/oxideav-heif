@@ -98,11 +98,100 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(d) = oxideav_heif::tiled::DataEntryTiledItem::parse(&dref) {
         let _ = d.tile_spans(body, (sel % 7) as u64);
     }
-    // cfen body (Amd 1 §6.6.2.5.2): parse → serialize → parse.
+    // cfen body (Amd 1 §6.6.2.5.2): parse → serialize → parse; then the
+    // Amd 2 §6.6.2.5.3 region planner over input geometry taken from
+    // the tail of the input — every region it plans lies inside its
+    // input's luma plane and the composition of filled pictures of that
+    // geometry returns.
     if let Ok(c) = oxideav_heif::derived::ColourFormatEnhancement::parse(body, sel % 5) {
         let again =
             oxideav_heif::derived::ColourFormatEnhancement::parse(&c.to_bytes(), sel % 5).unwrap();
         assert_eq!(again, c, "cfen must round-trip");
+        let n = c.inputs.len();
+        let tail = &body[body.len().saturating_sub(2 * n)..];
+        let depth = 8 + (sel % 3) as u8 * 2;
+        let geometry: Vec<((u32, u32), u8)> = (0..n)
+            .map(|i| {
+                let w = 1 + tail.get(2 * i).copied().unwrap_or(7) as u32 % 48;
+                let h = 1 + tail.get(2 * i + 1).copied().unwrap_or(5) as u32 % 48;
+                ((w, h), depth)
+            })
+            .collect();
+        let colr = oxideav_heif::props::Colr::Nclx {
+            primaries: 1,
+            transfer: 13,
+            matrix: if sel % 2 == 0 { 0 } else { 6 },
+            full_range: true,
+        };
+        if let Ok(plan) = oxideav_heif::compose::plan_colour_format_enhancement_regions(
+            &c,
+            &geometry,
+            Some(&colr),
+        ) {
+            assert_eq!(plan.regions.len(), n);
+            for (regions, ((w, h), _)) in plan.regions.iter().zip(&geometry) {
+                for r in regions {
+                    assert!(r.width >= 1 && r.height >= 1);
+                    assert!(r.x + r.width <= *w && r.y + r.height <= *h, "region outside its input");
+                }
+            }
+            let inputs: Vec<oxideav_heif::HeifFrame> = geometry
+                .iter()
+                .map(|((w, h), d)| {
+                    oxideav_heif::HeifFrame::filled(
+                        *w,
+                        *h,
+                        oxideav_heif::HeifPixelFormat::new(oxideav_heif::Chroma::Mono, *d, false)
+                            .unwrap(),
+                        1 << (*d - 1),
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let out = oxideav_heif::compose::composite_colour_format_enhancement(
+                &c,
+                &inputs,
+                Some(&colr),
+            )
+            .expect("a planned cfen composes");
+            assert_eq!((out.width, out.height, out.format), (plan.width, plan.height, plan.format));
+        }
+        // Packing channels then cutting them back is the identity.
+        if n >= 1 && !body.is_empty() {
+            let cols = 1 + (body[0] % 4);
+            let rows = 1 + (body[0] >> 4) % 4;
+            let (hg, vg) = (sel as u8 % 4, (sel >> 2) as u8 % 4);
+            let (w, h) = (1 + (sel % 23) as u32, 1 + (sel % 17) as u32);
+            let fmt = oxideav_heif::HeifPixelFormat::new(oxideav_heif::Chroma::Mono, 8, false).unwrap();
+            let cells: Vec<oxideav_heif::HeifFrame> = (0..cols as usize * rows as usize)
+                .map(|i| oxideav_heif::HeifFrame::filled(w, h, fmt, (i * 37 % 256) as u16).unwrap())
+                .collect();
+            let refs: Vec<Option<&oxideav_heif::HeifFrame>> = cells.iter().map(Some).collect();
+            let packed =
+                oxideav_heif::compose::pack_colour_format_channels(&refs, cols, rows, hg, vg).unwrap();
+            assert_eq!(packed.width, cols as u32 * (w + 4 * hg as u32));
+            assert_eq!(packed.height, rows as u32 * (h + 4 * vg as u32));
+            // The first cell as Y, the rest unused: a monochrome output
+            // equal to the first cell.
+            let mut ids = vec![0u8; cols as usize * rows as usize];
+            ids[0] = 2;
+            let cfen = oxideav_heif::derived::ColourFormatEnhancement::new(vec![
+                oxideav_heif::derived::CfenInput::Packed {
+                    cols,
+                    rows,
+                    hor_guard_band_mul2: hg,
+                    ver_guard_band_mul2: vg,
+                    channels: ids,
+                },
+            ]);
+            let out = oxideav_heif::compose::composite_colour_format_enhancement(
+                &cfen,
+                std::slice::from_ref(&packed),
+                Some(&colr),
+            )
+            .unwrap();
+            assert_eq!(out.planes[0].data, cells[0].planes[0].data);
+        }
     }
     // Records on their own.
     if let Ok(m) = GainMapMetadata::parse_tmap_body(body) {

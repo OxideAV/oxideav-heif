@@ -174,20 +174,62 @@ impl HeifWriter {
     /// 1:2025 §6.6.2.5) over `inputs` `(item id, channel_id)` in
     /// reference order; `properties` shall carry `pixi`, `ispe` and an
     /// `nclx` `colr`. Inputs after the first are marked hidden
-    /// (§6.6.2.5.1).
+    /// (§6.6.2.5.1). Packed inputs go through
+    /// [`Self::add_colour_format_enhancement_inputs`].
     pub fn add_colour_format_enhancement(
         &mut self,
         inputs: &[(u32, u8)],
         properties: Vec<(Property, bool)>,
     ) -> Result<u32> {
+        let inputs: Vec<(u32, crate::derived::CfenInput)> = inputs
+            .iter()
+            .map(|(id, c)| (*id, crate::derived::CfenInput::Channel(*c)))
+            .collect();
+        self.add_colour_format_enhancement_inputs(&inputs, properties)
+    }
+
+    /// Add a `cfen` item over `inputs` `(item id, channel entry)` in
+    /// reference order — an unpacked channel or a packed layout
+    /// (`CfenInput::Packed`, the picture cut per Amd 2:2026 §6.6.2.5.3;
+    /// [`crate::compose::pack_colour_format_channels`] builds such a
+    /// picture). `properties` shall carry `pixi`, `ispe` and an `nclx`
+    /// `colr`; inputs after the first are marked hidden.
+    pub fn add_colour_format_enhancement_inputs(
+        &mut self,
+        inputs: &[(u32, crate::derived::CfenInput)],
+        properties: Vec<(Property, bool)>,
+    ) -> Result<u32> {
         if inputs.is_empty() {
             return Err(HeifError::invalid("cfen: at least one input"));
         }
+        for (_, e) in inputs {
+            if let crate::derived::CfenInput::Packed {
+                cols,
+                rows,
+                hor_guard_band_mul2,
+                ver_guard_band_mul2,
+                channels,
+            } = e
+            {
+                if !(1..=8).contains(cols)
+                    || !(1..=8).contains(rows)
+                    || *hor_guard_band_mul2 > 31
+                    || *ver_guard_band_mul2 > 31
+                {
+                    return Err(HeifError::invalid(
+                        "cfen: packed layout needs 1..=8 columns / rows and guard bands below 32",
+                    ));
+                }
+                if channels.len() != *cols as usize * *rows as usize {
+                    return Err(HeifError::invalid(format!(
+                        "cfen: {} packed_channel_id values for a {cols}x{rows} layout",
+                        channels.len()
+                    )));
+                }
+            }
+        }
         let body = crate::derived::ColourFormatEnhancement {
-            inputs: inputs
-                .iter()
-                .map(|(_, c)| crate::derived::CfenInput::Channel(*c))
-                .collect(),
+            inputs: inputs.iter().map(|(_, e)| e.clone()).collect(),
         };
         let id = self.alloc_id();
         self.items.push(WriterItem {

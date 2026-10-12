@@ -157,12 +157,12 @@ pub fn predict_output(node: &ImageNode) -> Result<(HeifPixelFormat, (u32, u32))>
                 let (f, size) = predict_output(i)?;
                 geometry.push((size, f.bit_depth));
             }
-            let (f, size, _) = crate::compose::plan_colour_format_enhancement(
+            let plan = crate::compose::plan_colour_format_enhancement_regions(
                 c,
                 &geometry,
                 node.properties.nclx(),
             )?;
-            (f, size)
+            (plan.format, (plan.width, plan.height))
         }
         ImageKind::Tiled(t) => {
             // The tiles' layout comes from their tilC-associated decoder

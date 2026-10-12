@@ -841,8 +841,80 @@ pub fn composite_overlay(
 }
 
 /// A planned `cfen` composition: the output layout, its size, and per
-/// input the plane its luma becomes (`None`: ignored).
+/// input the plane its luma becomes (`None`: ignored). The unpacked
+/// shape of [`CfenRegionPlan`]; kept for callers of
+/// [`plan_colour_format_enhancement`].
 pub type CfenPlan = (HeifPixelFormat, (u32, u32), Vec<Option<usize>>);
+
+/// One channel region of a `cfen` input (HEIF Amd 1:2025 §6.6.2.5.3 as
+/// amended by Amd 2:2026): the rectangle of the input's luma plane it
+/// occupies and the output plane it feeds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CfenRegion {
+    /// Left luma column of the region in the input (`OrigX`).
+    pub x: u32,
+    /// Top luma row of the region in the input (`OrigY`).
+    pub y: u32,
+    /// Region width in luma samples (`EndX - OrigX + 1`).
+    pub width: u32,
+    /// Region height in luma samples.
+    pub height: u32,
+    /// Output plane index the region's samples become; `None` for an
+    /// unused (`packed_channel_id` 0) or unspecified (1) region, whose
+    /// samples are ignored.
+    pub plane: Option<usize>,
+}
+
+impl CfenRegion {
+    /// Every field as a positional argument, in declaration order.
+    pub fn new(x: u32, y: u32, width: u32, height: u32, plane: Option<usize>) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            plane,
+        }
+    }
+}
+
+/// A planned `cfen` composition over packed and unpacked inputs: the
+/// output layout and size, and per input (reference order) the regions
+/// of its luma plane — one for an unpacked input, `rows × cols`
+/// (row-major) for a packed one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CfenRegionPlan {
+    /// The output sample layout.
+    pub format: HeifPixelFormat,
+    /// Output width (the Y / G region's).
+    pub width: u32,
+    /// Output height.
+    pub height: u32,
+    /// Per input, its regions.
+    pub regions: Vec<Vec<CfenRegion>>,
+}
+
+impl CfenRegionPlan {
+    /// Every field as a positional argument, in declaration order.
+    pub fn new(
+        format: HeifPixelFormat,
+        width: u32,
+        height: u32,
+        regions: Vec<Vec<CfenRegion>>,
+    ) -> Self {
+        Self {
+            format,
+            width,
+            height,
+            regions,
+        }
+    }
+}
+
+/// A region's role with its `(x, y, width, height)` in the input.
+type RoleRect = (CfenRole, (u32, u32, u32, u32));
 
 /// The role of a `cfen` channel in this crate's plane model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -852,25 +924,114 @@ enum CfenRole {
     Ignored,
 }
 
-/// Plan a `cfen` composition (HEIF Amd 1:2025 §6.6.2.5): for every input
-/// (its luma plane `(width, height)` and depth), where that plane goes.
-/// Returns the output layout and, per input, `Some(plane index)` (the
-/// alpha plane index for channel 5) or `None` (unspecified, ignored).
+/// Table 2 (Amd 1, as amended by Amd 2:2026): the role of `channel_id`
+/// / `packed_channel_id` `c` under the output `colr`. With
+/// `matrix_coefficients = 0` (RGB) 2 / 3 / 4 are R / G / B — this
+/// crate's planes G, B, R, so plane 2 / 0 / 1 — otherwise Y / Cb / Cr.
+/// Alpha (5) is an alpha plane. `packed` selects the wording of the
+/// refusals and admits 0 (an unused packed partition).
+fn cfen_role(c: u8, rgb: bool, i: usize, packed: bool) -> Result<CfenRole> {
+    let what = if packed {
+        "packed_channel_id"
+    } else {
+        "channel_id"
+    };
+    Ok(match c {
+        0 if packed => CfenRole::Ignored,
+        0 => {
+            return Err(HeifError::invalid(format!(
+                "cfen input {i}: channel_id 0 (shall not be 0)"
+            )))
+        }
+        1 => CfenRole::Ignored,
+        2..=4 => CfenRole::Plane(match (rgb, c) {
+            (true, 2) => 2,
+            (true, 3) => 0,
+            (true, _) => 1,
+            (false, c) => (c - 2) as usize,
+        }),
+        5 => CfenRole::Alpha,
+        6 => {
+            return Err(HeifError::unsupported(format!(
+                "cfen input {i}: {what} 6 (depth) has no plane in the output picture"
+            )))
+        }
+        7 => {
+            return Err(HeifError::unsupported(format!(
+                "cfen input {i}: {what} 7 (K) — Amd 2 Table 2's CMYK column names no colr signalling that selects it (nclx has no CMYK matrix)"
+            )))
+        }
+        c => {
+            return Err(HeifError::unsupported(format!(
+                "cfen input {i}: {what} {c} (reserved)"
+            )))
+        }
+    })
+}
+
+/// The partition of a packed input's luma plane (Amd 2:2026 §6.6.2.5.3):
+/// `cols × rows` cells, each region the cell less a guard band of
+/// `2 × *_guard_band_mul2` samples on every side. Returns the cell size
+/// `(RegionWidthInLumaSamples, RegionHeightInLumaSamples)` and the
+/// region size inside a cell.
 ///
-/// Table 2 (as amended by Amd 2:2026) maps `channel_id` through the
-/// output `colr`: with `matrix_coefficients = 0` (RGB) 2 / 3 / 4 are R /
-/// G / B — this crate's planes G, B, R, so plane 2 / 0 / 1 — otherwise Y
-/// / Cb / Cr. Alpha (5) is an alpha plane at the output size. Depth (6),
-/// K (7) and packed inputs are refused; `channel_id` 0 is refused (Amd
-/// 2: "shall not be equal to 0"). The chroma layout follows the Cb / Cr
-/// plane sizes relative to the luma (equal: 4:4:4, half width: 4:2:2,
-/// half both: 4:2:0); without chroma the output is monochrome. Every
-/// input shall have one depth.
-pub fn plan_colour_format_enhancement(
+/// The printed formula reads `image_width / num_cols_minus1`, which
+/// divides by zero for one column and places every further region past
+/// the picture; a partition of the picture "into (num_cols_minus1+1) ×
+/// (num_rows_minus1+1) regions" (the sentence introducing the formula)
+/// has cells of `image_width / (num_cols_minus1 + 1)`, the reading used
+/// here (integer division: a remainder is outside every region and
+/// ignored, as the clause's last sentence allows).
+fn cfen_packed_cells(
+    (iw, ih): (u32, u32),
+    cols: u8,
+    rows: u8,
+    hor_guard_band_mul2: u8,
+    ver_guard_band_mul2: u8,
+    i: usize,
+) -> Result<((u32, u32), (u32, u32))> {
+    if cols == 0 || rows == 0 {
+        return Err(HeifError::invalid(format!(
+            "cfen input {i}: packed layout with zero columns or rows"
+        )));
+    }
+    let cell_w = iw / cols as u32;
+    let cell_h = ih / rows as u32;
+    let hg = hor_guard_band_mul2 as u32 * 2;
+    let vg = ver_guard_band_mul2 as u32 * 2;
+    // OrigX = k·W + hg, EndX = (k+1)·W − (hg + 1): the region spans
+    // W − 2·hg samples and must be at least one.
+    let rw = cell_w.checked_sub(2 * hg).filter(|w| *w > 0);
+    let rh = cell_h.checked_sub(2 * vg).filter(|h| *h > 0);
+    match (rw, rh) {
+        (Some(rw), Some(rh)) => Ok(((cell_w, cell_h), (rw, rh))),
+        _ => Err(HeifError::invalid(format!(
+            "cfen input {i}: {iw}x{ih} luma partitioned {cols}x{rows} with guard bands {hg}/{vg} leaves no region samples"
+        ))),
+    }
+}
+
+/// Plan a `cfen` composition (HEIF Amd 1:2025 §6.6.2.5, Amd 2:2026
+/// region derivation) for inputs given as their luma plane `(width,
+/// height)` and depth: the output layout and, per input, the regions of
+/// its luma plane and the output plane each feeds.
+///
+/// Table 2 (as amended) maps a channel through the output `colr` (see
+/// [`CfenRegion`]): Y / Cb / Cr, or R / G / B under an identity matrix;
+/// alpha (5) must be at the output size. Depth (6) has no plane here,
+/// K (7) waits on the signalling that selects the CMYK column, and
+/// reserved values are refused. A `channel_id` of 0 is refused (Amd 2:
+/// "shall not be equal to 0"); a `packed_channel_id` of 0 marks an
+/// unused partition. Channels above 1 shall not repeat across the
+/// inputs. The chroma layout follows the Cb / Cr region sizes against
+/// the luma's (equal: 4:4:4, half width: 4:2:2, half both: 4:2:0);
+/// without chroma the output is monochrome. Every input shall have one
+/// depth. A packed input is cut per [`cfen_packed_cells`].
+pub fn plan_colour_format_enhancement_regions(
     cfen: &crate::derived::ColourFormatEnhancement,
     inputs: &[((u32, u32), u8)],
     colr: Option<&Colr>,
-) -> Result<CfenPlan> {
+) -> Result<CfenRegionPlan> {
     use crate::derived::CfenInput;
     if cfen.inputs.len() != inputs.len() {
         return Err(HeifError::invalid(format!(
@@ -880,71 +1041,100 @@ pub fn plan_colour_format_enhancement(
         )));
     }
     let rgb = matches!(colr, Some(Colr::Nclx { matrix: 0, .. }));
-    let mut roles = Vec::with_capacity(inputs.len());
-    for (i, e) in cfen.inputs.iter().enumerate() {
-        let role = match e {
-            CfenInput::Packed { .. } => {
-                return Err(HeifError::unsupported(format!(
-                    "cfen input {i}: packed channels (the Amd 2 region formula divides by num_cols_minus1 / num_rows_minus1)"
-                )))
-            }
-            CfenInput::Channel(0) => {
-                return Err(HeifError::invalid(format!(
-                    "cfen input {i}: channel_id 0 (shall not be 0)"
-                )))
-            }
-            CfenInput::Channel(1) => CfenRole::Ignored,
-            CfenInput::Channel(c @ 2..=4) => CfenRole::Plane(match (rgb, c) {
-                (true, 2) => 2,
-                (true, 3) => 0,
-                (true, _) => 1,
-                (false, c) => (*c - 2) as usize,
-            }),
-            CfenInput::Channel(5) => CfenRole::Alpha,
+    // Every region with its role, flattened for the uniqueness and
+    // geometry checks, plus the per-input layout.
+    let mut roles: Vec<(CfenRole, (u32, u32))> = Vec::new();
+    let mut per_input: Vec<Vec<RoleRect>> = Vec::with_capacity(inputs.len());
+    for (i, (e, (size, _))) in cfen.inputs.iter().zip(inputs).enumerate() {
+        let mut regions = Vec::new();
+        match e {
             CfenInput::Channel(c) => {
-                return Err(HeifError::unsupported(format!(
-                    "cfen input {i}: channel_id {c} (depth / K / reserved)"
-                )))
+                regions.push((cfen_role(*c, rgb, i, false)?, (0, 0, size.0, size.1)));
             }
-        };
-        if let CfenRole::Plane(p) = role {
-            if roles.contains(&CfenRole::Plane(p)) {
-                return Err(HeifError::invalid(format!(
-                    "cfen input {i}: duplicate channel (shall not repeat channel_id > 1)"
-                )));
+            CfenInput::Packed {
+                cols,
+                rows,
+                hor_guard_band_mul2,
+                ver_guard_band_mul2,
+                channels,
+            } => {
+                let n = *cols as usize * *rows as usize;
+                if channels.len() != n {
+                    return Err(HeifError::invalid(format!(
+                        "cfen input {i}: {} packed_channel_id values for a {cols}x{rows} layout",
+                        channels.len()
+                    )));
+                }
+                let ((cw, ch), (rw, rh)) = cfen_packed_cells(
+                    *size,
+                    *cols,
+                    *rows,
+                    *hor_guard_band_mul2,
+                    *ver_guard_band_mul2,
+                    i,
+                )?;
+                let hg = *hor_guard_band_mul2 as u32 * 2;
+                let vg = *ver_guard_band_mul2 as u32 * 2;
+                for j in 0..*rows as u32 {
+                    for k in 0..*cols as u32 {
+                        let c = channels[(j * *cols as u32 + k) as usize];
+                        regions.push((
+                            cfen_role(c, rgb, i, true)?,
+                            (k * cw + hg, j * ch + vg, rw, rh),
+                        ));
+                    }
+                }
             }
         }
-        if role == CfenRole::Alpha && roles.contains(&CfenRole::Alpha) {
-            return Err(HeifError::invalid(format!(
-                "cfen input {i}: duplicate alpha"
-            )));
+        for (role, (_, _, w, h)) in &regions {
+            match role {
+                CfenRole::Plane(p) => {
+                    if roles.iter().any(|(r, _)| *r == CfenRole::Plane(*p)) {
+                        return Err(HeifError::invalid(format!(
+                            "cfen input {i}: duplicate channel (shall not repeat channel_id > 1)"
+                        )));
+                    }
+                }
+                CfenRole::Alpha => {
+                    if roles.iter().any(|(r, _)| *r == CfenRole::Alpha) {
+                        return Err(HeifError::invalid(format!(
+                            "cfen input {i}: duplicate alpha"
+                        )));
+                    }
+                }
+                CfenRole::Ignored => {}
+            }
+            roles.push((*role, (*w, *h)));
         }
-        roles.push(role);
+        per_input.push(regions);
     }
     let depth = inputs[0].1;
     if inputs.iter().any(|(_, d)| *d != depth) {
         return Err(HeifError::unsupported("cfen: inputs of different depths"));
     }
-    let find = |p: usize| roles.iter().position(|r| *r == CfenRole::Plane(p));
+    let find = |p: usize| {
+        roles
+            .iter()
+            .find(|(r, _)| *r == CfenRole::Plane(p))
+            .map(|(_, s)| *s)
+    };
     // Plane 0 is Y (or G), planes 1 / 2 Cb / Cr (or B / R).
-    let (c1, c2) = (1, 2);
-    let y = find(0).ok_or_else(|| {
+    let (w, h) = find(0).ok_or_else(|| {
         HeifError::unsupported(if rgb {
             "cfen: no G channel"
         } else {
             "cfen: no luma channel"
         })
     })?;
-    let (w, h) = inputs[y].0;
-    let chroma = match (find(c1), find(c2)) {
+    let chroma = match (find(1), find(2)) {
         (None, None) => Chroma::Mono,
         (Some(a), Some(b)) => {
-            let (aw, ah) = inputs[a].0;
-            if inputs[b].0 != (aw, ah) {
+            if a != b {
                 return Err(HeifError::unsupported(
                     "cfen: chroma planes of different sizes",
                 ));
             }
+            let (aw, ah) = a;
             if (aw, ah) == (w, h) {
                 Chroma::Yuv444
             } else if (aw, ah) == (w.div_ceil(2), h) && !rgb {
@@ -963,31 +1153,72 @@ pub fn plan_colour_format_enhancement(
             ))
         }
     };
-    let alpha = roles.iter().position(|r| *r == CfenRole::Alpha);
-    if let Some(a) = alpha {
-        if inputs[a].0 != (w, h) {
+    let alpha = roles.iter().find(|(r, _)| *r == CfenRole::Alpha);
+    if let Some((_, size)) = alpha {
+        if *size != (w, h) {
             return Err(HeifError::unsupported(
                 "cfen: alpha plane not at the output size",
             ));
         }
     }
-    let fmt = HeifPixelFormat::new(chroma, depth, alpha.is_some())?;
-    let alpha_index = fmt.alpha_plane();
-    let out = roles
-        .iter()
-        .map(|r| match r {
-            CfenRole::Plane(p) => Some(*p),
-            CfenRole::Alpha => alpha_index,
-            CfenRole::Ignored => None,
+    let format = HeifPixelFormat::new(chroma, depth, alpha.is_some())?;
+    let alpha_index = format.alpha_plane();
+    let regions = per_input
+        .into_iter()
+        .map(|regions| {
+            regions
+                .into_iter()
+                .map(|(role, (x, y, w, h))| CfenRegion {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                    plane: match role {
+                        CfenRole::Plane(p) => Some(p),
+                        CfenRole::Alpha => alpha_index,
+                        CfenRole::Ignored => None,
+                    },
+                })
+                .collect()
         })
         .collect();
-    Ok((fmt, (w, h), out))
+    Ok(CfenRegionPlan {
+        format,
+        width: w,
+        height: h,
+        regions,
+    })
+}
+
+/// [`plan_colour_format_enhancement_regions`] for unpacked inputs only:
+/// per input, `Some(plane index)` (the alpha plane index for channel 5)
+/// or `None` (unspecified, ignored). A packed input is refused here —
+/// the regions planner carries its layout.
+pub fn plan_colour_format_enhancement(
+    cfen: &crate::derived::ColourFormatEnhancement,
+    inputs: &[((u32, u32), u8)],
+    colr: Option<&Colr>,
+) -> Result<CfenPlan> {
+    let plan = plan_colour_format_enhancement_regions(cfen, inputs, colr)?;
+    let mut out = Vec::with_capacity(plan.regions.len());
+    for (i, regions) in plan.regions.iter().enumerate() {
+        match regions.as_slice() {
+            [one] => out.push(one.plane),
+            _ => {
+                return Err(HeifError::unsupported(format!(
+                    "cfen input {i}: packed channels (plan_colour_format_enhancement_regions carries the layout)"
+                )))
+            }
+        }
+    }
+    Ok((plan.format, (plan.width, plan.height), out))
 }
 
 /// Compose a `cfen` derived image (HEIF Amd 1:2025 §6.6.2.5) from its
-/// inputs' output images: each input's luma plane becomes the plane
-/// [`plan_colour_format_enhancement`] assigns it (the inputs' chroma is
-/// ignored, §6.6.2.5.1).
+/// inputs' output images: every region of every input's luma plane
+/// becomes the output plane [`plan_colour_format_enhancement_regions`]
+/// assigns it (the inputs' chroma, guard bands, unused partitions and
+/// any remainder of the partition are ignored, §6.6.2.5.3).
 pub fn composite_colour_format_enhancement(
     cfen: &crate::derived::ColourFormatEnhancement,
     inputs: &[HeifFrame],
@@ -997,14 +1228,100 @@ pub fn composite_colour_format_enhancement(
         .iter()
         .map(|f| ((f.width, f.height), f.format.bit_depth))
         .collect();
-    let (fmt, (w, h), targets) = plan_colour_format_enhancement(cfen, &geometry, colr)?;
-    let mut out = HeifFrame::zeroed(w, h, fmt)?;
-    for (f, target) in inputs.iter().zip(targets) {
-        let Some(p) = target else { continue };
-        let t = f.tight();
-        out.planes[p] = t.planes[0].clone();
+    let plan = plan_colour_format_enhancement_regions(cfen, &geometry, colr)?;
+    let mut out = HeifFrame::zeroed(plan.width, plan.height, plan.format)?;
+    let bps = plan.format.bytes_per_sample();
+    for (f, regions) in inputs.iter().zip(&plan.regions) {
+        for r in regions {
+            let Some(p) = r.plane else { continue };
+            let (pw, ph) = out.plane_dims(p);
+            if (pw, ph) != (r.width, r.height) {
+                return Err(HeifError::invalid(format!(
+                    "cfen: region {}x{} for a {pw}x{ph} output plane",
+                    r.width, r.height
+                )));
+            }
+            let src = &f.planes[0];
+            let row_bytes = r.width as usize * bps;
+            let dst_stride = out.planes[p].stride;
+            for y in 0..r.height as usize {
+                let s = (r.y as usize + y) * src.stride + r.x as usize * bps;
+                let d = y * dst_stride;
+                out.planes[p].data[d..d + row_bytes].copy_from_slice(&src.data[s..s + row_bytes]);
+            }
+        }
     }
     out.validate()?;
+    Ok(out)
+}
+
+/// Pack channel pictures into one luma plane the way a packed `cfen`
+/// input is cut (Amd 2:2026 §6.6.2.5.3, see
+/// [`plan_colour_format_enhancement_regions`]): `cells` are the
+/// `rows × cols` partitions in row-major order (`None`: an unused
+/// partition, `packed_channel_id` 0), every present cell a picture
+/// whose plane 0 is the channel — all of one size and depth. The result
+/// is a monochrome picture of `cols × (width + 4·hor_guard_band_mul2)`
+/// by `rows × (height + 4·ver_guard_band_mul2)` luma samples (a guard
+/// band of `2 × *_guard_band_mul2` on every side of every cell), each
+/// channel at its region origin, guard bands and unused partitions
+/// filled with mid-grey.
+pub fn pack_colour_format_channels(
+    cells: &[Option<&HeifFrame>],
+    cols: u8,
+    rows: u8,
+    hor_guard_band_mul2: u8,
+    ver_guard_band_mul2: u8,
+) -> Result<HeifFrame> {
+    if cols == 0 || rows == 0 || cells.len() != cols as usize * rows as usize {
+        return Err(HeifError::invalid(format!(
+            "cfen packing: {} cells for a {cols}x{rows} layout",
+            cells.len()
+        )));
+    }
+    let first = cells
+        .iter()
+        .flatten()
+        .next()
+        .ok_or_else(|| HeifError::invalid("cfen packing: no channel to pack"))?;
+    let (w, h, depth) = (first.width, first.height, first.format.bit_depth);
+    if cells
+        .iter()
+        .flatten()
+        .any(|f| (f.width, f.height, f.format.bit_depth) != (w, h, depth))
+    {
+        return Err(HeifError::invalid(
+            "cfen packing: channels of different sizes or depths",
+        ));
+    }
+    let hg = hor_guard_band_mul2 as u32 * 2;
+    let vg = ver_guard_band_mul2 as u32 * 2;
+    let cell_w = w
+        .checked_add(2 * hg)
+        .ok_or_else(|| HeifError::invalid("cfen packing: cell width overflow"))?;
+    let cell_h = h
+        .checked_add(2 * vg)
+        .ok_or_else(|| HeifError::invalid("cfen packing: cell height overflow"))?;
+    let pw = cell_w
+        .checked_mul(cols as u32)
+        .ok_or_else(|| HeifError::invalid("cfen packing: picture width overflow"))?;
+    let ph = cell_h
+        .checked_mul(rows as u32)
+        .ok_or_else(|| HeifError::invalid("cfen packing: picture height overflow"))?;
+    let format = HeifPixelFormat::new(Chroma::Mono, depth, false)?;
+    let mut out = HeifFrame::filled(pw, ph, format, 1 << (depth - 1))?;
+    let bps = format.bytes_per_sample();
+    let row_bytes = w as usize * bps;
+    for (n, cell) in cells.iter().enumerate() {
+        let Some(f) = cell else { continue };
+        let (j, k) = (n as u32 / cols as u32, n as u32 % cols as u32);
+        let (ox, oy) = (k * cell_w + hg, j * cell_h + vg);
+        let dst_stride = out.planes[0].stride;
+        for y in 0..h {
+            let d = (oy + y) as usize * dst_stride + ox as usize * bps;
+            out.planes[0].data[d..d + row_bytes].copy_from_slice(f.row(0, y));
+        }
+    }
     Ok(out)
 }
 

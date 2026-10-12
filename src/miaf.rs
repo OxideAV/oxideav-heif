@@ -1138,10 +1138,38 @@ fn walk(rep: &mut MiafReport, node: &ImageNode, profile: MiafProfile) {
             }
         }
         ImageKind::Coded(_) | ImageKind::ToneMap(_) => {}
-        ImageKind::ColourFormatEnhancement(_) => {
+        ImageKind::ColourFormatEnhancement(c) => {
             // HEIF Amd 1 §6.6.2.5.1: the cfen item carries pixi + ispe +
             // an nclx colr; every input pixi + ispe; the inputs after the
-            // first shall be hidden.
+            // first shall be hidden; no channel above 1 twice. Amd 2
+            // §6.6.2.5.3: an unpacked channel_id shall not be 0.
+            let mut seen: Vec<u8> = Vec::new();
+            for e in &c.inputs {
+                let ids: &[u8] = match e {
+                    crate::derived::CfenInput::Channel(ch) => {
+                        if *ch == 0 {
+                            rep.push(
+                                "HEIF-A2 6.6.2.5.3",
+                                Some(id),
+                                "cfen channel_id 0 (shall not be Unused)",
+                            );
+                        }
+                        std::slice::from_ref(ch)
+                    }
+                    crate::derived::CfenInput::Packed { channels, .. } => channels,
+                };
+                for ch in ids.iter().filter(|ch| **ch > 1) {
+                    if seen.contains(ch) {
+                        rep.push(
+                            "HEIF-A1 6.6.2.5.1",
+                            Some(id),
+                            format!("cfen channel {ch} signalled twice"),
+                        );
+                    } else {
+                        seen.push(*ch);
+                    }
+                }
+            }
             if node.properties.pixi().is_none()
                 || node.properties.ispe().is_none()
                 || node.properties.nclx().is_none()

@@ -379,3 +379,401 @@ fn colour_format_enhancement_composes_luma_planes() {
         assert_eq!((fmt.chroma, size), (chroma, (w, h)), "{label}: prediction");
     }
 }
+
+/// Code a monochrome picture as an `hvc1` item (padded to 16, cropped
+/// back with `clap`) and return its item id.
+fn add_mono_hevc_item(writer: &mut HeifWriter, p: &HeifFrame) -> u32 {
+    use oxideav_heif::encode::to_yuv420_8;
+    let pic = encode_hevc_picture(
+        &to_yuv420_8(&pad_frame(p, p.width.div_ceil(16) * 16, p.height.div_ceil(16) * 16).unwrap())
+            .unwrap(),
+        "pcm",
+        0,
+    )
+    .unwrap();
+    let mut props = vec![
+        (pic.config.clone(), true),
+        (
+            Property::Ispe(oxideav_heif::props::Ispe::new(
+                pic.coded_width,
+                pic.coded_height,
+            )),
+            false,
+        ),
+        (Property::Pixi(Pixi::new(vec![8])), false),
+    ];
+    if (pic.coded_width, pic.coded_height) != (p.width, p.height) {
+        props.push((
+            Property::Clap(oxideav_heif::props::Clap::for_rect(
+                pic.coded_width,
+                pic.coded_height,
+                oxideav_heif::props::CropRect {
+                    x: 0,
+                    y: 0,
+                    width: p.width,
+                    height: p.height,
+                },
+            )),
+            true,
+        ));
+    }
+    writer.add_coded_item(*b"hvc1", pic.data, props)
+}
+
+/// A seeded monochrome 8-bit picture.
+fn mono_picture(w: u32, h: u32, seed: u32) -> HeifFrame {
+    let mut f =
+        HeifFrame::zeroed(w, h, HeifPixelFormat::new(Chroma::Mono, 8, false).unwrap()).unwrap();
+    for y in 0..h {
+        for x in 0..w {
+            f.set_sample(0, x, y, ((x * seed + y * 3 + seed * 17) % 256) as u16);
+        }
+    }
+    f
+}
+
+/// Packed `cfen` inputs (Amd 1 §6.6.2.5.2 `is_packed_flag`, Amd 2
+/// §6.6.2.5.3 regions): channels packed side by side / stacked in one
+/// coded item's luma plane, with and without guard bands, with an
+/// unused partition and a remainder column, in every chroma layout and
+/// as RGB / RGBA under an identity matrix — written by `HeifWriter` +
+/// `pack_colour_format_channels`, read back exactly (serial and
+/// parallel), predicted by `predict_output`, clean under `check`.
+#[test]
+fn packed_colour_format_enhancement_round_trips() {
+    use oxideav_heif::compose::pack_colour_format_channels;
+    use oxideav_heif::derived::CfenInput;
+    let packed = |cols: u8, rows: u8, hg: u8, vg: u8, channels: &[u8]| CfenInput::Packed {
+        cols,
+        rows,
+        hor_guard_band_mul2: hg,
+        ver_guard_band_mul2: vg,
+        channels: channels.to_vec(),
+    };
+    // (label, w, h, chroma, matrix, alpha, per input: (channel pictures as
+    // cells, entry)) — cells are indices into the plane list [Y/R, Cb/G,
+    // Cr/B, alpha] or None (unused partition).
+    struct Case {
+        label: &'static str,
+        w: u32,
+        h: u32,
+        chroma: Chroma,
+        matrix: u16,
+        alpha: bool,
+        inputs: Vec<(Vec<Option<usize>>, CfenInput)>,
+        /// Extra columns appended to the packed picture (a remainder the
+        /// partition ignores).
+        remainder: u32,
+    }
+    let cases = vec![
+        Case {
+            label: "420 Y + packed [Cb Cr]",
+            w: 64,
+            h: 48,
+            chroma: Chroma::Yuv420,
+            matrix: 6,
+            alpha: false,
+            inputs: vec![
+                (vec![Some(0)], CfenInput::Channel(2)),
+                (vec![Some(1), Some(2)], packed(2, 1, 0, 0, &[3, 4])),
+            ],
+            remainder: 0,
+        },
+        Case {
+            label: "420 odd size, remainder column, guard bands",
+            w: 33,
+            h: 21,
+            chroma: Chroma::Yuv420,
+            matrix: 1,
+            alpha: false,
+            inputs: vec![
+                (vec![Some(0)], CfenInput::Channel(2)),
+                (vec![Some(1), Some(2)], packed(2, 1, 1, 2, &[3, 4])),
+            ],
+            remainder: 1,
+        },
+        Case {
+            label: "422 Y + packed [Cb; Cr] with guard bands",
+            w: 40,
+            h: 24,
+            chroma: Chroma::Yuv422,
+            matrix: 6,
+            alpha: false,
+            inputs: vec![
+                (vec![Some(0)], CfenInput::Channel(2)),
+                (vec![Some(1), Some(2)], packed(1, 2, 3, 1, &[3, 4])),
+            ],
+            remainder: 0,
+        },
+        Case {
+            label: "444 one packed [Y Cb Cr]",
+            w: 24,
+            h: 20,
+            chroma: Chroma::Yuv444,
+            matrix: 6,
+            alpha: false,
+            inputs: vec![(
+                vec![Some(0), Some(1), Some(2)],
+                packed(3, 1, 0, 0, &[2, 3, 4]),
+            )],
+            remainder: 0,
+        },
+        Case {
+            label: "RGB 2x2 with an unused partition",
+            w: 30,
+            h: 18,
+            chroma: Chroma::Yuv444,
+            matrix: 0,
+            alpha: false,
+            inputs: vec![(
+                vec![Some(0), Some(1), Some(2), None],
+                packed(2, 2, 0, 0, &[2, 3, 4, 0]),
+            )],
+            remainder: 0,
+        },
+        Case {
+            label: "RGBA 2x2 with guard bands",
+            w: 30,
+            h: 18,
+            chroma: Chroma::Yuv444,
+            matrix: 0,
+            alpha: true,
+            inputs: vec![(
+                vec![Some(0), Some(1), Some(2), Some(3)],
+                packed(2, 2, 2, 2, &[2, 3, 4, 5]),
+            )],
+            remainder: 0,
+        },
+        Case {
+            label: "mono alpha packed, luma unpacked, unspecified extra",
+            w: 20,
+            h: 16,
+            chroma: Chroma::Mono,
+            matrix: 6,
+            alpha: true,
+            inputs: vec![
+                (vec![Some(3), None], packed(2, 1, 1, 0, &[5, 1])),
+                (vec![Some(0)], CfenInput::Channel(2)),
+            ],
+            remainder: 0,
+        },
+    ];
+    for c in cases {
+        let (cw, ch) = c.chroma.chroma_dims(c.w, c.h);
+        let planes = [
+            mono_picture(c.w, c.h, 5),
+            mono_picture(cw, ch, 7),
+            mono_picture(cw, ch, 11),
+            mono_picture(c.w, c.h, 13),
+        ];
+        let mut writer = HeifWriter::new();
+        let mut entries = Vec::new();
+        for (cells, entry) in &c.inputs {
+            let picture = match entry {
+                CfenInput::Channel(_) => planes[cells[0].unwrap()].clone(),
+                CfenInput::Packed {
+                    cols,
+                    rows,
+                    hor_guard_band_mul2,
+                    ver_guard_band_mul2,
+                    ..
+                } => {
+                    let refs: Vec<Option<&HeifFrame>> =
+                        cells.iter().map(|i| i.map(|i| &planes[i])).collect();
+                    let p = pack_colour_format_channels(
+                        &refs,
+                        *cols,
+                        *rows,
+                        *hor_guard_band_mul2,
+                        *ver_guard_band_mul2,
+                    )
+                    .unwrap();
+                    if c.remainder > 0 {
+                        pad_frame(&p, p.width + c.remainder, p.height).unwrap()
+                    } else {
+                        p
+                    }
+                }
+                _ => unreachable!(),
+            };
+            let id = add_mono_hevc_item(&mut writer, &picture);
+            entries.push((id, entry.clone()));
+        }
+        let colr = Colr::Nclx {
+            primaries: 1,
+            transfer: 13,
+            matrix: c.matrix,
+            full_range: true,
+        };
+        let n = c.chroma.colour_planes() + usize::from(c.alpha);
+        let cfen = writer
+            .add_colour_format_enhancement_inputs(
+                &entries,
+                vec![
+                    (
+                        Property::Ispe(oxideav_heif::props::Ispe::new(c.w, c.h)),
+                        false,
+                    ),
+                    (Property::Pixi(Pixi::new(vec![8; n])), false),
+                    (Property::Colr(colr.clone()), false),
+                ],
+            )
+            .unwrap();
+        writer.set_primary(cfen);
+        let bytes = writer.write_to_vec().unwrap();
+        let f = HeifFile::parse(&bytes).unwrap();
+        // The body round-trips through the parser.
+        let body = f.item_data_owned(cfen).unwrap();
+        let parsed =
+            oxideav_heif::derived::ColourFormatEnhancement::parse(&body, entries.len()).unwrap();
+        assert_eq!(
+            parsed.inputs,
+            entries.iter().map(|(_, e)| e.clone()).collect::<Vec<_>>(),
+            "{}: body",
+            c.label
+        );
+        let rep = check(&f, MiafProfile::Miaf).unwrap();
+        assert!(
+            rep.violations
+                .iter()
+                .all(|v| !v.clause.starts_with("HEIF-A1 6.6.2.5")),
+            "{}: {:#?}",
+            c.label,
+            rep.violations
+        );
+        let node = oxideav_heif::derived::build_primary_graph(&f).unwrap();
+        let (fmt, size) = oxideav_heif::demux::predict_output(&node).unwrap();
+        assert_eq!(
+            (fmt.chroma, fmt.has_alpha, size),
+            (c.chroma, c.alpha, (c.w, c.h)),
+            "{}: prediction",
+            c.label
+        );
+        for threads in [1usize, 3] {
+            let dec = ItemDecoder::direct()
+                .with_execution_context(&ExecutionContext::with_threads(threads));
+            let img = decode_primary(&f, dec).unwrap();
+            assert_eq!(img.frame.format, fmt, "{}", c.label);
+            let t = img.frame.tight();
+            // Output plane p holds channel: YCbCr — plane p is plane p;
+            // RGB — planes G, B, R are channels [1, 2, 0]; alpha is last.
+            let source_of_plane = |p: usize| -> &HeifFrame {
+                if c.alpha && p == fmt.plane_count() - 1 {
+                    &planes[3]
+                } else if c.matrix == 0 {
+                    &planes[[1usize, 2, 0][p]]
+                } else {
+                    &planes[p]
+                }
+            };
+            for p in 0..fmt.plane_count() {
+                assert_eq!(
+                    t.planes[p].data,
+                    source_of_plane(p).tight().planes[0].data,
+                    "{}: plane {p} ({threads} threads)",
+                    c.label
+                );
+            }
+        }
+    }
+}
+
+/// Packed `cfen` refusals: a repeated channel across inputs, an
+/// unpacked `channel_id` 0, K (7) without the colr signalling that
+/// selects CMYK, guard bands that swallow the cell, and a wrong
+/// `packed_channel_id` count at the writer.
+#[test]
+fn packed_colour_format_enhancement_refusals() {
+    use oxideav_heif::compose::plan_colour_format_enhancement_regions;
+    use oxideav_heif::derived::{CfenInput, ColourFormatEnhancement};
+    let colr = Colr::Nclx {
+        primaries: 1,
+        transfer: 13,
+        matrix: 6,
+        full_range: true,
+    };
+    let packed = |cols: u8, rows: u8, hg: u8, vg: u8, channels: &[u8]| CfenInput::Packed {
+        cols,
+        rows,
+        hor_guard_band_mul2: hg,
+        ver_guard_band_mul2: vg,
+        channels: channels.to_vec(),
+    };
+    let plan = |inputs: Vec<CfenInput>, geometry: &[((u32, u32), u8)]| {
+        plan_colour_format_enhancement_regions(
+            &ColourFormatEnhancement::new(inputs),
+            geometry,
+            Some(&colr),
+        )
+    };
+    let half = ((32, 24), 8u8);
+    let full = ((64, 48), 8u8);
+    // The reference layout plans.
+    let ok = plan(
+        vec![CfenInput::Channel(2), packed(2, 1, 0, 0, &[3, 4])],
+        &[full, ((64, 24), 8)],
+    )
+    .unwrap();
+    assert_eq!(
+        (ok.format.chroma, ok.width, ok.height),
+        (Chroma::Yuv420, 64, 48)
+    );
+    assert_eq!(ok.regions[1].len(), 2);
+    assert_eq!(
+        (
+            ok.regions[1][1].x,
+            ok.regions[1][1].width,
+            ok.regions[1][1].plane
+        ),
+        (32, 32, Some(2))
+    );
+    // Guard bands shrink the regions symmetrically (Amd 2 OrigX / EndX).
+    let g = plan(
+        vec![CfenInput::Channel(2), packed(2, 1, 1, 2, &[3, 4])],
+        &[full, ((72, 32), 8)],
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            g.regions[1][0].x,
+            g.regions[1][0].y,
+            g.regions[1][0].width,
+            g.regions[1][0].height
+        ),
+        (2, 4, 32, 24)
+    );
+    assert_eq!((g.regions[1][1].x, g.regions[1][1].y), (38, 4));
+    let e = plan(
+        vec![CfenInput::Channel(3), packed(2, 1, 0, 0, &[3, 4])],
+        &[half, ((64, 24), 8)],
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("duplicate channel"), "{e}");
+    let e = plan(vec![CfenInput::Channel(0)], &[full]).unwrap_err();
+    assert!(e.to_string().contains("shall not be 0"), "{e}");
+    let e = plan(
+        vec![CfenInput::Channel(2), packed(2, 2, 0, 0, &[3, 4, 7, 0])],
+        &[full, ((128, 96), 8)],
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("CMYK"), "{e}");
+    let e = plan(
+        vec![CfenInput::Channel(2), packed(2, 1, 8, 0, &[3, 4])],
+        &[full, ((64, 24), 8)],
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("no region samples"), "{e}");
+    let e = plan(
+        vec![CfenInput::Channel(2), packed(2, 1, 0, 0, &[3])],
+        &[full, ((64, 24), 8)],
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("packed_channel_id values"), "{e}");
+    let mut w = HeifWriter::new();
+    assert!(w
+        .add_colour_format_enhancement_inputs(&[(1, packed(2, 1, 0, 0, &[3]))], vec![])
+        .is_err());
+    assert!(w
+        .add_colour_format_enhancement_inputs(&[(1, packed(9, 1, 0, 0, &[3; 9]))], vec![])
+        .is_err());
+}
