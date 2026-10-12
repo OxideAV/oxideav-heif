@@ -578,24 +578,21 @@ in r474 (no regressions).
 
 #### Round trip at the production defaults (PNG → file → PNG; PSNR vs the source, 8-bit RGB)
 
+`oxideav convert src.png out.heic` / `out.avif` with no options (the
+real binary, `OXIDEAV_CLI`), the file decoded back by this crate and
+rendered by every reader; the 96×80 rows are bounded by the
+picture's own 4:2:0 chroma (its lossless 4:2:0 coding is ~35 dB). The
+AVIF rows moved with the AV1 crate between r464 (0.1.19) and r474
+(0.1.20): 96×80 763 → 817 bytes at 33.01 → 32.91 dB, 12 MP 28066 →
+28862 bytes at 47.35 → 47.31 dB — the codec's rate point, not this
+container's doing; the HEIC rows are byte-identical.
+
 | File | bytes | this crate | sips | heif-convert | magick | ffmpeg | heif-info |
 |---|---|---|---|---|---|---|---|
 | HEIC 96×80 | 1517 | 33.82 dB | 32.83 dB | 33.82 dB | 33.82 dB | 33.81 dB | opens |
 | AVIF 96×80 | 817 | 32.91 dB | 32.13 dB | 32.92 dB | 32.92 dB | 32.91 dB | opens |
 | HEIC 4032×3024 (12 MP) | 90131 | 47.69 dB | 46.84 dB | 47.69 dB | 47.69 dB | 47.57 dB | opens |
 | AVIF 4032×3024 (12 MP) | 28862 | 47.31 dB | 46.65 dB | 47.30 dB | 47.30 dB | 47.19 dB | opens |
-
-`oxideav convert src.png out.heic` / `out.avif` with no options (the
-real binary, `OXIDEAV_CLI`), the file decoded back by this crate and
-rendered by every reader; the 96×80 rows are bounded by the
-picture's own 4:2:0 chroma (its lossless 4:2:0 coding is ~35 dB).
-
-| File | bytes | this crate | sips | heif-convert | magick | ffmpeg | heif-info |
-|---|---|---|---|---|---|---|---|
-| HEIC 96×80 | 1517 | 33.82 dB | 32.83 dB | 33.82 dB | 33.82 dB | 33.81 dB | opens |
-| AVIF 96×80 | 763 | 33.01 dB | 32.28 dB | 33.01 dB | 33.01 dB | 33.00 dB | opens |
-| HEIC 4032×3024 (12 MP) | 90131 | 47.69 dB | 46.84 dB | 47.69 dB | 47.69 dB | 47.57 dB | opens |
-| AVIF 4032×3024 (12 MP) | 28066 | 47.35 dB | 46.62 dB | 47.34 dB | 47.34 dB | 47.23 dB | opens |
 
 The `av1 4:4:4 10-bit` row is a real 10-bit 4:4:4 item since r464 (a
 16-bit source used to drop to 8-bit 4:2:0 on the AV1 path; Apple
