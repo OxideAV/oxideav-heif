@@ -25,9 +25,11 @@ use oxideav_core::{
 use crate::av1c::Av1Config;
 use crate::derived::GridDescriptor;
 use crate::error::{HeifError, Result};
-use crate::hvcc::{join_length_prefixed, HevcConfig, NalArray, NAL_PPS, NAL_SPS, NAL_VPS};
+use crate::hvcc::{
+    join_length_prefixed, split_length_prefixed, HevcConfig, NalArray, NAL_PPS, NAL_SPS, NAL_VPS,
+};
 use crate::image::{Chroma, HeifFrame, HeifPixelFormat};
-use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_HVC1, ITEM_TYPE_VVC1};
+use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_AVC1, ITEM_TYPE_HVC1, ITEM_TYPE_VVC1};
 use crate::props::{Clap, Colr, CropRect, Ispe, Pixi, Property};
 use crate::writer::HeifWriter;
 
@@ -44,6 +46,12 @@ pub enum StillCodec {
     /// `oxideav-h266`: CABAC intra at `qp`, 8-bit 4:2:0 (the encoder's
     /// line); no lossless mode.
     Vvc,
+    /// AVC (`avc1` items, `avci` brand; HEIF Annex E) through
+    /// `oxideav-h264`'s registry encoder: one IDR picture at `qp`
+    /// (CAVLC Baseline, or CABAC Main with `avc_options`
+    /// `cabac=1`), 8-bit 4:2:0 (the registry encoder's input line); no
+    /// lossless mode.
+    Avc,
 }
 
 /// Encoding options.
@@ -135,6 +143,13 @@ pub struct EncodeOptions {
     /// `slice_per_tile`, `raster_slices` (a count). Expert knob;
     /// unknown keys are refused.
     pub vvc_options: Vec<(String, String)>,
+    /// AVC encoder options passed to `oxideav-h264`'s registry encoder
+    /// next to `rc=cqp` / `qp` (its schema: `cabac` (`0` / `1`),
+    /// `gop`, `bframes`, `rc`, `bitrate`, `max_bitrate`,
+    /// `buffer_size`); a still is one IDR picture, so the entropy
+    /// coder is the one that matters. Unknown keys are refused by the
+    /// encoder.
+    pub avc_options: Vec<(String, String)>,
 }
 impl EncodeOptions {
     /// Every field as a positional argument, in declaration order
@@ -164,6 +179,7 @@ impl EncodeOptions {
         hevc_options: Vec<(String, String)>,
         chroma: Option<Chroma>,
         vvc_options: Vec<(String, String)>,
+        avc_options: Vec<(String, String)>,
     ) -> Self {
         Self {
             codec,
@@ -188,12 +204,18 @@ impl EncodeOptions {
             hevc_options,
             chroma,
             vvc_options,
+            avc_options,
         }
     }
 
     /// Set `vvc_options`.
     pub fn with_vvc_options(mut self, vvc_options: Vec<(String, String)>) -> Self {
         self.vvc_options = vvc_options;
+        self
+    }
+    /// Builder-style setter for `avc_options`.
+    pub fn with_avc_options(mut self, avc_options: Vec<(String, String)>) -> Self {
+        self.avc_options = avc_options;
         self
     }
 
@@ -469,6 +491,7 @@ impl Default for EncodeOptions {
             hevc_options: Vec::new(),
             chroma: None,
             vvc_options: Vec::new(),
+            avc_options: Vec::new(),
         }
     }
 }
@@ -1043,6 +1066,395 @@ pub fn encode_hevc_picture_owned(
 }
 
 #[doc(hidden)]
+/// Encode one picture as an AVC item (HEIF Annex E `avc1` + `avcC`)
+/// through `oxideav-h264`'s registry encoder: one IDR picture at
+/// `opts.qp` (`rc=cqp`), CAVLC Baseline unless `opts.avc_options`
+/// selects CABAC (`cabac=1`, Main); 8-bit 4:2:0 only (the registry
+/// encoder's input line), `w` / `h` multiples of 16 (see
+/// [`pad_frame`]). The SPS / PPS become the `avcC` arrays, the VCL NAL
+/// units the 4-byte length-prefixed `AVCItemData`.
+pub fn encode_avc_picture_owned(frame: HeifFrame, opts: &EncodeOptions) -> Result<CodedPicture> {
+    if frame.format.has_alpha {
+        return Err(HeifError::unsupported(
+            "AVC item encoding takes a colour-only picture (drop the alpha plane)",
+        ));
+    }
+    if (frame.format.chroma, frame.format.bit_depth) != (Chroma::Yuv420, 8) {
+        return Err(HeifError::unsupported(format!(
+            "AVC item encoding: the registry encoder codes 8-bit 4:2:0, not {:?} {}-bit",
+            frame.format.chroma, frame.format.bit_depth
+        )));
+    }
+    if frame.width % 16 != 0 || frame.height % 16 != 0 {
+        return Err(HeifError::invalid(format!(
+            "AVC item encoding: {}x{} is not macroblock-aligned (pad to 16)",
+            frame.width, frame.height
+        )));
+    }
+    let mut params = CodecParameters::video(CodecId::new(crate::decode::CODEC_ID_AVC));
+    params.width = Some(frame.width);
+    params.height = Some(frame.height);
+    params.pixel_format = Some(oxideav_core::PixelFormat::Yuv420P);
+    let mut options = CodecOptions::new()
+        .set("rc", "cqp")
+        .set("qp", opts.qp.min(51).to_string());
+    for (k, v) in &opts.avc_options {
+        options = options.set(k.as_str(), v.as_str());
+    }
+    params.options = options;
+    let mut enc = oxideav_h264::h264_encoder::make_encoder(&params)
+        .map_err(|e| HeifError::unsupported(format!("AVC encoder: {e}")))?;
+    let planes = frame
+        .planes
+        .into_iter()
+        .map(|p| oxideav_core::VideoPlane {
+            stride: p.stride,
+            data: p.data,
+        })
+        .collect();
+    let vf = oxideav_core::VideoFrame {
+        pts: Some(0),
+        planes,
+    };
+    enc.send_frame(&Frame::Video(vf))
+        .map_err(|e| HeifError::invalid(format!("AVC encoder rejected the frame: {e}")))?;
+    enc.flush()
+        .map_err(|e| HeifError::invalid(format!("AVC encoder flush: {e}")))?;
+    let mut annex_b = Vec::new();
+    loop {
+        match enc.receive_packet() {
+            Ok(p) => annex_b.extend_from_slice(&p.data),
+            Err(CoreError::NeedMore) | Err(CoreError::Eof) => break,
+            Err(e) => return Err(HeifError::invalid(format!("AVC encoder: {e}"))),
+        }
+    }
+    drop(enc);
+    let (cfg, data, w, h, layout) = avc_item_from_annex_b(&annex_b)?;
+    Ok(CodedPicture {
+        item_type: ITEM_TYPE_AVC1,
+        data,
+        config: Property::AvcC(cfg),
+        coded_width: w,
+        coded_height: h,
+        layout,
+    })
+}
+
+/// The sample of an AVC image sequence from an Annex B access unit:
+/// its VCL and SEI NAL units 4-byte length-prefixed (parameter sets
+/// ride in the `avc1` sample entry, access unit delimiters are
+/// dropped). Access units with an SPS go through
+/// [`avc_item_from_annex_b`] for the record.
+pub fn avc_sample_from_annex_b(annex_b: &[u8]) -> Result<Vec<u8>> {
+    use oxideav_h264::nal::AnnexBSplitter;
+    let nals: Vec<&[u8]> = AnnexBSplitter::new(annex_b)
+        .filter(|n| matches!(n.first().map(|h| h & 0x1f), Some(1..=6)))
+        .collect();
+    if nals.is_empty() {
+        return Err(HeifError::invalid("AVC access unit without VCL NAL units"));
+    }
+    join_length_prefixed(&nals, 4)
+}
+
+/// H.264 §7.4.3: two consecutive IDR access units shall carry different
+/// `idr_pic_id` values — identical IDR slice headers are, to a decoder,
+/// redundant slices of one picture (§7.4.1.2.4), so an image sequence
+/// of independently coded IDR pictures collapses to a single frame.
+/// Applies the rule to `sample` (4-byte length-prefixed NAL units): its
+/// IDR slices (type 5) get an `idr_pic_id` different from `previous`
+/// (the preceding sample's) and of the same ue(v) bit length as the one
+/// they carry, so the CABAC alignment and every later field stay where
+/// they are; the RBSP is re-escaped. Returns the sample's `idr_pic_id`
+/// (`None`: no IDR slice). A value whose length class has one member
+/// (0) cannot change and is refused when it repeats `previous`.
+pub fn avc_rotate_idr_pic_id(
+    sample: &mut Vec<u8>,
+    sps: &oxideav_h264::sps::Sps,
+    previous: Option<u32>,
+) -> Result<Option<u32>> {
+    use oxideav_h264::nal::parse_nal_unit;
+    let nals: Vec<Vec<u8>> = split_length_prefixed(sample, 4)?
+        .into_iter()
+        .map(|n| n.to_vec())
+        .collect();
+    let mut chosen: Option<u32> = None;
+    let mut out: Vec<Vec<u8>> = Vec::with_capacity(nals.len());
+    for nal in nals {
+        let Some(&header) = nal.first() else { continue };
+        if header & 0x1f != 5 {
+            out.push(nal);
+            continue;
+        }
+        let parsed = parse_nal_unit(&nal)
+            .map_err(|e| HeifError::invalid(format!("AVC IDR slice NAL parse: {e}")))?;
+        let mut rbsp = parsed.rbsp.into_owned();
+        // §7.3.3 slice_header() up to idr_pic_id.
+        let mut r = BitCursor::new(&rbsp);
+        r.ue()?; // first_mb_in_slice
+        r.ue()?; // slice_type
+        r.ue()?; // pic_parameter_set_id
+        if sps.separate_colour_plane_flag {
+            r.skip(2)?; // colour_plane_id
+        }
+        r.skip(sps.log2_max_frame_num_minus4 + 4)?; // frame_num
+        if !sps.frame_mbs_only_flag && r.bit()? == 1 {
+            r.skip(1)?; // bottom_field_flag
+        }
+        // idr_pic_id ue(v): k leading zeros, a one, k info bits.
+        let mut k = 0u32;
+        while r.bit()? == 0 {
+            k += 1;
+            if k > 31 {
+                return Err(HeifError::invalid(
+                    "AVC IDR slice: idr_pic_id ue(v) overflow",
+                ));
+            }
+        }
+        let info_pos = r.pos;
+        let info = r.bits(k)?;
+        let value = (1u32 << k) - 1 + info;
+        let (lo, hi) = ((1u32 << k) - 1, (1u32 << (k + 1)) - 2);
+        let new = match chosen {
+            Some(c) => c,
+            None => {
+                let c = if previous != Some(value) {
+                    value
+                } else if lo == hi {
+                    return Err(HeifError::unsupported(
+                        "AVC image sequence: consecutive IDR pictures with idr_pic_id 0 (no same-length alternative; H.264 §7.4.3)",
+                    ));
+                } else if value < hi {
+                    value + 1
+                } else {
+                    lo
+                };
+                chosen = Some(c);
+                c
+            }
+        };
+        let new_info = new + 1 - (1u32 << k);
+        for i in 0..k {
+            let bit = (new_info >> (k - 1 - i)) & 1;
+            let p = info_pos + i as usize;
+            let mask = 0x80u8 >> (p % 8);
+            if bit == 1 {
+                rbsp[p / 8] |= mask;
+            } else {
+                rbsp[p / 8] &= !mask;
+            }
+        }
+        let mut coded = vec![header];
+        coded.extend(escape_rbsp(&rbsp));
+        out.push(coded);
+    }
+    let refs: Vec<&[u8]> = out.iter().map(|v| v.as_slice()).collect();
+    *sample = join_length_prefixed(&refs, 4)?;
+    Ok(chosen)
+}
+
+/// Emulation prevention (H.264 §7.4.1.1): a `0x03` after every `00 00`
+/// that a byte `<= 0x03` would follow, and after a trailing `00 00`.
+fn escape_rbsp(rbsp: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rbsp.len() + 8);
+    let mut zeros = 0usize;
+    for &b in rbsp {
+        if zeros >= 2 && b <= 3 {
+            out.push(3);
+            zeros = 0;
+        }
+        out.push(b);
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+    }
+    if zeros >= 2 {
+        out.push(3);
+    }
+    out
+}
+
+/// MSB-first bit cursor over an RBSP.
+struct BitCursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> BitCursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+    fn bit(&mut self) -> Result<u32> {
+        let byte = self
+            .data
+            .get(self.pos / 8)
+            .ok_or_else(|| HeifError::invalid("AVC slice header: truncated"))?;
+        let b = (byte >> (7 - (self.pos % 8))) & 1;
+        self.pos += 1;
+        Ok(b as u32)
+    }
+    fn bits(&mut self, n: u32) -> Result<u32> {
+        let mut v = 0u32;
+        for _ in 0..n {
+            v = (v << 1) | self.bit()?;
+        }
+        Ok(v)
+    }
+    fn skip(&mut self, n: u32) -> Result<()> {
+        self.bits(n).map(|_| ())
+    }
+    fn ue(&mut self) -> Result<u32> {
+        let mut k = 0u32;
+        while self.bit()? == 0 {
+            k += 1;
+            if k > 31 {
+                return Err(HeifError::invalid("AVC slice header: ue(v) overflow"));
+            }
+        }
+        Ok((1u32 << k) - 1 + self.bits(k)?)
+    }
+}
+
+/// The SPS of an `avcC` record (its first array entry).
+pub(crate) fn avcc_sps(cfg: &crate::avcc::AvcConfig) -> Result<oxideav_h264::sps::Sps> {
+    let first = cfg
+        .sps
+        .first()
+        .ok_or_else(|| HeifError::invalid("avcC without an SPS"))?;
+    let parsed = oxideav_h264::nal::parse_nal_unit(first)
+        .map_err(|e| HeifError::invalid(format!("AVC NAL parse: {e}")))?;
+    oxideav_h264::sps::Sps::parse(&parsed.rbsp)
+        .map_err(|e| HeifError::invalid(format!("AVC SPS parse: {e}")))
+}
+
+/// One `oxideav-h264` registry encoder session for an AVC image
+/// sequence (HEIF Annex E.3): an IDR picture followed by P pictures
+/// (`gop` = the frame count), so no two consecutive access units are
+/// IDR pictures (H.264 §7.4.3) and the sequence codes as a sequence.
+/// Every frame yields exactly one access unit (B pictures, which
+/// reorder, are refused); the first one's SPS / PPS become the `avc1`
+/// sample entry's `avcC`.
+struct AvcSequenceEncoder {
+    enc: Option<Box<dyn Encoder>>,
+    frames: usize,
+    sent: i64,
+    cfg: Option<crate::avcc::AvcConfig>,
+    size: (u32, u32),
+}
+
+impl AvcSequenceEncoder {
+    fn new(frames: usize) -> Self {
+        Self {
+            enc: None,
+            frames,
+            sent: 0,
+            cfg: None,
+            size: (0, 0),
+        }
+    }
+
+    /// Code `frame` (8-bit 4:2:0, macroblock-aligned) as the next
+    /// sample: the coded picture and whether it is a sync sample.
+    fn encode(&mut self, frame: HeifFrame, opts: &EncodeOptions) -> Result<(CodedPicture, bool)> {
+        if frame.format.has_alpha {
+            return Err(HeifError::unsupported(
+                "AVC sequence encoding takes colour-only pictures (drop the alpha plane)",
+            ));
+        }
+        if (frame.format.chroma, frame.format.bit_depth) != (Chroma::Yuv420, 8) {
+            return Err(HeifError::unsupported(format!(
+                "AVC sequence encoding: the registry encoder codes 8-bit 4:2:0, not {:?} {}-bit",
+                frame.format.chroma, frame.format.bit_depth
+            )));
+        }
+        if frame.width % 16 != 0 || frame.height % 16 != 0 {
+            return Err(HeifError::invalid(format!(
+                "AVC sequence encoding: {}x{} is not macroblock-aligned (pad to 16)",
+                frame.width, frame.height
+            )));
+        }
+        if self.enc.is_none() {
+            let mut params = CodecParameters::video(CodecId::new(crate::decode::CODEC_ID_AVC));
+            params.width = Some(frame.width);
+            params.height = Some(frame.height);
+            params.pixel_format = Some(oxideav_core::PixelFormat::Yuv420P);
+            let mut options = CodecOptions::new()
+                .set("rc", "cqp")
+                .set("qp", opts.qp.min(51).to_string())
+                .set("gop", self.frames.max(1).to_string());
+            for (k, v) in &opts.avc_options {
+                options = options.set(k.as_str(), v.as_str());
+            }
+            params.options = options;
+            self.enc = Some(
+                oxideav_h264::h264_encoder::make_encoder(&params)
+                    .map_err(|e| HeifError::unsupported(format!("AVC encoder: {e}")))?,
+            );
+            self.size = (frame.width, frame.height);
+        } else if (frame.width, frame.height) != self.size {
+            return Err(HeifError::invalid(
+                "AVC sequence encoding: frames of different coded sizes",
+            ));
+        }
+        let enc = self.enc.as_mut().expect("created above");
+        let planes = frame
+            .planes
+            .into_iter()
+            .map(|p| oxideav_core::VideoPlane {
+                stride: p.stride,
+                data: p.data,
+            })
+            .collect();
+        let vf = oxideav_core::VideoFrame {
+            pts: Some(self.sent),
+            planes,
+        };
+        self.sent += 1;
+        enc.send_frame(&Frame::Video(vf))
+            .map_err(|e| HeifError::invalid(format!("AVC encoder rejected the frame: {e}")))?;
+        let mut packets = Vec::new();
+        loop {
+            match enc.receive_packet() {
+                Ok(p) => packets.push(p),
+                Err(CoreError::NeedMore) | Err(CoreError::Eof) => break,
+                Err(e) => return Err(HeifError::invalid(format!("AVC encoder: {e}"))),
+            }
+        }
+        if packets.len() != 1 {
+            return Err(HeifError::unsupported(format!(
+                "AVC sequence encoding: {} access units for one frame (B pictures reorder; \
+                 a sequence takes one access unit per frame in display order)",
+                packets.len()
+            )));
+        }
+        let packet = &packets[0];
+        let has_sps = oxideav_h264::nal::AnnexBSplitter::new(&packet.data)
+            .any(|n| n.first().map(|h| h & 0x1f) == Some(7));
+        let data = if has_sps {
+            let (cfg, data, _, _, _) = avc_item_from_annex_b(&packet.data)?;
+            if self.cfg.is_none() {
+                self.cfg = Some(cfg);
+            }
+            data
+        } else {
+            avc_sample_from_annex_b(&packet.data)?
+        };
+        let cfg = self.cfg.clone().ok_or_else(|| {
+            HeifError::invalid("AVC sequence encoding: no SPS in the first access unit")
+        })?;
+        let layout = cfg.layout()?;
+        Ok((
+            CodedPicture {
+                item_type: ITEM_TYPE_AVC1,
+                data,
+                config: Property::AvcC(cfg),
+                coded_width: self.size.0,
+                coded_height: self.size.1,
+                layout,
+            },
+            packet.is_keyframe(),
+        ))
+    }
+}
+
+#[doc(hidden)]
 /// Encode one picture as an AV1 still item (`reduced_still_picture_header`)
 /// at its own (depth, chroma) pairing — 8 / 10 / 12-bit, 4:0:0 /
 /// 4:2:0 / 4:2:2 / 4:4:4 — lossless when `opts.av1_quality` is `None`
@@ -1359,12 +1771,13 @@ fn encode_picture_for(
         }
         StillCodec::Av1 => encode_av1_picture_owned(frame, opts),
         StillCodec::Vvc => encode_vvc_picture_owned(frame, opts),
+        StillCodec::Avc => encode_avc_picture_owned(frame, opts),
     }
 }
 
 fn alignment(opts: &EncodeOptions) -> u32 {
     match opts.codec {
-        StillCodec::Hevc => 16,
+        StillCodec::Hevc | StillCodec::Avc => 16,
         StillCodec::Av1 => 8,
         StillCodec::Vvc => VVC_ALIGNMENT,
     }
@@ -1514,8 +1927,8 @@ fn coding_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<HeifFrame> 
                 to_yuv420(frame, coded.bit_depth)
             }
         }
-        // VVC: 8-bit 4:2:0, the encoder's line.
-        StillCodec::Vvc => to_yuv420(frame, 8),
+        // VVC / AVC: 8-bit 4:2:0, the encoders' line.
+        StillCodec::Vvc | StillCodec::Avc => to_yuv420(frame, 8),
     }
 }
 
@@ -1563,7 +1976,7 @@ fn coding_picture_owned(
             false,
         )?,
         StillCodec::Hevc => opts.hevc_coded_format(frame.format)?,
-        StillCodec::Vvc => HeifPixelFormat::new(Chroma::Yuv420, 8, false)?,
+        StillCodec::Vvc | StillCodec::Avc => HeifPixelFormat::new(Chroma::Yuv420, 8, false)?,
     };
     let bps = frame.format.bytes_per_sample();
     let tight = frame
@@ -1633,6 +2046,11 @@ pub(crate) fn encode_sequence(
     let first_opts = first.opts.clone();
     let mut sw: Option<SequenceWriter> = None;
     let mut alpha_track: Option<SequenceAlphaTrack> = None;
+    // AVC sequences code as one encoder session each (colour, alpha):
+    // IDR + P pictures, one access unit per frame.
+    let avc = first_opts.codec == StillCodec::Avc;
+    let mut avc_colour = avc.then(|| AvcSequenceEncoder::new(timed.len()));
+    let mut avc_alpha = avc.then(|| AvcSequenceEncoder::new(timed.len()));
     for (i, input) in timed.into_iter().enumerate() {
         let SequenceInput {
             frame,
@@ -1653,7 +2071,10 @@ pub(crate) fn encode_sequence(
         let (colour, alpha) = coding_picture_owned(frame, &opts)?;
         let depth = colour.format.bit_depth;
         let padded = pad_owned(colour, alignment(&opts))?;
-        let pic = encode_picture_for(padded, &opts, &opts.colr, &[])?;
+        let (pic, sync) = match avc_colour.as_mut() {
+            Some(s) => s.encode(padded, &opts)?,
+            None => (encode_picture_for(padded, &opts, &opts.colr, &[])?, true),
+        };
         let w = match sw.as_mut() {
             Some(w) => {
                 if w.config != pic.config {
@@ -1690,7 +2111,7 @@ pub(crate) fn encode_sequence(
                 sw.insert(w)
             }
         };
-        w.push_sample(pic.data, duration_ms, true);
+        w.push_sample(pic.data, duration_ms, sync);
         if let Some(alpha) = alpha {
             let a_src = if native_av1 {
                 mono_at_depth(alpha, depth)?
@@ -1709,10 +2130,13 @@ pub(crate) fn encode_sequence(
                 matrix: 2,
                 full_range: true,
             };
-            let apic = encode_picture_for(padded, &opts, &alpha_colr, extra)?;
+            let (apic, alpha_sync) = match avc_alpha.as_mut() {
+                Some(s) => s.encode(padded, &opts)?,
+                None => (encode_picture_for(padded, &opts, &alpha_colr, extra)?, true),
+            };
             let urn = match opts.codec {
                 StillCodec::Hevc => crate::props::AUX_URN_ALPHA_HEVC,
-                StillCodec::Av1 | StillCodec::Vvc => crate::props::AUX_URN_ALPHA,
+                StillCodec::Av1 | StillCodec::Vvc | StillCodec::Avc => crate::props::AUX_URN_ALPHA,
             };
             let at = alpha_track.get_or_insert_with(|| {
                 let mut props = vec![Property::Pixi(Pixi {
@@ -1735,7 +2159,7 @@ pub(crate) fn encode_sequence(
                 )));
             }
             at.samples
-                .push(SequenceSample::new(apic.data, duration_ms, true));
+                .push(SequenceSample::new(apic.data, duration_ms, alpha_sync));
         }
     }
     let mut sw = sw.expect("at least one timed frame");
@@ -2030,7 +2454,9 @@ fn encode_still_planes(
         // CICP URN (§7.5.3.1).
         let urn = match opts.codec {
             StillCodec::Hevc => crate::props::AUX_URN_ALPHA_HEVC,
-            StillCodec::Av1 | StillCodec::Vvc => crate::props::AUX_URN_ALPHA,
+            // E.2.4: the HEVC URNs may be used with AVC; the CICP alpha
+            // URN is the one every reader keys on.
+            StillCodec::Av1 | StillCodec::Vvc | StillCodec::Avc => crate::props::AUX_URN_ALPHA,
         };
         props.push((
             Property::AuxC(crate::props::AuxC {
@@ -2207,6 +2633,8 @@ pub fn encode_still_minimized(frame: &HeifFrame, opts: &EncodeOptions) -> Result
         StillCodec::Hevc => (ITEM_TYPE_HVC1, *b"hvcC"),
         StillCodec::Av1 => (crate::meta::ITEM_TYPE_AV01, *b"av1C"),
         StillCodec::Vvc => (ITEM_TYPE_VVC1, *b"vvcC"),
+        // No brand infers AVC types; the explicit types carry them.
+        StillCodec::Avc => (ITEM_TYPE_AVC1, *b"avcC"),
     };
     let chroma_of = |c: Chroma| MiniChroma {
         subsampling: c.idc(),
@@ -2395,6 +2823,7 @@ pub fn encode_still_minimized(frame: &HeifFrame, opts: &EncodeOptions) -> Result
         // carried and `vvic` (not the compact-record `vvi3`) names
         // the equivalent file.
         StillCodec::Vvc => crate::ftyp::BRAND_VVIC,
+        StillCodec::Avc => crate::ftyp::BRAND_AVCI,
     };
     m.to_file_with_minor(u32::from_be_bytes(minor))
 }
@@ -2703,7 +3132,8 @@ struct PackedRows<'a> {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct HeifEncoderOptions {
-    /// `codec`: `hevc` (alias `h265`), `av1` or `vvc` (alias `h266`).
+    /// `codec`: `hevc` (alias `h265`), `av1`, `vvc` (alias `h266`) or
+    /// `avc` (alias `h264`; 8-bit 4:2:0 `avc1` items at `qp`).
     pub codec: String,
     /// `mode` (HEVC): `intra` (CABAC at `qp`) or `pcm` (lossless).
     pub mode: String,
@@ -2900,9 +3330,11 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
     const SCHEMA: &'static [oxideav_core::OptionField] = &[
         oxideav_core::OptionField {
             name: "codec",
-            kind: oxideav_core::OptionKind::Enum(&["hevc", "h265", "av1", "vvc", "h266"]),
+            kind: oxideav_core::OptionKind::Enum(&[
+                "hevc", "h265", "av1", "vvc", "h266", "avc", "h264",
+            ]),
             default: oxideav_core::OptionValue::String(String::new()),
-            help: "Coded item codec: hevc (heic file) or av1 (avif file)",
+            help: "Coded item codec: hevc (heic file), av1 (avif file), vvc (vvic file) or avc (avci file)",
         },
         oxideav_core::OptionField {
             name: "mode",
@@ -3039,6 +3471,7 @@ impl HeifEncoderOptions {
                 "hevc" | "h265" => StillCodec::Hevc,
                 "av1" => StillCodec::Av1,
                 "vvc" | "h266" => StillCodec::Vvc,
+                "avc" | "h264" => StillCodec::Avc,
                 other => {
                     return Err(CoreError::invalid(format!(
                         "heif: unknown codec option '{other}'"

@@ -23,10 +23,11 @@ use oxideav_core::{
 };
 
 use crate::av1c::Av1Config;
-use crate::encode::hevc_item_from_annex_b;
+use crate::avcc::AvcConfig;
+use crate::encode::{avc_item_from_annex_b, avc_sample_from_annex_b, hevc_item_from_annex_b};
 use crate::error::{HeifError, Result};
 use crate::hvcc::{join_length_prefixed, split_length_prefixed, HevcConfig};
-use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_HVC1};
+use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_AVC1, ITEM_TYPE_HVC1};
 use crate::props::{Colr, Ispe, Pixi, Property};
 use crate::vvcc::VvcConfig;
 use crate::vvcdec::vvc_item_from_annex_b;
@@ -41,6 +42,9 @@ enum Codec {
     /// VVC (`"h266"`): Annex B access units or length-prefixed samples
     /// with a `vvcC` extradata (HEIF Annex L.3).
     Vvc,
+    /// AVC (`"h264"`): Annex B access units or length-prefixed samples
+    /// with an `avcC` extradata (HEIF Annex E.3).
+    Avc,
     /// A `"heif"` still stream: one whole-file packet.
     Still,
 }
@@ -53,6 +57,9 @@ pub struct HeifSequenceMuxer {
     hvcc: Option<HevcConfig>,
     av1c: Option<Av1Config>,
     vvcc: Option<VvcConfig>,
+    avcc: Option<AvcConfig>,
+    /// The last AVC sample's `idr_pic_id` (H.264 §7.4.3 rotation).
+    last_idr_pic_id: Option<u32>,
     coded_size: Option<(u32, u32)>,
     samples: Vec<(Vec<u8>, u32, bool)>,
     /// The whole-file packet of a still stream.
@@ -73,16 +80,18 @@ impl HeifSequenceMuxer {
             "h265" | "hevc" => Codec::Hevc,
             "av1" => Codec::Av1,
             "h266" | "vvc" => Codec::Vvc,
+            "h264" | "avc" => Codec::Avc,
             crate::demux::CODEC_ID => Codec::Still,
             other => {
                 return Err(HeifError::unsupported(format!(
-                    "heif muxer: codec '{other}' (heif still, h265 / av1 sequences supported)"
+                    "heif muxer: codec '{other}' (heif still, h265 / av1 / h266 / h264 sequences supported)"
                 )))
             }
         };
         let mut hvcc = None;
         let mut av1c = None;
         let mut vvcc = None;
+        let mut avcc = None;
         if !stream.params.extradata.is_empty() {
             match codec {
                 Codec::Hevc => {
@@ -94,6 +103,11 @@ impl HeifSequenceMuxer {
                 Codec::Vvc => {
                     if let Ok(c) = VvcConfig::parse(&stream.params.extradata) {
                         vvcc = Some(c);
+                    }
+                }
+                Codec::Avc => {
+                    if let Ok(c) = AvcConfig::parse(&stream.params.extradata) {
+                        avcc = Some(c);
                     }
                 }
                 Codec::Still => {}
@@ -110,6 +124,8 @@ impl HeifSequenceMuxer {
             hvcc,
             av1c,
             vvcc,
+            avcc,
+            last_idr_pic_id: None,
             coded_size,
             samples: Vec::new(),
             still: None,
@@ -195,7 +211,55 @@ impl HeifSequenceMuxer {
                     self.samples.push((data, duration, packet.is_keyframe()));
                 }
             }
+            Codec::Avc => {
+                let annex_b =
+                    packet.data.starts_with(&[0, 0, 1]) || packet.data.starts_with(&[0, 0, 0, 1]);
+                if annex_b {
+                    // An access unit with an SPS yields the record; the
+                    // others are length-prefixed as they are.
+                    let has_sps = oxideav_h264::nal::AnnexBSplitter::new(&packet.data)
+                        .any(|n| n.first().map(|h| h & 0x1f) == Some(7));
+                    let mut data = if has_sps {
+                        let (cfg, data, w, h, _) = avc_item_from_annex_b(&packet.data)?;
+                        if self.avcc.is_none() {
+                            self.avcc = Some(cfg);
+                            self.coded_size.get_or_insert((w, h));
+                        }
+                        data
+                    } else {
+                        avc_sample_from_annex_b(&packet.data)?
+                    };
+                    self.rotate_idr(&mut data)?;
+                    self.samples.push((data, duration, packet.is_keyframe()));
+                } else {
+                    let cfg = self.avcc.as_ref().ok_or_else(|| {
+                        HeifError::invalid(
+                            "heif muxer: length-prefixed AVC packets need an avcC extradata",
+                        )
+                    })?;
+                    let nals = split_length_prefixed(&packet.data, cfg.length_size)?;
+                    let mut data = if cfg.length_size == 4 {
+                        packet.data.clone()
+                    } else {
+                        join_length_prefixed(&nals, 4)?
+                    };
+                    self.rotate_idr(&mut data)?;
+                    self.samples.push((data, duration, packet.is_keyframe()));
+                }
+            }
         }
+        Ok(())
+    }
+
+    /// H.264 §7.4.3 on an AVC sample: consecutive IDR samples get
+    /// distinct `idr_pic_id`s (see `encode::avc_rotate_idr_pic_id`).
+    fn rotate_idr(&mut self, data: &mut Vec<u8>) -> Result<()> {
+        let Some(cfg) = &self.avcc else { return Ok(()) };
+        let sps = crate::encode::avcc_sps(cfg)?;
+        // `None` after a non-IDR sample: the rule binds consecutive IDR
+        // access units only.
+        self.last_idr_pic_id =
+            crate::encode::avc_rotate_idr_pic_id(data, &sps, self.last_idr_pic_id)?;
         Ok(())
     }
 
@@ -216,33 +280,44 @@ impl HeifSequenceMuxer {
         let (w, h) = self
             .coded_size
             .ok_or_else(|| HeifError::invalid("heif muxer: unknown picture size"))?;
-        let (entry_type, config, layout) = match self.codec {
-            Codec::Hevc => {
-                let mut c = self
-                    .hvcc
-                    .clone()
-                    .ok_or_else(|| HeifError::invalid("heif muxer: no HEVC parameter sets seen"))?;
-                if c.length_size != 4 {
-                    c.length_size = 4;
-                    c.raw = c.serialize();
+        let (entry_type, config, layout) =
+            match self.codec {
+                Codec::Hevc => {
+                    let mut c = self.hvcc.clone().ok_or_else(|| {
+                        HeifError::invalid("heif muxer: no HEVC parameter sets seen")
+                    })?;
+                    if c.length_size != 4 {
+                        c.length_size = 4;
+                        c.raw = c.serialize();
+                    }
+                    let layout = crate::decode::hevc_layout(&c)?;
+                    (ITEM_TYPE_HVC1, Property::HvcC(c), layout)
                 }
-                let layout = crate::decode::hevc_layout(&c)?;
-                (ITEM_TYPE_HVC1, Property::HvcC(c), layout)
-            }
-            Codec::Av1 => {
-                let c = self.av1c.clone().expect("checked in push");
-                let layout = crate::decode::av1_layout(&c)?;
-                (ITEM_TYPE_AV01, Property::Av1C(c), layout)
-            }
-            Codec::Vvc => {
-                let c = self.vvcc.clone().ok_or_else(|| {
-                    HeifError::invalid("heif muxer: VVC stream without a vvcC record")
-                })?;
-                let layout = crate::decode::vvc_layout(&c)?;
-                (crate::meta::ITEM_TYPE_VVC1, Property::VvcC(c), layout)
-            }
-            Codec::Still => unreachable!("handled above"),
-        };
+                Codec::Av1 => {
+                    let c = self.av1c.clone().expect("checked in push");
+                    let layout = crate::decode::av1_layout(&c)?;
+                    (ITEM_TYPE_AV01, Property::Av1C(c), layout)
+                }
+                Codec::Vvc => {
+                    let c = self.vvcc.clone().ok_or_else(|| {
+                        HeifError::invalid("heif muxer: VVC stream without a vvcC record")
+                    })?;
+                    let layout = crate::decode::vvc_layout(&c)?;
+                    (crate::meta::ITEM_TYPE_VVC1, Property::VvcC(c), layout)
+                }
+                Codec::Avc => {
+                    let mut c = self.avcc.clone().ok_or_else(|| {
+                        HeifError::invalid("heif muxer: no AVC parameter sets seen")
+                    })?;
+                    if c.length_size != 4 {
+                        c.length_size = 4;
+                        c.raw = c.serialize();
+                    }
+                    let layout = c.layout()?;
+                    (ITEM_TYPE_AVC1, Property::AvcC(c), layout)
+                }
+                Codec::Still => unreachable!("handled above"),
+            };
         let timescale = self.stream.time_base.den().max(1) as u32;
         let mut sw = SequenceWriter::new(entry_type, config.clone(), w as u16, h as u16, timescale);
         sw.entry_properties.push(Property::Colr(Colr::MIAF_DEFAULT));

@@ -2,6 +2,7 @@
 artifacts
 coverage
 fuzz-*.log
+Cargo.lock
 corpus/**
 !corpus/*/
 !corpus/*/minimal.*

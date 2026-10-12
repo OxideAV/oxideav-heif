@@ -828,6 +828,14 @@ impl HeifWriter {
             }
             compat.push(BRAND_VVIC);
         }
+        if has(&crate::meta::ITEM_TYPE_AVC1) {
+            // HEIF E.4.1.2: `avci` with `mif1`; the major brand when no
+            // other codec claims it.
+            if major == BRAND_MIF1 {
+                major = crate::ftyp::BRAND_AVCI;
+            }
+            compat.push(crate::ftyp::BRAND_AVCI);
+        }
         compat.push(BRAND_MIAF);
         if has_tmap {
             compat.push(BRAND_TMAP);
@@ -1534,6 +1542,8 @@ impl SequenceWriter {
             b"av01" => BRAND_AVIS,
             // HEIF L.4.2: `vvis` for a VVC image sequence.
             b"vvc1" | b"vvi1" => BRAND_VVIS,
+            // HEIF E.4.2: `avcs` for an AVC image sequence.
+            b"avc1" | b"avc3" => crate::ftyp::BRAND_AVCS,
             _ => BRAND_MSF1,
         };
         let (major, compat) = match &self.brands {

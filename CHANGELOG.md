@@ -6,6 +6,37 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **AVC items write path (HEIF Annex E).** `StillCodec::Avc` codes
+  `avc1` items through `oxideav-h264`'s registry encoder
+  (`encode::encode_avc_picture_owned`: one IDR picture at `qp`,
+  `rc=cqp`; CAVLC Baseline, CABAC Main with the new
+  `EncodeOptions::avc_options` (`with_avc_options`, a positional
+  argument of `new`) `cabac=1`; 8-bit 4:2:0 — the encoder's input line
+  — pictures padded to 16 + `clap`), `avcC` from the SPS / PPS, the
+  `avci` brand, alpha under the CICP alpha URN (E.2.4), grid tiles,
+  thumbnails, `encode_still_minimized` with explicit `avc1` / `avcC`
+  types, the `"heif"` framework encoder's `codec=avc` / `h264`;
+  `encode_all` writes `avcs` image sequences as one encoder session
+  per track (IDR + P pictures, `gop` = the frame count; sync flags from
+  the packets) and the `"heif"` muxer takes `"h264"` streams (Annex B
+  access units with or without parameter sets, or length-prefixed with
+  an `avcC` extradata; `encode::avc_sample_from_annex_b`). H.264
+  §7.4.3 — consecutive IDR access units differ in `idr_pic_id` —
+  is applied by the muxer to the streams it is fed
+  (`encode::avc_rotate_idr_pic_id`: a same-length ue(v) rewrite that
+  keeps the CABAC alignment; refused typed when the value is 0 and
+  repeats). `SequenceWriter` picks `avcs` for `avc1` / `avc3` entries.
+  `tests/avc_lhevc.rs`: every written item and sequence sample
+  byte-exact in the black-box AVC decoder; `heif-info` / `sips` open
+  the files.
+
+### Fixed
+
+- `fuzz/Cargo.lock` is no longer tracked (and is ignored): the nightly
+  Fuzz workflow resolves the sibling codec crates afresh, so a codec
+  release that fixes a fuzz-found panic reaches the harness without a
+  heif commit.
+
 - **Packed `cfen` inputs (HEIF Amd 1:2025 §6.6.2.5.2 `is_packed_flag`,
   Amd 2:2026 §6.6.2.5.3 regions).** A `cfen` input whose luma plane
   carries `rows × cols` channel partitions separated by guard bands now

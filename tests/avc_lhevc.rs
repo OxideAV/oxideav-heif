@@ -344,3 +344,425 @@ fn lhv1_base_layer_decodes_and_enhancement_layers_refuse_typed() {
         Some(oxideav_core::PixelFormat::YuvJ420P)
     );
 }
+
+/// Annex B stream of an `avc1` item: the `avcC` SPS / PPS arrays
+/// followed by the item's length-prefixed NAL units, start-coded.
+fn avc_item_annex_b(f: &HeifFile, id: u32) -> Vec<u8> {
+    let props = oxideav_heif::props::ItemProperties::resolve(f.meta().unwrap(), id).unwrap();
+    let cfg = props.avcc().unwrap();
+    let data = f.item_data_owned(id).unwrap();
+    let mut out = Vec::new();
+    for nal in cfg
+        .sps
+        .iter()
+        .chain(cfg.pps.iter())
+        .map(|v| v.as_slice())
+        .chain(oxideav_heif::hvcc::split_length_prefixed(&data, cfg.length_size).unwrap())
+    {
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(nal);
+    }
+    out
+}
+
+/// PSNR (dB) of `a` against `b` over 8-bit samples.
+fn psnr8(a: &[u8], b: &[u8]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let mse: f64 = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| {
+            let d = *x as f64 - *y as f64;
+            d * d
+        })
+        .sum::<f64>()
+        / a.len() as f64;
+    if mse == 0.0 {
+        99.0
+    } else {
+        10.0 * (255.0f64 * 255.0 / mse).log10()
+    }
+}
+
+/// `StillCodec::Avc`: this crate's own AVC items (HEIF Annex E) —
+/// CAVLC Baseline and CABAC Main at a QP, macroblock padding + `clap`,
+/// alpha, grid tiles, a thumbnail, the `avci` brand — decode in this
+/// crate and byte-exact in the black-box AVC decoder on every item's
+/// stream, at a PSNR the QP predicts; the `mif3` form decodes to the
+/// same picture; `encode_all` writes an `avcs` sequence the demuxer
+/// plays back; the `"heif"` muxer takes an `"h264"` Annex B stream.
+#[test]
+fn avc1_items_written_by_this_crate_decode_in_both_decoders() {
+    use oxideav_heif::encode::{encode_still_minimized, StillCodec};
+    let dir = scratch_dir("avc_write");
+    let ffmpeg = have_binary("ffmpeg");
+    struct Case {
+        tag: &'static str,
+        w: u32,
+        h: u32,
+        alpha: bool,
+        cabac: bool,
+        qp: u8,
+        grid: Option<u32>,
+        thumb: Option<u32>,
+        min_psnr: f64,
+    }
+    let cases = [
+        Case {
+            tag: "cavlc_96x80",
+            w: 96,
+            h: 80,
+            alpha: false,
+            cabac: false,
+            qp: 20,
+            grid: None,
+            thumb: None,
+            min_psnr: 38.0,
+        },
+        Case {
+            tag: "cabac_62x50_crop",
+            w: 62,
+            h: 50,
+            alpha: false,
+            cabac: true,
+            qp: 16,
+            grid: None,
+            thumb: None,
+            min_psnr: 40.0,
+        },
+        Case {
+            tag: "alpha_thumb_120x90",
+            w: 120,
+            h: 90,
+            alpha: true,
+            cabac: true,
+            qp: 22,
+            grid: None,
+            thumb: Some(32),
+            min_psnr: 36.0,
+        },
+        Case {
+            tag: "grid_300x200",
+            w: 300,
+            h: 200,
+            alpha: false,
+            cabac: false,
+            qp: 24,
+            grid: Some(128),
+            thumb: None,
+            min_psnr: 34.0,
+        },
+    ];
+    for c in &cases {
+        let mut src = picture(c.w, c.h, Chroma::Yuv420, 8);
+        if c.alpha {
+            let mut a = HeifFrame::zeroed(
+                c.w,
+                c.h,
+                HeifPixelFormat::new(Chroma::Mono, 8, false).unwrap(),
+            )
+            .unwrap();
+            for y in 0..c.h {
+                for x in 0..c.w {
+                    a.set_sample(0, x, y, ((x * 2 + y) % 256) as u16);
+                }
+            }
+            src = src.with_alpha_plane(&a).unwrap();
+        }
+        let mut opts = EncodeOptions::default()
+            .with_codec(StillCodec::Avc)
+            .with_qp(c.qp)
+            .with_grid_tile(c.grid)
+            .with_thumbnail_max_dim(c.thumb);
+        if c.cabac {
+            opts = opts.with_avc_options(vec![("cabac".into(), "1".into())]);
+        }
+        let bytes = encode_still(&src, &opts).unwrap_or_else(|e| panic!("{}: {e}", c.tag));
+        let path = dir.join(format!("{}.heif", c.tag));
+        std::fs::write(&path, &bytes).unwrap();
+        let f = HeifFile::parse(&bytes).unwrap();
+        assert!(
+            f.file_type.has_brand(&oxideav_heif::ftyp::BRAND_AVCI),
+            "{}: avci brand",
+            c.tag
+        );
+        let rep = check(&f, MiafProfile::Miaf).unwrap();
+        assert!(rep.is_conformant(), "{}: {:#?}", c.tag, rep.violations);
+        let img = decode_primary(&f, ItemDecoder::direct())
+            .unwrap_or_else(|e| panic!("{}: decode: {e}", c.tag));
+        assert_eq!((img.width(), img.height()), (c.w, c.h), "{}", c.tag);
+        assert_eq!(img.frame.format.has_alpha, c.alpha, "{}", c.tag);
+        assert_eq!(
+            (img.frame.format.chroma, img.frame.format.bit_depth),
+            (Chroma::Yuv420, 8)
+        );
+        // Fidelity: luma PSNR against the source at this QP; alpha exact
+        // where the QP is low enough to be transparent on a ramp.
+        let p = psnr8(
+            &img.frame.tight().planes[0].data,
+            &src.tight().planes[0].data,
+        );
+        assert!(p >= c.min_psnr, "{}: luma PSNR {p:.2} dB", c.tag);
+        eprintln!(
+            "avc write {}: {} bytes, luma PSNR {p:.2} dB",
+            c.tag,
+            bytes.len()
+        );
+        // Every avc1 item byte-exact against the black-box decoder.
+        let meta = f.meta().unwrap();
+        let mut items = 0;
+        for it in &meta.items {
+            if it.item_type != ITEM_TYPE_AVC1 {
+                continue;
+            }
+            items += 1;
+            let ours = oxideav_heif::decode::decode_item(&f, it.id, ItemDecoder::direct())
+                .unwrap_or_else(|e| panic!("{}: item {}: {e}", c.tag, it.id));
+            let cfg = oxideav_heif::props::ItemProperties::resolve(meta, it.id)
+                .unwrap()
+                .avcc()
+                .cloned()
+                .unwrap();
+            assert_eq!(cfg.profile_idc, if c.cabac { 77 } else { 66 }, "{}", c.tag);
+            if !ffmpeg {
+                continue;
+            }
+            let annex_b = avc_item_annex_b(&f, it.id);
+            let h264 = dir.join(format!("{}_{}.h264", c.tag, it.id));
+            std::fs::write(&h264, &annex_b).unwrap();
+            // The raw decoder emits the coded (macroblock-aligned) picture;
+            // this crate applies the item's `clap`. Crop theirs to ours.
+            let coded_w = ours.frame.width.div_ceil(16) * 16;
+            let coded_h = ours.frame.height.div_ceil(16) * 16;
+            let theirs = ffmpeg_raw(&dir, &format!("{}_{}", c.tag, it.id), &h264, "yuv420p");
+            let (w, h) = (ours.frame.width as usize, ours.frame.height as usize);
+            let (cw, ch) = (coded_w as usize, coded_h as usize);
+            assert_eq!(
+                theirs.len(),
+                cw * ch * 3 / 2,
+                "{}: item {} raw size",
+                c.tag,
+                it.id
+            );
+            let mut cropped = Vec::with_capacity(w * h * 3 / 2);
+            for y in 0..h {
+                cropped.extend_from_slice(&theirs[y * cw..y * cw + w]);
+            }
+            let (hw, hh, hcw, hch) = (w.div_ceil(2), h.div_ceil(2), cw / 2, ch / 2);
+            for plane in 0..2 {
+                let base = cw * ch + plane * hcw * hch;
+                for y in 0..hh {
+                    cropped.extend_from_slice(&theirs[base + y * hcw..base + y * hcw + hw]);
+                }
+            }
+            // The master item's decode carries its alpha auxiliary; the
+            // stream itself is the colour picture.
+            let mine = planes_concat(&ours.frame.without_alpha());
+            assert_eq!(
+                mine.len(),
+                cropped.len(),
+                "{}: item {} planes",
+                c.tag,
+                it.id
+            );
+            assert!(
+                mine == cropped,
+                "{}: item {} differs from the black-box decoder",
+                c.tag,
+                it.id
+            );
+        }
+        let expected_items = 1
+            + usize::from(c.alpha)
+            + usize::from(c.thumb.is_some())
+            + c.grid
+                .map_or(0, |t| (c.w.div_ceil(t) * c.h.div_ceil(t)) as usize - 1);
+        assert_eq!(items, expected_items, "{}: avc1 item count", c.tag);
+        // Low-overhead form (no clap in a MinimizedImageBox, so
+        // macroblock-aligned pictures only): the same picture.
+        if c.grid.is_none() && c.thumb.is_none() && c.w % 16 == 0 && c.h % 16 == 0 {
+            let mini = encode_still_minimized(&src, &opts).unwrap();
+            let mf = HeifFile::parse(&mini).unwrap();
+            let mimg = decode_primary(&mf, ItemDecoder::direct()).unwrap();
+            assert_eq!(mimg.frame, img.frame, "{}: mif3 form", c.tag);
+        }
+        // Third-party readers: a measurement.
+        eprintln!(
+            "avc1 HEIF written {}: heif-info {}, ffmpeg {}, sips {}, magick {}",
+            c.tag,
+            reader_verdict("heif-info", &[], &path),
+            reader_verdict(
+                "ffmpeg",
+                &["-nostdin", "-loglevel", "error", "-f", "null", "-", "-i"],
+                &path
+            ),
+            reader_verdict("sips", &["-g", "pixelWidth"], &path),
+            reader_verdict("magick", &["identify"], &path),
+        );
+    }
+    // Registry "heif" encoder: codec=avc.
+    {
+        let mut ctx = oxideav_core::RuntimeContext::new();
+        oxideav_h264::register(&mut ctx);
+        oxideav_heif::register(&mut ctx);
+        let src = picture(64, 48, Chroma::Yuv420, 8);
+        let (vf, pf) = src.to_core().unwrap();
+        let mut params = oxideav_core::CodecParameters::video(oxideav_core::CodecId::new("heif"));
+        params.width = Some(64);
+        params.height = Some(48);
+        params.pixel_format = Some(pf);
+        params.options = oxideav_core::CodecOptions::new()
+            .set("codec", "avc")
+            .set("qp", "18");
+        let mut enc = ctx.codecs.first_encoder(&params).unwrap();
+        enc.send_frame(&oxideav_core::Frame::Video(vf)).unwrap();
+        enc.flush().unwrap();
+        let pkt = enc.receive_packet().unwrap();
+        let f = HeifFile::parse(&pkt.data).unwrap();
+        assert!(f.file_type.has_brand(&oxideav_heif::ftyp::BRAND_AVCI));
+        let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+        assert!(
+            psnr8(
+                &img.frame.tight().planes[0].data,
+                &src.tight().planes[0].data
+            ) > 40.0
+        );
+    }
+    // encode_all: an avcs image sequence of three frames.
+    {
+        let opts = EncodeOptions::default()
+            .with_codec(StillCodec::Avc)
+            .with_qp(20);
+        let frames: Vec<oxideav_heif::Frame> = (0..3u32)
+            .map(|i| {
+                let mut p = picture(64, 48, Chroma::Yuv420, 8);
+                for y in 0..48 {
+                    for x in 0..64 {
+                        p.set_sample(0, x, y, (p.sample(0, x, y) + i as u16 * 20) % 256);
+                    }
+                }
+                oxideav_heif::Frame::new(
+                    oxideav_heif::HeifImage::from_frame(
+                        p,
+                        oxideav_heif::ColorInfo::default(),
+                        oxideav_heif::Metadata::default(),
+                    ),
+                    Some(std::time::Duration::from_millis(100)),
+                    None,
+                    None,
+                )
+            })
+            .collect();
+        let bytes = oxideav_heif::encode_all(&frames, &opts).unwrap();
+        let f = HeifFile::parse(&bytes).unwrap();
+        assert!(
+            f.file_type.has_brand(&oxideav_heif::ftyp::BRAND_AVCS),
+            "avcs brand"
+        );
+        let out =
+            oxideav_heif::decode_all_with(&bytes, &oxideav_heif::DecodeOptions::default()).unwrap();
+        // The cover item plus the three samples, each a distinct picture
+        // (H.264 §7.4.3: rotated idr_pic_ids keep them apart).
+        assert_eq!(out.iter().filter(|f| f.track_id.is_some()).count(), 3);
+        for fr in &out {
+            assert_eq!((fr.image.width, fr.image.height), (64, 48));
+        }
+        let seq = dir.join("sequence.heifs");
+        std::fs::write(&seq, &bytes).unwrap();
+        // The track is an ordinary ISO-BMFF `avc1` track: the black-box
+        // demuxer + decoder play all three samples, byte-exact with ours.
+        if ffmpeg {
+            let raw = dir.join("sequence.yuv");
+            let st = Command::new("ffmpeg")
+                .args(["-nostdin", "-loglevel", "error", "-y", "-i"])
+                .arg(&seq)
+                .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+                .arg(&raw)
+                .status()
+                .unwrap();
+            assert!(st.success(), "ffmpeg refused the avcs sequence");
+            let theirs = std::fs::read(&raw).unwrap();
+            let mut ours = Vec::new();
+            for fr in out.iter().filter(|f| f.track_id.is_some()) {
+                let hf = fr.image.to_frame().unwrap();
+                ours.extend(planes_concat(&hf));
+            }
+            assert_eq!(
+                theirs.len(),
+                ours.len(),
+                "avcs sequence: raw size (three 64x48 frames)"
+            );
+            assert!(
+                ours == theirs,
+                "avcs sequence: samples differ from the black-box decoder"
+            );
+        }
+    }
+    // The "heif" muxer over an "h264" Annex B stream from this crate's
+    // AVC picture encoder (an IDR per packet).
+    {
+        let mut ctx = oxideav_core::RuntimeContext::new();
+        oxideav_h264::register(&mut ctx);
+        oxideav_heif::register(&mut ctx);
+        let mut params = oxideav_core::CodecParameters::video(oxideav_core::CodecId::new("h264"));
+        params.width = Some(64);
+        params.height = Some(48);
+        let stream = oxideav_core::StreamInfo {
+            index: 0,
+            time_base: oxideav_core::TimeBase::new(1, 10),
+            duration: Some(2),
+            start_time: Some(0),
+            params,
+        };
+        let path = dir.join("muxed.heifs");
+        let sink: Box<dyn oxideav_core::WriteSeek> =
+            Box::new(std::fs::File::create(&path).unwrap());
+        let mut mx = ctx
+            .containers
+            .open_muxer("heif", sink, std::slice::from_ref(&stream))
+            .unwrap();
+        mx.write_header().unwrap();
+        // A registry AVC encoder session (IDR + P) feeds Annex B packets.
+        let mut eparams = oxideav_core::CodecParameters::video(oxideav_core::CodecId::new("h264"));
+        eparams.width = Some(64);
+        eparams.height = Some(48);
+        eparams.pixel_format = Some(oxideav_core::PixelFormat::Yuv420P);
+        eparams.options = oxideav_core::CodecOptions::new()
+            .set("rc", "cqp")
+            .set("qp", "20");
+        let mut enc = ctx.codecs.first_encoder(&eparams).unwrap();
+        let mut n = 0;
+        for i in 0..3i64 {
+            let (mut vf, _) = picture(64, 48, Chroma::Yuv420, 8).to_core().unwrap();
+            vf.pts = Some(i);
+            enc.send_frame(&oxideav_core::Frame::Video(vf)).unwrap();
+            while let Ok(p) = enc.receive_packet() {
+                let pkt = p.with_stream_index(0).with_duration(1);
+                mx.write_packet(&pkt).unwrap();
+                n += 1;
+            }
+        }
+        enc.flush().unwrap();
+        while let Ok(p) = enc.receive_packet() {
+            mx.write_packet(&p.with_stream_index(0).with_duration(1))
+                .unwrap();
+            n += 1;
+        }
+        assert_eq!(n, 3, "three access units muxed");
+        mx.write_trailer().unwrap();
+        drop(mx);
+        let bytes = std::fs::read(&path).unwrap();
+        let f = HeifFile::parse(&bytes).unwrap();
+        assert!(
+            f.file_type.has_brand(&oxideav_heif::ftyp::BRAND_AVCS),
+            "muxer: avcs brand"
+        );
+        let out =
+            oxideav_heif::decode_all_with(&bytes, &oxideav_heif::DecodeOptions::default()).unwrap();
+        assert_eq!(
+            out.iter().filter(|f| f.track_id.is_some()).count(),
+            3,
+            "muxer: three samples"
+        );
+    }
+}
