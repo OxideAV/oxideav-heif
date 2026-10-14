@@ -12,6 +12,16 @@ use std::io::Cursor;
 use common::{all_bundles, fixture_bytes, fixture_root};
 use oxideav_core::{Error, Frame, RuntimeContext};
 
+/// The index of the first still stream (`stream:<n>:item_ids`).
+fn still_stream(d: &dyn Demuxer) -> Option<u32> {
+    d.metadata().iter().find_map(|(k, _)| {
+        k.strip_prefix("stream:")?
+            .strip_suffix(":item_ids")?
+            .parse()
+            .ok()
+    })
+}
+
 fn context() -> RuntimeContext {
     let mut ctx = RuntimeContext::new();
     oxideav_h265::register(&mut ctx);
@@ -34,14 +44,21 @@ fn probe_open_and_decode_every_bundle_through_the_registry() {
             .unwrap();
         let streams = demuxer.streams().to_vec();
         assert!(!streams.is_empty(), "{bundle}");
-        let still = &streams[0];
+        // The first still stream (a sequence-brand bundle lists its
+        // track first).
+        let still = still_stream(&*demuxer).unwrap_or_else(|| panic!("{bundle}: still stream"));
+        let still = &streams[still as usize];
         assert_eq!(still.params.codec_id.as_str(), "heif", "{bundle}");
         assert!(
             still.params.width.is_some() && still.params.pixel_format.is_some(),
             "{bundle}"
         );
-        let pkt = demuxer.next_packet().unwrap();
-        assert_eq!(pkt.stream_index, 0);
+        let pkt = loop {
+            let p = demuxer.next_packet().unwrap();
+            if p.stream_index == still.index {
+                break p;
+            }
+        };
         assert!(pkt.is_keyframe());
         let mut dec = ctx.codecs.first_decoder(&still.params).unwrap();
         dec.send_packet(&pkt).unwrap();
@@ -68,22 +85,32 @@ fn probe_open_and_decode_every_bundle_through_the_registry() {
             "{bundle}"
         );
         assert!(matches!(dec.receive_frame(), Err(Error::Eof)));
-        // Sequence tracks follow the still.
+        // The sequence bundle (an `msf1` file) lists its track first
+        // and the cover still after it.
         let n_tracks = streams.len() - 1;
         if bundle == "image-sequence-3frame" {
             assert_eq!(n_tracks, 1);
-            let s = &streams[1];
+            let s = &streams[0];
             assert_eq!(s.params.codec_id.as_str(), "h265");
+            assert_eq!(still.index, 1);
             assert!(!s.params.extradata.is_empty());
             let mut vdec = ctx.codecs.first_decoder(&s.params).unwrap();
+            let mut demuxer = ctx
+                .containers
+                .open_demuxer(
+                    "heif",
+                    Box::new(Cursor::new(fixture_bytes(&root, bundle))),
+                    &ctx.codecs,
+                )
+                .unwrap();
             let mut count = 0;
             loop {
                 match demuxer.next_packet() {
-                    Ok(p) => {
-                        assert_eq!(p.stream_index, 1);
+                    Ok(p) if p.stream_index == s.index => {
                         vdec.send_packet(&p).unwrap();
                         count += 1;
                     }
+                    Ok(p) => assert_eq!(p.stream_index, still.index),
                     Err(Error::Eof) => break,
                     Err(e) => panic!("{e}"),
                 }
@@ -97,7 +124,7 @@ fn probe_open_and_decode_every_bundle_through_the_registry() {
             }
             assert_eq!(frames, 3);
             // Seek back to the first sync sample and read again.
-            assert_eq!(demuxer.seek_to(1, 0).unwrap(), 0);
+            assert_eq!(demuxer.seek_to(s.index, 0).unwrap(), 0);
             assert!(demuxer.next_packet().is_ok());
             assert!(demuxer.duration_micros().unwrap() > 0);
         } else {
@@ -108,7 +135,7 @@ fn probe_open_and_decode_every_bundle_through_the_registry() {
             loop {
                 match demuxer.next_packet() {
                     Ok(p) => {
-                        assert_eq!(p.stream_index, 0, "{bundle}");
+                        assert_eq!(p.stream_index, still.index, "{bundle}");
                         assert_eq!(p.pts, Some(more + 1), "{bundle}: pts is the item index");
                         more += 1;
                     }
@@ -459,13 +486,14 @@ fn still_stream_carries_every_displayable_item_byte_exact_with_decode_all() {
             .map(|f| f.item_id.unwrap().to_string())
             .collect::<Vec<_>>()
             .join(",");
+        let si = still_stream(&direct).unwrap_or_else(|| panic!("{name}: still stream"));
         assert!(
             direct
                 .metadata()
-                .contains(&("stream:0:item_ids".to_string(), ids)),
+                .contains(&(format!("stream:{si}:item_ids"), ids)),
             "{name}: item_ids metadata"
         );
-        let (info, got) = pump_stream(&ctx, bytes, 0);
+        let (info, got) = pump_stream(&ctx, bytes, si);
         assert_eq!(got.len(), items.len(), "{name}: still packets decoded");
         assert_eq!(info.time_base, TimeBase::new(1, 1), "{name}");
         assert_eq!(info.duration, Some(items.len() as i64), "{name}");
@@ -560,16 +588,19 @@ fn sequence_streams_match_decode_all_frames_and_delays() {
         assert!(!want.is_empty(), "{name}: sequence frames");
         let direct = HeifDemuxer::from_bytes(bytes.clone(), &ctx.codecs).unwrap();
         let streams = direct.streams().to_vec();
-        let still = streams
-            .iter()
-            .position(|s| s.params.codec_id.as_str() == "heif");
-        // The composed (alpha) "heif" stream when there is one after
-        // the still, else the first raw visual track.
+        let is_still = |s: &StreamInfo| {
+            direct
+                .metadata()
+                .iter()
+                .any(|(k, _)| *k == format!("stream:{}:item_ids", s.index))
+        };
+        // The composed (alpha) "heif" stream when there is one, else
+        // the first raw visual track; never a still stream.
         let stream = streams
             .iter()
-            .filter(|s| Some(s.index as usize) != still)
+            .filter(|s| !is_still(s))
             .find(|s| s.params.codec_id.as_str() == "heif")
-            .or_else(|| streams.iter().find(|s| Some(s.index as usize) != still))
+            .or_else(|| streams.iter().find(|s| !is_still(s)))
             .unwrap_or_else(|| panic!("{name}: no track stream"))
             .index;
         let (info, got) = pump_stream(&ctx, bytes, stream);

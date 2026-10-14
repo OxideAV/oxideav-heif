@@ -383,10 +383,10 @@ fn compare(ctx: &RuntimeContext, path: &Path) -> Vec<String> {
                     s.params.color_signal, f.image.color
                 ));
             }
-            if k == 0 && s.index != 0 {
+            if k == 0 && stills.first().map(|f| f.index) != Some(s.index) {
                 issues.push(format!(
-                    "primary item {id} is not on stream 0 (stream 0 = [{}])",
-                    meta_of(&metadata, "stream:0:item_ids").unwrap_or("")
+                    "primary item {id} is not on the first still stream ({})",
+                    stills.first().map(|f| f.index).unwrap_or(u32::MAX)
                 ));
             }
             if f.delay.is_some() {
@@ -476,12 +476,45 @@ fn compare(ctx: &RuntimeContext, path: &Path) -> Vec<String> {
             last = g.pts.or(last);
         }
     }
-    // `info()` describes the primary stream.
-    match (info(&bytes), streams.first()) {
-        (Ok(i), Some(s)) if s.params.codec_id.as_str() == "heif" && !items.is_empty() => {
+    // `info()` describes the first still stream; a sequence-brand file
+    // lists its tracks first.
+    let seq_major = parsed
+        .as_ref()
+        .map(|f| {
+            matches!(
+                &f.file_type.major_brand,
+                b"msf1"
+                    | b"hevc"
+                    | b"hevx"
+                    | b"hevm"
+                    | b"hevs"
+                    | b"avis"
+                    | b"avio"
+                    | b"jpgs"
+                    | b"avcs"
+                    | b"vvis"
+            )
+        })
+        .unwrap_or(false);
+    if let Some(first) = streams.first() {
+        let is_still = first.params.codec_id.as_str() == "heif"
+            && meta_of(
+                &metadata,
+                &format!("stream:{}:composed_from_track", first.index),
+            )
+            .is_none();
+        if seq_major && is_still && streams.len() > 1 {
+            issues.push("sequence-brand file lists its still first".into());
+        }
+        if !seq_major && !is_still && !items.is_empty() {
+            issues.push("image-brand file lists a track first".into());
+        }
+    }
+    match (info(&bytes), stills.first()) {
+        (Ok(i), Some(s)) if !items.is_empty() => {
             if (Some(i.width), Some(i.height)) != (s.params.width, s.params.height) {
                 issues.push(format!(
-                    "info {}x{} vs stream 0 {:?}x{:?}",
+                    "info {}x{} vs the first still stream {:?}x{:?}",
                     i.width, i.height, s.params.width, s.params.height
                 ));
             }

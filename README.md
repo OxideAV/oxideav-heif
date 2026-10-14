@@ -112,13 +112,20 @@ factories `make_decoder` / `make_encoder`). A `.heic` opens as stream 0
 one composed `VideoFrame` each: the primary first, then the rest of a
 burst in `decode_all`'s order; item packets are untimed — `pts` = item
 index, duration 1, time base 1/1 — and `metadata` lists them under
-`stream:0:item_ids`; alpha / depth / gain-map auxiliaries and
-thumbnails are never frames of their own) plus one stream per
-image-sequence track (`"h265"` / `"av1"` / `"h264"` packets with
-`hvcC` / `av1C` / `avcC` extradata, one per sample, `pts` / `dts` /
-`duration` from the sample table in the track's timescale; a track
-with an alpha auxiliary track is also offered composed, as `"heif"`
-packets). Every still-stream frame and every sequence frame is
+`stream:<n>:item_ids`; items whose predicted output — layout, geometry,
+colour description — differs from the primary's form further `"heif"`
+still streams, one per distinct output; alpha / depth / gain-map
+auxiliaries and thumbnails are never frames of their own) plus one
+stream per image-sequence track (`"h265"` / `"av1"` / `"h264"` /
+`"h266"` packets with `hvcC` / `av1C` / `avcC` / `vvcC` extradata, one
+per sample, `pts` / `dts` / `duration` from the sample table in the
+track's timescale, `stream:<n>:track_id`; a track with an alpha
+auxiliary track is also offered composed, as `"heif"` packets,
+`stream:<n>:composed_from_track`). A file whose major brand is a
+sequence brand (`msf1` / `hevc` / `avis` / `avcs` / `vvis` / …) lists
+its track streams first and the cover still after them; an image-brand
+file its stills first. The `"heif"` decoder takes `HeifDecoderOptions`
+(see *Limits*). Every still-stream frame and every sequence frame is
 byte-identical to the corresponding `decode_all` frame (pinned over
 the corpus and the real-world interop set). The framework decoder and encoder are thin adapters over the
 contract functions — one implementation — and `HeifImage` converts
@@ -129,6 +136,133 @@ takes the geometry and label directly); the
 `PixelFormat` enums map one to one by name (`From` / `TryFrom`), the
 8-bit YCbCr layouts carrying the framework's full-range `YuvJ*` label
 when `color.range` is full.
+
+## Framework surface (r475)
+
+The path `oxideav-image` / `oxideav-io` / `oxideav-cli-convert` take —
+the registry `"heif"` encoder, the `"heif"` demuxer and decoder, the
+`"heif"` sequence muxer — is measured cell by cell against the
+contract functions; both tests print their tables and write them to
+the scratch directory (`framework_matrix.txt`, `decode_matrix.txt`).
+
+**Encoder matrix** (`tests/framework_matrix.rs`): every declared option
+(`codec` hevc / av1 / avc / vvc × `mode` × `qp` / `quality` × `grid` ×
+`thumbnail` × `range` × `rd` / `tiles` / `ctb` × `threads` × `depth` ×
+`filters` × `chroma`) × every input `VideoFrame` layout the gateway can
+hand it (47 layouts: planar 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8 / 10 /
+12 / 16 bits with and without alpha, `Gbrp*` / `Gbrap*` 8–16 bits,
+packed RGB / RGBA / BGR / BGRA, `Rgb48Le` / `Rgba64Le`, `Ya8` /
+`Ya16Le`) × the sizes that matter (1×1, 7×5, 65×33, 48×32, 160×96
+explicit grids, 2056×2048 automatic grid): **553 cells, 551 coded, 2
+typed refusals** (`mode=pcm` on AVC and VVC), 0 failures. Per cell:
+the file opens in the framework demuxer with the documented label,
+geometry, `1/1` untimed stream and `stream:<n>:item_ids`; the `"heif"`
+decoder and the contract `decode` return byte-identical planes and the
+same colour signal; the bytes equal the contract-path encode of the
+same picture under the same options (every cell whose layout the
+contract has: 455 of 551; the other 96 — BGR(A) swizzles, 16-bit
+packed, grey + alpha — equal the contract encode of the swizzled /
+planar equivalent where one exists); lossless cells are exact (per
+sample, through the 4:4:4 promotion of odd sizes); lossy cells land
+≥ 30 dB RGBA8 (≥ 20 dB at `qp 40` / `quality 0`, ≥ 24 dB on VVC);
+`heif-info` opens all 551 files with their geometry and Apple ImageIO
+(`sips`) all 541 HEVC / AV1 / AVC files (it has no VVC decoder);
+the thread budget (`threads`, `set_execution_context`) and the option
+aliases (`pcm` = `quality=100` on AV1, `depth=8` on an 8-bit source,
+`rd 0` on the quadtree layouts) never change a byte; 19 invalid
+parameters (unknown codec / mode / option, `depth=9`, `ctb=48`,
+`grid=abc`, `Nv12` / `Pal8` / `Yuyv422` / `Cmyk` / `MonoBlack` /
+`Argb` / `Yuv411P` frames, missing geometry, short planes, audio) are
+typed refusals.
+
+**Decode matrix** (`tests/framework_decode_matrix.rs`): the demuxer +
+registry decoders against `decode_all` / `info` over every HEIF-family
+file the checkout sees — 57 vendored fixtures, the 14 staged corpus
+bundles, the 2 device samples, the 66 MPEG / Nokia conformance files
+and the 13 encrypted ones: **152 files, 128 decode on both paths, 24
+refused on both** (the `cenc` items, the predictive `pred` items C043 /
+C044 and the L-HEVC enhancement layers this crate does not decode),
+0 disagreements — every contract image item is a packet of a still
+stream with byte-identical pixels, label and colour signal, `pts` =
+index / duration 1 / `1/1`; every track frame comes from its composed
+or raw track stream with the same pixels and `duration × time_base`
+= the contract delay; `info()` describes the first still stream. A
+debug build skips the files whose header announces more than 4 M
+samples of decode work (the 12 MP device samples, the 720p
+conformance sequences) unless `OXIDEAV_HEIF_MATRIX_FULL=1`; a release
+build takes everything (68 s).
+
+What the two matrices changed (r475): planar sources keep their chroma
+sampling on HEVC (a 4:0:0 / 4:2:2 / 4:4:4 source used to be coded
+4:2:0 — the lossless mode was lossy on those layouts and `chroma=444`
+was ignored); `depth` applies to AV1 items of ≤ 12-bit sources; `pcm`
+on AVC is refused; the encoder's packets carry `dts` / duration 1;
+displayable items whose output differs from the primary's form further
+still streams instead of being dropped; the still streams follow
+`decode_all`'s `altr` selection (a `tmap` before its base, the other
+view of a `ster` pair on the pair's packet, a `pitm` thumbnail first);
+a primary that cannot be decoded falls back to its `altr` alternatives
+on both paths; a sequence-brand file (`msf1` / `hevc` / `avis` / …)
+lists its track streams before the cover still; the decoder declares
+`HeifDecoderOptions`.
+
+### CLI budgets (12 MP, `oxideav convert`, r475)
+
+The umbrella CLI as a black box (`cargo build -p oxideav-cli --release`,
+this machine: Apple M4 Max, macOS 26.6), `/usr/bin/time -l` wall and
+peak RSS of the whole process, the 4032×3024 iPhone 13 Pro Max device
+sample decoded to PNG / JPEG by Apple ImageIO as the source; no
+options (the CLI's defaults: thread budget auto, the `.heic` / `.avif`
+extension picking the codec). `--no-hwaccel` gives the same bytes and
+the same budgets on every HEIF direction (this crate and the pure-Rust
+codecs are the path either way); `heic→jpg` under `--no-hwaccel` is
+refused by the pure-Rust MJPEG encoder (`expected 3 planes`: an
+`oxideav-mjpeg` / gateway finding, not this crate's).
+
+| direction | wall | peak RSS | output |
+|---|---|---|---|
+| PNG → HEIC (`png→heic`, 48-tile automatic grid) | 0.77 s | 253 MiB | 2 238 585 B |
+| HEIC → PNG | 0.17 s | 192 MiB | 14 994 518 B |
+| HEIC → AVIF | 0.87 s | 214 MiB | 730 000 B |
+| AVIF → HEIC | 0.46 s | 199 MiB | 1 466 171 B |
+| JPEG (4:2:0) → HEIC | 0.50 s | 175 MiB | 2 234 977 B |
+| HEIC → JPEG | 0.19 s | 151 MiB | 2 708 883 B |
+| device HEIC (Apple 48-tile grid, `irot`) → PNG | 0.19 s | 191 MiB | 14 618 082 B |
+
+Small files (96×72 / 128×128 / a 96×80 `.heics`): `png→heic`,
+`heic→png`, `heic→avif`, `avif→heic`, `jpg→heic` (4:2:0 JPEG),
+`heic→jpg`, alpha HEIC → PNG / AVIF and `.heics` → GIF all open in
+`heif-info` / ImageMagick / ffprobe with the right geometry; a
+truncated HEIC or PNG input fails with a typed error and **no output
+file is created** (checked both directions). Two directions fail
+outside this crate (reported, not worked around): a 4:4:4 JPEG
+through the hardware JPEG decoder arrives labelled 4:4:4 with 4:2:0
+planes (`--no-hwaccel` converts it; a `videotoolbox` / cli finding),
+and `.heics → .mp4` is refused by the MP4 muxer (`no sample entry for
+codec heif`: the CLI hands it the cover still rather than the `h265`
+track — with the sequence-brand stream order of r475 the track is
+stream 0, so this is the CLI's stream selection to follow up).
+
+### Limits (what each codec refuses or converts)
+
+| Codec | Coded layouts | Converted silently | Refused (typed `Unsupported`) |
+|---|---|---|---|
+| HEVC (`hevc`, default) | the source's sampling — 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 — at 8 / 10 / 12 bits; packed RGB(A) / BGR(A) at `chroma` (4:2:0 default, 4:4:4) ; packed grey + alpha as 4:0:0; lossless RGB (`pcm`, full range, ≤ 12 bits) as identity-matrix 4:4:4 (`Gbrp*`) | 16-bit sources to 10 bits (`depth=12` for 12); 14-bit planar RGB to 10; planar RGB under a lossy mode through the matrix into `chroma`'s sampling; `pcm` at limited range converts RGB to YCbCr | `depth` other than 8 / 10 / 12; `ctb` other than 16 / 32 / 64 |
+| AV1 (`av1`) | the source's sampling at 8 / 10 / 12 bits; packed RGB(A) at `chroma`; packed grey + alpha as 4:0:0; planar RGB ≤ 12 bits as identity 4:4:4 (lossy too); lossless RGB (`pcm` / `quality=100`) exact | 16-bit sources to 10 (`depth=12` for 12); 14 / 16-bit planar RGB to 4:4:4 YCbCr at the coded depth | as HEVC |
+| AVC (`avc`) | 8-bit 4:2:0 only (`oxideav-h264`'s encoder line) | every deeper / 4:2:2 / 4:4:4 / grey / RGB source to 8-bit 4:2:0 | `mode=pcm` (no lossless mode) |
+| VVC (`vvc`) | 8-bit 4:2:0 only, 64-aligned coded size with `clap` (`oxideav-h266` 0.0.9's encoder line; 0.0.10 widens it) | as AVC | `mode=pcm` |
+
+Every codec: alpha rides a separate auxiliary item at the coded depth
+(HEVC: the 4:2:0 shape every producer writes; AV1: 4:0:0); odd sizes
+compose as 4:4:4 (the `clap` crop of a subsampled item); 4:2:0 12-bit
++ alpha and grey + alpha come back promoted to the 4:4:4 alpha layout
+(no framework label for them); `grid` tiles are ≥ 64 px and
+block-aligned (the automatic grid tiles pictures above 4 MP at 512 px);
+an `altr`-less file without a patchable `pitm` carries the primary
+alone. `HeifDecoderOptions` (`max_width` / `max_height` / `max_pixels`
+/ `max_bytes` / `strict` / `tone_mapped` / `item_id` /
+`base_layer_fallback` / `reference_white`) bound a decode before any
+allocation; `0` keeps the contract default.
 
 ## Supported layouts
 
@@ -156,9 +290,9 @@ silently except what the codec's coding layout implies):
 
 | `HeifImage::format` | HEVC (`codec: Hevc`, the default) | AV1 | VVC (`codec: Vvc`) |
 |---|---|---|---|
-| planar YCbCr / grey (`Yuv*`, `Gray*`) | 4:2:0 at the coded depth (`hevc_depth`: 8-bit sources at 8, 9–10 at 10, 11–12 at 12, deeper at 10), alpha as the `auxC` item | the image's own chroma layout and depth (≤ 12; deeper at the coded depth) | 8-bit 4:2:0 always (the `oxideav-h266` encoder's line; deeper sources rounded, grey gets neutral chroma), alpha as a VVC `auxC` item |
-| `Gbrp*` / `Gbrap*` (planar RGB) | lossy (`intra`): RGB → YCbCr through `opts.colr`'s matrix, then as above; lossless (`pcm`, ≤ 12 bit): coded as-is, 4:4:4 with `matrix_coefficients = 0` | ≤ 12 bit: coded as-is, `matrix_coefficients = 0` (lossless stays lossless); 16-bit: converted | RGB → 8-bit 4:2:0 YCbCr through `opts.colr`'s matrix; no lossless mode (`pcm` is refused: the identity-4:4:4 lossless ruling needs a 4:4:4 encoder, which h266 0.0.9 does not have) |
-| `Rgb24` / `Rgba` (packed) | lossy (`intra`): RGB → 4:2:0 YCbCr through `opts.colr`'s matrix (the production path of `oxideav convert`), alpha as the `auxC` item; lossless (`pcm`): the G, B, R planes as a 4:4:4 identity-matrix item (`decode` yields `Gbrp8` / `Gbrap8`, `to_rgba8` exact) | lossy: `EncodeOptions::chroma` (`None` = 4:2:0, `Some(Yuv444)` keeps full chroma); lossless (no quality / 100): identity-matrix 4:4:4 as HEVC | RGB → 8-bit 4:2:0 YCbCr through `opts.colr`'s matrix, alpha as the `auxC` item |
+| planar YCbCr / grey (`Yuv*`, `Gray*`) | the image's own chroma sampling (4:0:0 / 4:2:0 / 4:2:2 / 4:4:4) at the coded depth (`hevc_depth`: 8-bit sources at 8, 9–10 at 10, 11–12 at 12, deeper at 10), alpha as the `auxC` item (coded 4:2:0) | the image's own chroma layout and depth (≤ 12; deeper at the coded depth) | 8-bit 4:2:0 always (the `oxideav-h266` encoder's line; deeper sources rounded, grey gets neutral chroma), alpha as a VVC `auxC` item |
+| `Gbrp*` / `Gbrap*` (planar RGB) | lossy (`intra`): RGB → YCbCr through `opts.colr`'s matrix into `EncodeOptions::chroma`'s sampling (4:2:0 by default), then as above; lossless (`pcm`, ≤ 12 bit): coded as-is, 4:4:4 with `matrix_coefficients = 0` | ≤ 12 bit: coded as-is, `matrix_coefficients = 0` (lossless stays lossless); 16-bit: converted to 4:4:4 | RGB → 8-bit 4:2:0 YCbCr through `opts.colr`'s matrix; no lossless mode (`pcm` is refused: the identity-4:4:4 lossless ruling needs a 4:4:4 encoder, which h266 0.0.9 does not have) |
+| `Rgb24` / `Rgba` (packed) | lossy (`intra`): RGB → YCbCr through `opts.colr`'s matrix at `EncodeOptions::chroma` (4:2:0 by default — the production path of `oxideav convert` — or 4:4:4), alpha as the `auxC` item; lossless (`pcm`): the G, B, R planes as a 4:4:4 identity-matrix item (`decode` yields `Gbrp8` / `Gbrap8`, `to_rgba8` exact) | lossy: `EncodeOptions::chroma` (`None` = 4:2:0, `Some(Yuv444)` keeps full chroma); lossless (no quality / 100): identity-matrix 4:4:4 as HEVC | RGB → 8-bit 4:2:0 YCbCr through `opts.colr`'s matrix, alpha as the `auxC` item |
 
 `encode_rgb8` / `encode_rgba8` are the packed rows above without the
 `HeifImage` (the alpha channel becomes the alpha item): an RGB image

@@ -13,7 +13,7 @@ use std::io::Cursor;
 use std::sync::OnceLock;
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_core::{CodecOptions, Decoder, Demuxer, Muxer, ProbeData, RuntimeContext};
+use oxideav_core::{CodecOptions, Decoder, ProbeData, RuntimeContext};
 
 static CTX: OnceLock<RuntimeContext> = OnceLock::new();
 

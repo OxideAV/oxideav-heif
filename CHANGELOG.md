@@ -36,6 +36,20 @@ All notable changes to this project will be documented in this file.
   leaves out (a thumbnail as primary, conformance C005) comes first
   on both paths. Raw track streams carry `stream:<n>:track_id`.
   `HeifDemuxer::still_stream_items`.
+- **Sequence-brand files list their tracks first.** A file whose major
+  brand is a sequence brand (`msf1` / `hevc` / `hevx` / `hevm` / `hevs`
+  / `avis` / `avio` / `jpgs` / `avcs` / `vvis`) is its image sequence;
+  the `meta` still is its cover (HEIF §7.1). The demuxer now lists the
+  track streams (composed alpha stream, then the raw tracks) before the
+  still streams for those files, so a consumer that takes the first
+  video stream gets the sequence (`.heics → .gif` / `.mp4`); image-brand
+  files keep their stills first. Found by the CLI leg: `.heics → .mp4`
+  handed the MP4 muxer the cover still.
+- README: *Framework surface* (the two matrices' counts, the per-codec
+  limits table, the 12 MP CLI budgets each direction and the black-box
+  findings outside this crate: the hardware JPEG decoder's 4:4:4 frames
+  with 4:2:0 planes, the pure-Rust MJPEG encoder's `expected 3 planes`,
+  the CLI's stream selection for `.heics → .mp4`).
 - **Decoder options.** The `"heif"` decoder declares a schema
   (`HeifDecoderOptions`: `max_width` / `max_height` / `max_pixels` /
   `max_bytes` / `strict` / `tone_mapped` / `item_id` /

@@ -139,15 +139,17 @@ fn sequence_mux_demux_round_trip_is_exact() {
         .open_demuxer("heif", Box::new(Cursor::new(bytes)), &ctx.codecs)
         .unwrap();
     let streams = demuxer.streams().to_vec();
-    assert_eq!(streams.len(), 2, "still + track");
-    let track = &streams[1];
+    assert_eq!(streams.len(), 2, "track + still");
+    // A sequence-brand file lists its track first, the cover still after.
+    let track = &streams[0];
     assert_eq!(track.params.codec_id.as_str(), "h265");
+    assert_eq!(streams[1].params.codec_id.as_str(), "heif");
     assert_eq!(track.time_base, TimeBase::new(1, 10));
     let mut dec = ctx.codecs.first_decoder(&track.params).unwrap();
     let mut got = 0;
     loop {
         match demuxer.next_packet() {
-            Ok(p) if p.stream_index == 1 => {
+            Ok(p) if p.stream_index == track.index => {
                 assert_eq!(p.duration, Some(1));
                 dec.send_packet(&p).unwrap();
                 got += 1;
@@ -403,12 +405,15 @@ fn sequence_writer_alpha_track_round_trips_and_opens_in_readers() {
         .open_demuxer("heif", Box::new(Cursor::new(bytes.clone())), &ctx.codecs)
         .unwrap();
     let streams = d.streams().to_vec();
-    assert_eq!(streams.len(), 4, "still + composed + 2 raw");
-    assert_eq!(streams[1].params.codec_id.as_str(), "heif");
-    assert!(streams[1].params.pixel_format.unwrap().has_alpha());
+    assert_eq!(streams.len(), 4, "composed + 2 raw + still");
+    // A sequence-brand file lists its tracks first: the composed
+    // (alpha) stream, the raw master and alpha tracks, then the still.
+    assert_eq!(streams[0].params.codec_id.as_str(), "heif");
+    assert!(streams[0].params.pixel_format.unwrap().has_alpha());
+    assert_eq!(streams[3].params.codec_id.as_str(), "heif");
     let mut n = 0;
     while let Ok(p) = d.next_packet() {
-        if p.stream_index != 1 {
+        if p.stream_index != 0 {
             continue;
         }
         let mut codec = oxideav_heif::demux::HeifCodec::new(CodecId::new("heif"));

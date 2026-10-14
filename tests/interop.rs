@@ -239,7 +239,18 @@ fn framework_path_agrees_with_the_direct_path() {
             .open_demuxer(&name, Box::new(Cursor::new(bytes.clone())), &ctx.codecs)
             .unwrap();
         let streams = demuxer.streams().to_vec();
-        let still = &streams[0];
+        // The first still stream (a `.heics` lists its track first).
+        let si: u32 = demuxer
+            .metadata()
+            .iter()
+            .find_map(|(k, _)| {
+                k.strip_prefix("stream:")?
+                    .strip_suffix(":item_ids")?
+                    .parse()
+                    .ok()
+            })
+            .unwrap_or_else(|| panic!("{}: still stream", row.file));
+        let still = &streams[si as usize];
         assert_eq!(still.params.codec_id.as_str(), "heif", "{}", row.file);
         assert_eq!(
             (still.params.width, still.params.height),
@@ -274,25 +285,26 @@ fn framework_path_agrees_with_the_direct_path() {
             "{}: framework planes",
             row.file
         );
-        // The .heics still is followed by the sequence track(s): raw
-        // `h265` streams, preceded by a composed `"heif"` stream when
-        // an alpha track exists.
+        // A .heics (sequence brand) lists its track streams first —
+        // a composed `"heif"` stream when an alpha track exists, then
+        // the raw `h265` streams — and the cover still after them.
         if ext == "heics" {
             assert!(streams.len() >= 2, "{}: sequence track", row.file);
             assert!(
-                streams[1..]
-                    .iter()
-                    .any(|s| s.params.codec_id.as_str() == "h265"),
+                streams.iter().any(|s| s.params.codec_id.as_str() == "h265"),
                 "{}: raw sequence track",
                 row.file
             );
+            assert_eq!(si as usize, streams.len() - 1, "{}: still last", row.file);
             if row.alpha {
                 assert_eq!(
-                    streams[1].params.codec_id.as_str(),
+                    streams[0].params.codec_id.as_str(),
                     "heif",
                     "composed alpha stream"
                 );
-                assert!(streams[1].params.pixel_format.unwrap().has_alpha());
+                assert!(streams[0].params.pixel_format.unwrap().has_alpha());
+            } else {
+                assert_eq!(streams[0].params.codec_id.as_str(), "h265", "{}", row.file);
             }
         }
     }

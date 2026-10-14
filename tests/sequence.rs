@@ -176,7 +176,8 @@ fn apple_alpha_sequence_composes_alpha_through_the_demuxer() {
         Some("urn:mpeg:hevc:2015:auxid:1")
     );
     assert_eq!(alpha.sample_index_at(0, mv.tracks[0].timescale), Some(0));
-    // Demuxer: still, composed (heif), raw master, raw alpha.
+    // Demuxer: composed (heif), raw master, raw alpha, then the cover
+    // still — a sequence-brand file lists its tracks first.
     let mut ctx = oxideav_core::RuntimeContext::new();
     oxideav_h265::register(&mut ctx);
     oxideav_heif::register(&mut ctx);
@@ -186,15 +187,15 @@ fn apple_alpha_sequence_composes_alpha_through_the_demuxer() {
         .unwrap();
     let streams = d.streams().to_vec();
     assert_eq!(streams.len(), 4, "{streams:#?}");
-    assert_eq!(streams[0].params.codec_id.as_str(), "heif");
     assert_eq!(
-        streams[1].params.codec_id.as_str(),
+        streams[0].params.codec_id.as_str(),
         "heif",
         "composed stream"
     );
-    assert!(streams[1].params.pixel_format.unwrap().has_alpha());
+    assert!(streams[0].params.pixel_format.unwrap().has_alpha());
+    assert_eq!(streams[1].params.codec_id.as_str(), "h265");
     assert_eq!(streams[2].params.codec_id.as_str(), "h265");
-    assert_eq!(streams[3].params.codec_id.as_str(), "h265");
+    assert_eq!(streams[3].params.codec_id.as_str(), "heif", "cover still");
     assert!(d
         .metadata()
         .iter()
@@ -204,9 +205,9 @@ fn apple_alpha_sequence_composes_alpha_through_the_demuxer() {
     let mut raw_alpha = None;
     while let Ok(p) = d.next_packet() {
         match p.stream_index {
-            1 => composed = Some(p),
-            2 => raw_master = Some(p),
-            3 => raw_alpha = Some(p),
+            0 => composed = Some(p),
+            1 => raw_master = Some(p),
+            2 => raw_alpha = Some(p),
             _ => {}
         }
     }
@@ -233,7 +234,7 @@ fn apple_alpha_sequence_composes_alpha_through_the_demuxer() {
     assert_eq!(master.len(), 23040);
     assert_eq!(fnv1a64(&master), 0xfa2dc301e1fd4945, "master planes");
     // Raw alpha track through the HEVC decoder: byte-exact (gray).
-    let mut dec = ctx.codecs.first_decoder(&streams[3].params).unwrap();
+    let mut dec = ctx.codecs.first_decoder(&streams[2].params).unwrap();
     dec.send_packet(&raw_alpha.unwrap()).unwrap();
     dec.flush().unwrap();
     let Frame::Video(av) = dec.receive_frame().unwrap() else {

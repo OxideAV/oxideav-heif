@@ -24,7 +24,11 @@
 //!   items and the gain map are composed into or attached to their
 //!   master, never frames of their own.
 //! * **one stream per visual track** (`pict` / `vide` / `auxv`
-//!   handlers of the `moov` box, image sequences): codec id resolved
+//!   handlers of the `moov` box, image sequences) — **first** in the
+//!   stream list when the file's major brand is a sequence brand
+//!   (`msf1` / `hevc` / `avis` / `avcs` / `vvis` / …: the sequence is
+//!   the content and the still its cover image, HEIF §7.1), after the
+//!   still streams otherwise: codec id resolved
 //!   from the sample-entry type (`hvc1` → `"h265"`, `av01` → `"av1"`,
 //!   `vvc1` → `"h266"`, …) through the [`CodecResolver`], `extradata`
 //!   = the `hvcC` / `av1C` / `avcC` / `vvcC` record, packets = the samples in decode order with `pts`
@@ -173,6 +177,19 @@ fn output_colour(node: &ImageNode) -> crate::props::Colr {
         (ImageKind::ToneMap(_), Some(base)) => item_colour(base),
         _ => item_colour(node),
     }
+}
+
+/// The file's major brand names an image sequence (`msf1` and the
+/// codec sequence brands): the tracks are the content, the still of
+/// the `meta` box the cover image (HEIF §7.1), so the track streams
+/// come first.
+fn sequence_major(ft: &crate::ftyp::FileType) -> bool {
+    use crate::ftyp::*;
+    [
+        BRAND_MSF1, BRAND_HEVC, BRAND_HEVX, BRAND_HEVM, BRAND_HEVS, BRAND_AVIS, BRAND_AVIO,
+        BRAND_JPGS, BRAND_AVCS, BRAND_VVIS,
+    ]
+    .contains(&ft.major_brand)
 }
 
 /// Codec id for a sample-entry type, through the resolver first and
@@ -472,6 +489,10 @@ impl HeifDemuxer {
         let movie = parse_movie(&file)?;
         let mut streams = Vec::new();
         let mut stills: Vec<StillStream> = Vec::new();
+        // The still streams, built before their indices are known: a
+        // sequence-brand file lists its tracks first.
+        let mut pending_stills: Vec<(CodecParameters, Vec<u32>)> = Vec::new();
+        let sequence_first = sequence_major(&file.file_type);
         let mut pitm_field: Option<(usize, usize)> = None;
         let mut metadata = vec![
             (
@@ -557,30 +578,17 @@ impl HeifDemuxer {
                             params = params.with_layers(layers);
                         }
                     }
-                    let index = streams.len() as u32;
-                    metadata.push((
-                        format!("stream:{index}:item_ids"),
-                        g.items
-                            .iter()
-                            .map(u32::to_string)
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    ));
-                    streams.push(StreamInfo {
-                        index,
-                        time_base: TimeBase::new(1, 1),
-                        duration: Some(g.items.len() as i64),
-                        start_time: Some(0),
-                        params,
-                    });
-                    stills.push(StillStream {
-                        index,
-                        items: g.items.clone(),
-                        cursor: 0,
-                    });
+                    pending_stills.push((params, g.items.clone()));
                 }
             }
         }
+        // Track streams take the indices after the stills, or from 0
+        // in a sequence-brand file (the stills then follow them).
+        let track_base = if sequence_first {
+            0
+        } else {
+            pending_stills.len()
+        };
         // Composed streams: a master track with an alpha auxiliary
         // track yields a `"heif"` stream whose packets are synthesized
         // stills (master + time-parallel alpha) — frames with alpha
@@ -615,7 +623,7 @@ impl HeifDemuxer {
                 params.height = Some(entry.height as u32);
                 params.pixel_format = core_pixel_format_for(layout.with_alpha(), &colour);
                 let time_base = TimeBase::new(1, t.timescale.max(1) as i64);
-                let index = streams.len() as u32;
+                let index = (track_base + streams.len()) as u32;
                 streams.push(StreamInfo {
                     index,
                     time_base,
@@ -679,7 +687,7 @@ impl HeifDemuxer {
                 }
                 params = params.with_tag(CodecTag::fourcc(&entry.entry_type));
                 let time_base = TimeBase::new(1, t.timescale.max(1) as i64);
-                let index = streams.len() as u32;
+                let index = (track_base + streams.len()) as u32;
                 streams.push(StreamInfo {
                     index,
                     time_base,
@@ -711,6 +719,37 @@ impl HeifDemuxer {
                     ));
                 }
             }
+        }
+        // The still streams at their indices.
+        let still_base = if sequence_first { streams.len() } else { 0 };
+        let mut still_infos = Vec::with_capacity(pending_stills.len());
+        for (i, (params, items)) in pending_stills.into_iter().enumerate() {
+            let index = (still_base + i) as u32;
+            metadata.push((
+                format!("stream:{index}:item_ids"),
+                items
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ));
+            still_infos.push(StreamInfo {
+                index,
+                time_base: TimeBase::new(1, 1),
+                duration: Some(items.len() as i64),
+                start_time: Some(0),
+                params,
+            });
+            stills.push(StillStream {
+                index,
+                items,
+                cursor: 0,
+            });
+        }
+        if sequence_first {
+            streams.extend(still_infos);
+        } else {
+            streams.splice(0..0, still_infos);
         }
         if streams.is_empty() {
             return Err(HeifError::unsupported(
