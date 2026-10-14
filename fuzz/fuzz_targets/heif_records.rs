@@ -184,10 +184,19 @@ fuzz_target!(|data: &[u8]| {
                     channels: ids,
                 },
             ]);
+            // Channel 2 is Y: a YCbCr colour description (under the
+            // identity matrix the planner wants G / B / R channels and
+            // refuses, typed — the other oracle above covers that).
+            let ycc = oxideav_heif::props::Colr::Nclx {
+                primaries: 1,
+                transfer: 13,
+                matrix: 6,
+                full_range: true,
+            };
             let out = oxideav_heif::compose::composite_colour_format_enhancement(
                 &cfen,
                 std::slice::from_ref(&packed),
-                Some(&colr),
+                Some(&ycc),
             )
             .unwrap();
             assert_eq!(out.planes[0].data, cells[0].planes[0].data);

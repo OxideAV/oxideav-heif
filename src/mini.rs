@@ -816,6 +816,15 @@ impl MinimizedImage {
     /// `ftyp.minor_version` (L.4.3: `vvi3` → `vvc1` / `vvcC`).
     pub fn codec_types(&self, minor_version: u32) -> Result<(FourCc, FourCc)> {
         if let Some(t) = self.explicit_codec_types {
+            // `uuid` is the extended-type box (ISO/IEC 14496-12 §4.2): a
+            // property box of that type needs a 16-byte extended type
+            // the expansion does not carry, so the equivalent file would
+            // not parse (fuzz-found).
+            if t.0 == *b"uuid" || t.1 == *b"uuid" {
+                return Err(HeifError::invalid(
+                    "mini: explicit codec types shall not be 'uuid' (the extended-type box)",
+                ));
+            }
             return Ok(t);
         }
         match &minor_version.to_be_bytes() {
@@ -1829,5 +1838,17 @@ mod tests {
         for cut in 8..b.len() {
             assert!(MinimizedImage::parse(&b[8..cut]).is_err(), "cut {cut}");
         }
+    }
+
+    #[test]
+    fn uuid_codec_types_are_refused() {
+        // Fuzz-found: a `uuid` codec configuration type expanded to a
+        // property box the parser (rightly) refuses.
+        let mut m = sample();
+        m.explicit_codec_types = Some((*b"av01", *b"uuid"));
+        let ft = crate::FileType::new(*b"ftyp", *b"mif3", 0, vec![]);
+        assert!(m.equivalent_file(&ft).is_err());
+        m.explicit_codec_types = Some((*b"uuid", *b"av1C"));
+        assert!(m.equivalent_file(&ft).is_err());
     }
 }

@@ -68,6 +68,14 @@ All notable changes to this project will be documented in this file.
   on a `cfen` item without inputs (fuzz-found by `heif_records`, the
   5-byte body `0f 00 00 00 00`): a typed `InvalidData` refusal now;
   the input is a corpus seed and a unit test.
+- `MinimizedImage::codec_types` refuses explicit codec types of `uuid`
+  (the extended-type box of ISO/IEC 14496-12 §4.2): the O.4 equivalent
+  file used to carry a `uuid` property box without an extended type,
+  which the parser refused (fuzz-found by `heif_records`; corpus seed +
+  unit test). The target's packed-channel oracle composes under a
+  YCbCr description (under the identity matrix the planner asks for
+  G / B / R channels, typed — that was the oracle's premise, not a
+  defect).
 
 ### Changed
 
