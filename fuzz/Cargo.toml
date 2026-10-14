@@ -36,6 +36,9 @@ cargo-fuzz = true
 #                      `decode_rgba8` / `decode_all_with` under tight
 #                      `DecodeOptions` limits (container → codec →
 #                      composition → RGB; seeded with the corpus files).
+#  * `heif_framework` — the framework path: registry probe, the `"heif"`
+#                      demuxer (streams, packets, seeks), the `"heif"`
+#                      decoder under tight decoder options, the muxer.
 #
 # `heif_decode` needs the default `registry` feature (the codec crates
 # have their own harnesses; here they are reached only through valid
@@ -46,6 +49,20 @@ libfuzzer-sys = "0.4"
 
 [dependencies.oxideav-heif]
 path = ".."
+
+# The framework target registers the codec crates the still decoder
+# resolves through (published versions, as the crate's own CI does).
+[dependencies.oxideav-core]
+version = "0.1"
+
+[dependencies.oxideav-h265]
+version = ">=0.0.13, <0.1"
+
+[dependencies.oxideav-av1]
+version = "0.1.19"
+
+[dependencies.oxideav-h264]
+version = "0.1"
 
 # Prevent this fuzz package from being pulled into the umbrella
 # workspace at `crates/*` glob-resolve time.
@@ -88,5 +105,11 @@ doc = false
 [[bin]]
 name = "heif_decode"
 path = "fuzz_targets/heif_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "heif_framework"
+path = "fuzz_targets/heif_framework.rs"
 test = false
 doc = false

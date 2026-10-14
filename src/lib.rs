@@ -133,7 +133,7 @@ pub use api_registry::{
 #[cfg(feature = "registry")]
 pub use decode::{decode_item, decode_primary, DecodedImage, ItemDecoder};
 #[cfg(feature = "registry")]
-pub use demux::{make_decoder, HeifCodec, HeifDemuxer};
+pub use demux::{make_decoder, HeifCodec, HeifDecoderOptions, HeifDemuxer};
 #[cfg(feature = "registry")]
 pub use encode::{
     encode_still, encode_still_minimized, make_encoder, EncodeOptions, HeifEncoder,

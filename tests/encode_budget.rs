@@ -146,8 +146,15 @@ fn hevc_wavefront_budget_keeps_the_bytes() {
 
 #[test]
 fn deeper_sources_code_at_ten_bits() {
-    // A 16-bit 4:4:4 source codes as Main 10 4:2:0; a 12-bit one at 12.
+    // A 16-bit 4:4:4 source codes at 10 bits in its own 4:4:4 sampling
+    // (planar sources keep their chroma); a 12-bit one at 12.
     let src16 = picture(64, 48, 16, Chroma::Yuv444, false);
+    let bytes = encode_still(&src16, &EncodeOptions::default()).unwrap();
+    let img = decode(&bytes);
+    assert_eq!(img.frame.format.bit_depth, 10);
+    assert_eq!(img.frame.format.chroma, Chroma::Yuv444);
+    // A 16-bit 4:2:0 source stays 4:2:0 at 10 bits.
+    let src16 = picture(64, 48, 16, Chroma::Yuv420, false);
     let bytes = encode_still(&src16, &EncodeOptions::default()).unwrap();
     let img = decode(&bytes);
     assert_eq!(img.frame.format.bit_depth, 10);
@@ -357,9 +364,12 @@ fn framework_encoder_chroma_and_filters_options() {
         CodecOptions::new().set("codec", "av1").set("chroma", "444"),
     ));
     assert_eq!(a444.frame.format.chroma, Chroma::Yuv444);
-    // HEVC always codes 4:2:0; the filters change the bytes.
-    let on = encode(CodecOptions::new().set("chroma", "444"));
+    // HEVC: packed RGB codes 4:2:0 by default, 4:4:4 on request; the
+    // filters change the bytes.
+    let on = encode(CodecOptions::new());
     assert_eq!(decode(&on).frame.format.chroma, Chroma::Yuv420);
+    let h444 = encode(CodecOptions::new().set("chroma", "444"));
+    assert_eq!(decode(&h444).frame.format.chroma, Chroma::Yuv444);
     let off = encode(CodecOptions::new().set("filters", "off"));
     assert_ne!(on, off);
     // A 16-bit source lands as a Main 10 item.

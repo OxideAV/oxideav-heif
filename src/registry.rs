@@ -59,7 +59,8 @@ pub fn register_codecs(reg: &mut oxideav_core::CodecRegistry) {
             .capabilities(caps)
             .decoder(make_decoder)
             .encoder(make_encoder)
-            .encoder_options::<crate::encode::HeifEncoderOptions>(),
+            .encoder_options::<crate::encode::HeifEncoderOptions>()
+            .decoder_options::<crate::demux::HeifDecoderOptions>(),
     );
 }
 
@@ -127,6 +128,25 @@ mod tests {
                 "depth",
                 "filters",
                 "chroma"
+            ]
+        );
+        let schema = ctx
+            .codecs
+            .decoder_options_schema(&CodecId::new(CODEC_ID))
+            .expect("decoder options schema");
+        let names: Vec<&str> = schema.iter().map(|f| f.name).collect();
+        assert_eq!(
+            names,
+            [
+                "max_width",
+                "max_height",
+                "max_pixels",
+                "max_bytes",
+                "strict",
+                "tone_mapped",
+                "item_id",
+                "base_layer_fallback",
+                "reference_white"
             ]
         );
         assert_eq!(

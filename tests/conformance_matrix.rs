@@ -1459,9 +1459,12 @@ fn conformance_matrix_both_directions() {
     // Round-trip invariants: every reader opens the file; our own
     // decode and every rendering reader land within 1 dB of each
     // other against the source (the lossy defaults, not the readers,
-    // set the level); the HEIC default reaches 44 dB on the 12 MP
-    // picture (the 96×80 one is bounded by its own 4:2:0 chroma —
-    // ~35 dB lossless — so only a sanity floor applies there).
+    // set the level) — Apple ImageIO (`sips`) within 1.5 dB: its own
+    // 4:2:0 HEVC / AV1 colour pipeline (the saturated-pixel deltas of
+    // the writer table) lands 0.8–1.0 dB under every other reader on
+    // these pictures, run to run; the HEIC default reaches 44 dB on
+    // the 12 MP picture (the 96×80 one is bounded by its own 4:2:0
+    // chroma — ~35 dB lossless — so only a sanity floor applies there).
     for (name, _, ours, cells) in &round_trips {
         if name.starts_with("HEIC") {
             let floor = if name.contains("12 MP") { 44.0 } else { 30.0 };
@@ -1470,8 +1473,9 @@ fn conformance_matrix_both_directions() {
         for (r, c) in cells {
             assert!(!c.starts_with("REFUSED"), "{name}: {} {c}", r.name());
             if let Some(db) = c.strip_suffix(" dB").and_then(|v| v.parse::<f64>().ok()) {
+                let band = if *r == Reader::Sips { 1.5 } else { 1.0 };
                 assert!(
-                    (db - ours).abs() <= 1.0,
+                    (db - ours).abs() <= band,
                     "{name}: {} renders at {db:.2} dB, this crate at {ours:.2} dB",
                     r.name()
                 );

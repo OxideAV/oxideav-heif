@@ -60,7 +60,11 @@ pub fn decode_file<D: AsRef<[u8]>>(file: &HeifFile<D>, opts: &DecodeOptions) -> 
 /// The item decode behind [`decode_file`], keeping the whole
 /// [`DecodedImage`] (depth map, thumbnails, gain map, layers, typed
 /// properties): limits and strictness of `opts` applied, the item
-/// `opts.item_id` or the primary.
+/// `opts.item_id` or the primary. A primary that cannot be decoded
+/// falls back to the other members of its `altr` group, in group
+/// order (HEIF §10.2.1: under any brand the primary item, or an
+/// alternative, shall be processable — the `altr` semantics of
+/// [`decode_all`]); an explicit `item_id` never falls back.
 pub fn decode_file_item<D: AsRef<[u8]>>(
     file: &HeifFile<D>,
     opts: &DecodeOptions,
@@ -70,7 +74,24 @@ pub fn decode_file_item<D: AsRef<[u8]>>(
         Some(id) => id,
         None => file.primary_item()?.id,
     };
-    decode_checked_item(file, id, opts)
+    let err = match decode_checked_item(file, id, opts) {
+        Ok(img) => return Ok(img),
+        Err(e) => e,
+    };
+    if opts.item_id.is_some() {
+        return Err(err);
+    }
+    let Ok(meta) = file.meta() else {
+        return Err(err);
+    };
+    for group in meta.groups_containing(id, b"altr") {
+        for &alt in group.entity_ids.iter().filter(|&&alt| alt != id) {
+            if let Ok(img) = decode_checked_item(file, alt, opts) {
+                return Ok(img);
+            }
+        }
+    }
+    Err(err)
 }
 
 /// Decode `id` with the geometry limits of `opts` checked against the
@@ -180,6 +201,14 @@ pub fn decode_all_with(bytes: &[u8], opts: &DecodeOptions) -> Result<Vec<Frame>>
                 e.first().copied().unwrap_or(u32::MAX),
             )
         });
+        // The primary comes first even when the display order leaves
+        // it out (a thumbnail named by `pitm`, conformance C005): the
+        // viewer's own picture, then the other masters.
+        if let Some(p) = primary {
+            if !entries.iter().any(|e| e.contains(&p)) {
+                entries.insert(0, vec![p]);
+            }
+        }
         for alternatives in entries {
             let mut decoded = false;
             for id in alternatives {
@@ -510,6 +539,17 @@ fn prepare_item(image: &HeifImage, opts: &EncodeOptions) -> Result<(HeifFrame, E
         let rgb = crate::rgb::to_rgb(&planar, Some(&identity))?;
         drop(planar);
         let ycc = crate::rgb::from_rgb(&rgb, Some(&opts.colr), Chroma::Yuv444)?;
+        drop(rgb);
+        let target = planar_rgb_target_chroma(&opts);
+        let ycc = if target == Chroma::Yuv444 {
+            ycc
+        } else {
+            let converted = crate::encode::to_layout(&ycc, target, ycc.format.bit_depth)?;
+            match ycc.alpha_as_frame() {
+                Some(a) => converted.with_alpha_plane(&a)?,
+                None => converted,
+            }
+        };
         return Ok((ycc, opts));
     }
     Ok((planar, opts))
@@ -543,6 +583,16 @@ pub fn encode_owned(image: HeifImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
             drop(planar);
             let ycc = crate::rgb::from_rgb(&rgb, Some(&opts.colr), Chroma::Yuv444)?;
             drop(rgb);
+            let target = planar_rgb_target_chroma(&opts);
+            let ycc = if target == Chroma::Yuv444 {
+                ycc
+            } else {
+                let converted = crate::encode::to_layout(&ycc, target, ycc.format.bit_depth)?;
+                match ycc.alpha_as_frame() {
+                    Some(a) => converted.with_alpha_plane(&a)?,
+                    None => converted,
+                }
+            };
             encode_still_owned(ycc, &opts)
         };
     }
@@ -711,10 +761,12 @@ pub(crate) fn identity_colr(colr: &Colr) -> Colr {
 }
 
 /// The coding layout a packed source of `depth` bits is converted to
-/// for the configured codec: 4:2:0 for HEVC (monochrome rides 4:2:0
-/// too), [`EncodeOptions::chroma`] (default 4:2:0; monochrome for grey
-/// sources) for AV1, at the coded depth, with the source's alpha.
-pub(crate) fn packed_target(
+/// for the configured codec: [`EncodeOptions::chroma`] (4:2:0 by
+/// default, 4:4:4 on request) for HEVC and AV1 — monochrome for a
+/// packed grey source — at the coded depth; VVC and AVC items are
+/// 8-bit 4:2:0 (their encoders' line). With the source's alpha.
+#[doc(hidden)]
+pub fn packed_target(
     opts: &EncodeOptions,
     grey: bool,
     depth: u8,
@@ -722,13 +774,25 @@ pub(crate) fn packed_target(
 ) -> Result<HeifPixelFormat> {
     let coded = coded_depth(depth, opts.hevc_depth)?;
     let (chroma, coded) = match opts.codec {
-        StillCodec::Hevc => (Chroma::Yuv420, coded),
-        StillCodec::Av1 if grey => (Chroma::Mono, coded),
-        StillCodec::Av1 => (opts.chroma.unwrap_or(Chroma::Yuv420), coded),
+        StillCodec::Hevc | StillCodec::Av1 if grey => (Chroma::Mono, coded),
+        StillCodec::Hevc | StillCodec::Av1 => (opts.chroma.unwrap_or(Chroma::Yuv420), coded),
         // VVC and AVC items are 8-bit 4:2:0.
         StillCodec::Vvc | StillCodec::Avc => (Chroma::Yuv420, 8),
     };
     HeifPixelFormat::new(chroma, coded, alpha)
+}
+
+/// The chroma sampling a planar RGB source is converted to when the
+/// codec does not keep it as an identity-matrix item: AV1 converts to
+/// 4:4:4 (it codes any sampling; a 16-bit RGB source becomes 4:4:4 at
+/// the coded depth), HEVC to [`EncodeOptions::chroma`] (4:2:0 by
+/// default, as a packed RGB source), VVC / AVC to 4:2:0.
+pub(crate) fn planar_rgb_target_chroma(opts: &EncodeOptions) -> Chroma {
+    match opts.codec {
+        StillCodec::Av1 => Chroma::Yuv444,
+        StillCodec::Hevc => opts.chroma.unwrap_or(Chroma::Yuv420),
+        StillCodec::Vvc | StillCodec::Avc => Chroma::Yuv420,
+    }
 }
 
 /// The `colr` an image is written with: `opts.colr` (the MIAF default

@@ -621,10 +621,13 @@ fn alpha_parameter_sets_differ_from_the_master() {
                 .sps_id
         };
         assert_eq!((sps_id(master_cfg), sps_id(alpha_cfg)), (0, 1));
+        // The alpha is the opacity plane in the 4:2:0 shape every
+        // HEVC producer writes (neutral chroma), whatever sampling the
+        // master keeps.
         assert_eq!(
-            (alpha.ispe(), master_cfg.chroma_format_idc),
-            (node.ispe(), alpha_cfg.chroma_format_idc),
-            "{}: alpha coded at the master geometry",
+            (alpha.ispe(), alpha_cfg.chroma_format_idc),
+            (node.ispe(), 1),
+            "{}: alpha coded 4:2:0 at the master geometry",
             opts.hevc_mode
         );
         // The alpha still decodes to the master's geometry, exactly.

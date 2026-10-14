@@ -15,11 +15,14 @@
 //!   item index in a 1/1 time base, duration 1. The stream's
 //!   [`CodecParameters`] announce the predicted output geometry and
 //!   pixel format so pipelines can allocate before decoding; items
-//!   whose output differs from the primary's are not part of it
-//!   (`metadata` key `stream:<n>:item_ids` lists the carried items).
-//!   Alpha / depth auxiliaries, thumbnails, hidden items and the gain
-//!   map are composed into or attached to their master, never frames
-//!   of their own.
+//!   whose predicted output (layout, geometry, colour description)
+//!   differs from the primary's form **further still streams**, one
+//!   per distinct output in first-appearance order (as a multi-part
+//!   EXR declares one stream per part layout), so no displayable
+//!   image is lost (`metadata` key `stream:<n>:item_ids` lists each
+//!   stream's items). Alpha / depth auxiliaries, thumbnails, hidden
+//!   items and the gain map are composed into or attached to their
+//!   master, never frames of their own.
 //! * **one stream per visual track** (`pict` / `vide` / `auxv`
 //!   handlers of the `moov` box, image sequences): codec id resolved
 //!   from the sample-entry type (`hvc1` → `"h265"`, `av01` → `"av1"`,
@@ -162,6 +165,16 @@ fn item_colour(node: &ImageNode) -> crate::props::Colr {
         .unwrap_or(crate::props::Colr::MIAF_DEFAULT)
 }
 
+/// The colour information a decoded item carries: a `tmap` decodes to
+/// its base rendition by default, with the base's colour information
+/// ([`decode::ToneMapOutput`]); every other item its own.
+fn output_colour(node: &ImageNode) -> crate::props::Colr {
+    match (&node.kind, node.inputs.first()) {
+        (ImageKind::ToneMap(_), Some(base)) => item_colour(base),
+        _ => item_colour(node),
+    }
+}
+
 /// Codec id for a sample-entry type, through the resolver first and
 /// by the well-known types otherwise.
 fn codec_id_for_entry(entry_type: &[u8; 4], codecs: &dyn CodecResolver) -> Option<CodecId> {
@@ -178,6 +191,25 @@ fn codec_id_for_entry(entry_type: &[u8; 4], codecs: &dyn CodecResolver) -> Optio
         b"vvc1" | b"vvi1" => Some(CodecId::new(decode::CODEC_ID_VVC)),
         _ => None,
     }
+}
+
+/// One still stream: its index, its items (one packet each) and the
+/// next packet to emit.
+struct StillStream {
+    index: u32,
+    items: Vec<u32>,
+    cursor: usize,
+}
+
+/// The displayable items of one predicted output: the items in
+/// packet order, the layout / geometry / colour they share, and the
+/// first item's derivation graph (the stream description's source).
+struct StillGroup {
+    items: Vec<u32>,
+    layout: Option<HeifPixelFormat>,
+    size: Option<(u32, u32)>,
+    colour: crate::props::Colr,
+    first: ImageNode,
 }
 
 struct TrackStream {
@@ -318,53 +350,87 @@ pub struct HeifDemuxer {
     file: HeifFile,
     movie: Option<Movie>,
     streams: Vec<StreamInfo>,
-    /// The pictures of the still stream, one packet each: the primary
-    /// item first, then the other displayable image items (a burst) in
-    /// [`crate::decode_all`]'s order.
-    still_items: Vec<u32>,
-    /// Next still packet to emit (an index into `still_items`).
-    still_cursor: usize,
+    /// The still streams — one per distinct predicted output among the
+    /// displayable image items, the primary's first — each with its
+    /// pictures, one packet each, in [`crate::decode_all`]'s order.
+    stills: Vec<StillStream>,
     /// Absolute offset and width (2 / 4 bytes) of the `pitm` item id
     /// field, patched to name the item a burst packet carries.
     pitm_field: Option<(usize, usize)>,
-    still_stream: Option<u32>,
     tracks: Vec<(u32, TrackStream)>,
     active: Option<Vec<u32>>,
     metadata: Vec<(String, String)>,
 }
 
 /// The displayable image items of `file` in [`crate::decode_all`]'s
-/// order — the primary first, then every other entry of the viewer's
-/// display order (MIAF Annex A: non-hidden masters, thumbnails and
-/// auxiliaries excluded, an `altr` group counting once) by ascending
-/// first id — restricted to the items whose predicted output (layout
-/// and geometry) equals the primary's, so one stream description fits
-/// every packet. An `altr` group contributes its first member whose
-/// derivation graph builds.
-fn still_item_order<D: AsRef<[u8]>>(file: &HeifFile<D>, primary: &ImageNode) -> Vec<u32> {
+/// order — the entries of the viewer's display order (MIAF Annex A:
+/// non-hidden masters, thumbnails and auxiliaries excluded, an `altr`
+/// group counting once), the entry holding the primary first, then by
+/// ascending first id; each entry contributes its first member whose
+/// derivation graph builds and whose output can be predicted (a `tmap`
+/// listed before its base, as `decode_all` picks it) — grouped by
+/// predicted output (layout, geometry and colour description) so one
+/// stream description fits every packet of a group, groups in
+/// first-appearance order. A file whose display order yields nothing
+/// (the primary a thumbnail of nothing displayable, …) carries the
+/// primary alone.
+fn still_groups<D: AsRef<[u8]>>(file: &HeifFile<D>, primary: &ImageNode) -> Vec<StillGroup> {
     let pid = primary.item.id;
-    let mut out = vec![pid];
-    let Ok(meta) = file.meta() else {
-        return out;
-    };
-    let Ok(want) = predict_output(primary) else {
-        return out;
-    };
-    let mut entries = meta.display_order();
-    entries.sort_by_key(|e| (!e.contains(&pid), e.first().copied().unwrap_or(u32::MAX)));
-    for alternatives in entries {
-        if alternatives.contains(&pid) {
-            continue;
+    let mut groups: Vec<StillGroup> = Vec::new();
+    if let Ok(meta) = file.meta() {
+        let mut entries = meta.display_order();
+        entries.sort_by_key(|e| (!e.contains(&pid), e.first().copied().unwrap_or(u32::MAX)));
+        // The primary comes first even when the display order leaves
+        // it out (a thumbnail named by `pitm`), as `decode_all` does.
+        if !entries.iter().any(|e| e.contains(&pid)) {
+            entries.insert(0, vec![pid]);
         }
-        let pick = alternatives.iter().copied().find_map(|id| {
-            let node = build_graph(file, id).ok()?;
-            (predict_output(&node).ok()? == want).then_some(id)
-        });
-        if let Some(id) = pick {
-            out.push(id);
+        // The other view of a `ster` pair rides the pair's packet (the
+        // decoder emits both views, tagged), never a packet of its own.
+        let mut partners: Vec<u32> = Vec::new();
+        for alternatives in entries {
+            if alternatives.iter().any(|id| partners.contains(id)) {
+                continue;
+            }
+            let pick = alternatives.iter().copied().find_map(|id| {
+                let node = build_graph(file, id).ok()?;
+                let (fmt, size) = predict_output(&node).ok()?;
+                Some((id, fmt, size, node))
+            });
+            let Some((id, fmt, size, node)) = pick else {
+                continue;
+            };
+            if let Some((l, r)) = stereo_pair_of(file, id) {
+                partners.push(l);
+                partners.push(r);
+            }
+            let colour = output_colour(&node);
+            match groups
+                .iter_mut()
+                .find(|g| g.layout == Some(fmt) && g.size == Some(size) && g.colour == colour)
+            {
+                Some(g) => g.items.push(id),
+                None => groups.push(StillGroup {
+                    items: vec![id],
+                    layout: Some(fmt),
+                    size: Some(size),
+                    colour,
+                    first: node,
+                }),
+            }
         }
     }
-    out
+    if groups.is_empty() {
+        let predicted = predict_output(primary).ok();
+        groups.push(StillGroup {
+            items: vec![pid],
+            layout: predicted.map(|p| p.0),
+            size: predicted.map(|p| p.1),
+            colour: output_colour(primary),
+            first: primary.clone(),
+        });
+    }
+    groups
 }
 
 /// Absolute offset and byte width of the `pitm` item id inside the
@@ -405,8 +471,7 @@ impl HeifDemuxer {
         let file = HeifFile::from_vec(bytes)?;
         let movie = parse_movie(&file)?;
         let mut streams = Vec::new();
-        let mut still_stream = None;
-        let mut still_items: Vec<u32> = Vec::new();
+        let mut stills: Vec<StillStream> = Vec::new();
         let mut pitm_field: Option<(usize, usize)> = None;
         let mut metadata = vec![
             (
@@ -432,33 +497,6 @@ impl HeifDemuxer {
             .unwrap_or(false);
         if has_pict_meta {
             if let Ok(node) = build_primary_graph(&file) {
-                let mut params = CodecParameters::video(CodecId::new(CODEC_ID));
-                // A tmap decodes to its base rendition by default, with
-                // the base's colour information (decode::ToneMapOutput).
-                let colour_node = match (&node.kind, node.inputs.first()) {
-                    (ImageKind::ToneMap(_), Some(base)) => base,
-                    _ => &node,
-                };
-                let colour = item_colour(colour_node);
-                params =
-                    params.with_color_signal(crate::image::core_bridge::color_signal_of(&colour));
-                match predict_output(&node) {
-                    Ok((fmt, (w, h))) => {
-                        params.width = Some(w);
-                        params.height = Some(h);
-                        params.pixel_format = core_pixel_format_for(fmt, &colour);
-                    }
-                    Err(_) => {
-                        if let Ok((w, h)) = node.output_size() {
-                            params.width = Some(w);
-                            params.height = Some(h);
-                        }
-                    }
-                }
-                let layers = still_layers(&file, &node);
-                if !layers.is_empty() {
-                    params = params.with_layers(layers);
-                }
                 metadata.push(("primary_item_id".into(), node.item.id.to_string()));
                 metadata.push((
                     "primary_item_type".into(),
@@ -469,30 +507,78 @@ impl HeifDemuxer {
                 // without a patchable `pitm` (or an id too wide for
                 // it) the stream is the primary alone.
                 pitm_field = pitm_field_of(&file);
-                still_items = still_item_order(&file, &node);
+                let mut groups = still_groups(&file, &node);
                 match pitm_field {
-                    Some((_, width)) => still_items.retain(|&id| {
-                        id == node.item.id || width == 4 || u16::try_from(id).is_ok()
-                    }),
-                    None => still_items.truncate(1),
+                    Some((_, width)) => {
+                        for g in &mut groups {
+                            g.items.retain(|&id| {
+                                id == node.item.id || width == 4 || u16::try_from(id).is_ok()
+                            });
+                        }
+                        groups.retain(|g| !g.items.is_empty());
+                    }
+                    None => {
+                        // Only the pitm itself can be named.
+                        groups.retain(|g| g.items.contains(&node.item.id));
+                        for g in &mut groups {
+                            g.items.retain(|&id| id == node.item.id);
+                        }
+                    }
                 }
-                let index = streams.len() as u32;
-                metadata.push((
-                    format!("stream:{index}:item_ids"),
-                    still_items
-                        .iter()
-                        .map(u32::to_string)
-                        .collect::<Vec<_>>()
-                        .join(","),
-                ));
-                still_stream = Some(index);
-                streams.push(StreamInfo {
-                    index,
-                    time_base: TimeBase::new(1, 1),
-                    duration: Some(still_items.len() as i64),
-                    start_time: Some(0),
-                    params,
-                });
+                if groups.is_empty() {
+                    let predicted = predict_output(&node).ok();
+                    groups.push(StillGroup {
+                        items: vec![node.item.id],
+                        layout: predicted.map(|p| p.0),
+                        size: predicted.map(|p| p.1),
+                        colour: output_colour(&node),
+                        first: node.clone(),
+                    });
+                }
+                for (gi, g) in groups.iter().enumerate() {
+                    let mut params = CodecParameters::video(CodecId::new(CODEC_ID))
+                        .with_color_signal(crate::image::core_bridge::color_signal_of(&g.colour));
+                    match (g.layout, g.size) {
+                        (Some(fmt), Some((w, h))) => {
+                            params.width = Some(w);
+                            params.height = Some(h);
+                            params.pixel_format = core_pixel_format_for(fmt, &g.colour);
+                        }
+                        _ => {
+                            if let Ok((w, h)) = g.first.output_size() {
+                                params.width = Some(w);
+                                params.height = Some(h);
+                            }
+                        }
+                    }
+                    if gi == 0 {
+                        let layers = still_layers(&file, &g.first);
+                        if !layers.is_empty() {
+                            params = params.with_layers(layers);
+                        }
+                    }
+                    let index = streams.len() as u32;
+                    metadata.push((
+                        format!("stream:{index}:item_ids"),
+                        g.items
+                            .iter()
+                            .map(u32::to_string)
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ));
+                    streams.push(StreamInfo {
+                        index,
+                        time_base: TimeBase::new(1, 1),
+                        duration: Some(g.items.len() as i64),
+                        start_time: Some(0),
+                        params,
+                    });
+                    stills.push(StillStream {
+                        index,
+                        items: g.items.clone(),
+                        cursor: 0,
+                    });
+                }
             }
         }
         // Composed streams: a master track with an alpha auxiliary
@@ -610,6 +696,7 @@ impl HeifDemuxer {
                         alpha_track_index: None,
                     },
                 ));
+                metadata.push((format!("stream:{index}:track_id"), t.track_id.to_string()));
                 metadata.push((
                     format!("track:{}:handler", t.track_id),
                     crate::boxes::fourcc_str(&t.handler),
@@ -634,29 +721,39 @@ impl HeifDemuxer {
             file,
             movie,
             streams,
-            still_items,
-            still_cursor: 0,
+            stills,
             pitm_field,
-            still_stream,
             tracks,
             active: None,
             metadata,
         })
     }
 
-    /// The image items the still stream carries, one packet each, in
-    /// packet order (the primary first; see [`crate::decode_all`]).
+    /// The image items the first still stream carries, one packet
+    /// each, in packet order (the primary first; see
+    /// [`crate::decode_all`]). Empty for a file without a still.
     pub fn still_items(&self) -> &[u32] {
-        &self.still_items
+        self.stills
+            .first()
+            .map(|s| s.items.as_slice())
+            .unwrap_or(&[])
     }
 
-    /// Packet `index` of the still stream: the whole file, with the
-    /// `pitm` naming the picture's item so the `"heif"` decoder
-    /// reconstructs that item (its own derivations, transforms and
-    /// auxiliaries) exactly as the primary. Untimed: `pts` is the
+    /// The image items of still stream `stream` (`None` for a track
+    /// stream or an unknown index).
+    pub fn still_stream_items(&self, stream: u32) -> Option<&[u32]> {
+        self.stills
+            .iter()
+            .find(|s| s.index == stream)
+            .map(|s| s.items.as_slice())
+    }
+
+    /// Packet `index` of a still stream — item `id`: the whole file,
+    /// with the `pitm` naming the picture's item so the `"heif"`
+    /// decoder reconstructs that item (its own derivations, transforms
+    /// and auxiliaries) exactly as the primary. Untimed: `pts` is the
     /// index in a 1/1 time base, duration 1.
-    fn still_packet(&self, stream: u32, index: usize) -> CoreResult<Packet> {
-        let id = self.still_items[index];
+    fn still_packet(&self, stream: u32, id: u32, index: usize) -> CoreResult<Packet> {
         let mut data = self.file.bytes().to_vec();
         let primary = self.file.primary_item().map(|i| i.id).ok();
         if Some(id) != primary {
@@ -711,15 +808,20 @@ impl oxideav_core::Demuxer for HeifDemuxer {
     }
 
     fn next_packet(&mut self) -> CoreResult<Packet> {
-        if let Some(idx) = self.still_stream {
-            if self.still_cursor < self.still_items.len() {
-                if self.is_active(idx) {
-                    let i = self.still_cursor;
-                    self.still_cursor += 1;
-                    return self.still_packet(idx, i);
+        // The still streams first, in stream order.
+        for si in 0..self.stills.len() {
+            let (index, len, cursor) = {
+                let s = &self.stills[si];
+                (s.index, s.items.len(), s.cursor)
+            };
+            if cursor < len {
+                if self.is_active(index) {
+                    let id = self.stills[si].items[cursor];
+                    self.stills[si].cursor += 1;
+                    return self.still_packet(index, id, cursor);
                 }
                 // An inactive still stream is skipped altogether.
-                self.still_cursor = self.still_items.len();
+                self.stills[si].cursor = len;
             }
         }
         // Pick the active track whose next sample has the earliest
@@ -775,11 +877,11 @@ impl oxideav_core::Demuxer for HeifDemuxer {
     }
 
     fn seek_to(&mut self, stream_index: u32, pts: i64) -> CoreResult<i64> {
-        if Some(stream_index) == self.still_stream {
+        if let Some(s) = self.stills.iter_mut().find(|s| s.index == stream_index) {
             // Still packets are the item index (1/1 time base).
-            let last = self.still_items.len().saturating_sub(1);
-            self.still_cursor = usize::try_from(pts.max(0)).unwrap_or(last).min(last);
-            return Ok(self.still_cursor as i64);
+            let last = s.items.len().saturating_sub(1);
+            s.cursor = usize::try_from(pts.max(0)).unwrap_or(last).min(last);
+            return Ok(s.cursor as i64);
         }
         let Some(pos) = self.tracks.iter().position(|(i, _)| *i == stream_index) else {
             return Err(CoreError::invalid(format!("no stream {stream_index}")));
@@ -832,6 +934,237 @@ pub fn open(
     Ok(Box::new(HeifDemuxer::from_bytes(bytes, codecs)?))
 }
 
+/// Options of the `"heif"` decoder (`CodecParameters::options`; the
+/// declared schema of the registry entry): the contract's
+/// [`DecodeOptions`](crate::api::DecodeOptions) limits and switches, so
+/// a pipeline bounds a decode before any allocation. `0` on a limit
+/// keeps the contract default.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct HeifDecoderOptions {
+    /// `max_width`: widest output accepted (0 = 2²⁰).
+    pub max_width: u32,
+    /// `max_height`: tallest output accepted (0 = 2²⁰).
+    pub max_height: u32,
+    /// `max_pixels`: largest output area accepted (0 = 2³⁰).
+    pub max_pixels: u32,
+    /// `max_bytes`: largest file accepted (0 = 4 GiB).
+    pub max_bytes: u32,
+    /// `strict`: require a HEIF-family brand and MIAF conformance of
+    /// a `miaf`-branded file.
+    pub strict: bool,
+    /// `tone_mapped`: decode a `tmap` to its HDR reconstruction rather
+    /// than the base rendition.
+    pub tone_mapped: bool,
+    /// `item_id`: decode this item instead of the `pitm` (0 = `pitm`;
+    /// a burst's packets still name their own item).
+    pub item_id: u32,
+    /// `base_layer_fallback`: decode the base layer of a layered item
+    /// whose enhancement layers cannot be decoded.
+    pub base_layer_fallback: bool,
+    /// `reference_white`: the SDR reference white in nits of a
+    /// tone-mapped decode (0 = the contract default).
+    pub reference_white: f32,
+}
+
+impl HeifDecoderOptions {
+    /// Every field as a positional argument, in declaration order
+    /// (the struct is `#[non_exhaustive]`: build it here or from
+    /// `Default`, then read / assign its public fields).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        max_width: u32,
+        max_height: u32,
+        max_pixels: u32,
+        max_bytes: u32,
+        strict: bool,
+        tone_mapped: bool,
+        item_id: u32,
+        base_layer_fallback: bool,
+        reference_white: f32,
+    ) -> Self {
+        Self {
+            max_width,
+            max_height,
+            max_pixels,
+            max_bytes,
+            strict,
+            tone_mapped,
+            item_id,
+            base_layer_fallback,
+            reference_white,
+        }
+    }
+
+    /// Set `max_width`.
+    pub fn with_max_width(mut self, v: u32) -> Self {
+        self.max_width = v;
+        self
+    }
+
+    /// Set `max_height`.
+    pub fn with_max_height(mut self, v: u32) -> Self {
+        self.max_height = v;
+        self
+    }
+
+    /// Set `max_pixels`.
+    pub fn with_max_pixels(mut self, v: u32) -> Self {
+        self.max_pixels = v;
+        self
+    }
+
+    /// Set `max_bytes`.
+    pub fn with_max_bytes(mut self, v: u32) -> Self {
+        self.max_bytes = v;
+        self
+    }
+
+    /// Set `strict`.
+    pub fn with_strict(mut self, v: bool) -> Self {
+        self.strict = v;
+        self
+    }
+
+    /// Set `tone_mapped`.
+    pub fn with_tone_mapped(mut self, v: bool) -> Self {
+        self.tone_mapped = v;
+        self
+    }
+
+    /// Set `item_id`.
+    pub fn with_item_id(mut self, v: u32) -> Self {
+        self.item_id = v;
+        self
+    }
+
+    /// Set `base_layer_fallback`.
+    pub fn with_base_layer_fallback(mut self, v: bool) -> Self {
+        self.base_layer_fallback = v;
+        self
+    }
+
+    /// Set `reference_white`.
+    pub fn with_reference_white(mut self, v: f32) -> Self {
+        self.reference_white = v;
+        self
+    }
+
+    /// The contract [`DecodeOptions`](crate::api::DecodeOptions) these
+    /// settings describe (the thread budget is the execution
+    /// context's, set by the decoder).
+    pub fn to_decode_options(&self) -> crate::api::DecodeOptions {
+        let mut o = crate::api::DecodeOptions::default();
+        if self.max_width > 0 {
+            o = o.with_max_width(Some(self.max_width));
+        }
+        if self.max_height > 0 {
+            o = o.with_max_height(Some(self.max_height));
+        }
+        if self.max_pixels > 0 {
+            o = o.with_max_pixels(Some(u64::from(self.max_pixels)));
+        }
+        if self.max_bytes > 0 {
+            o = o.with_max_bytes(Some(u64::from(self.max_bytes)));
+        }
+        if self.item_id > 0 {
+            o = o.with_item_id(Some(self.item_id));
+        }
+        if self.reference_white > 0.0 {
+            o = o.with_reference_white_nits(Some(f64::from(self.reference_white)));
+        }
+        o.with_strict(self.strict)
+            .with_tone_mapped(self.tone_mapped)
+            .with_base_layer_fallback(self.base_layer_fallback)
+    }
+}
+
+impl Default for HeifDecoderOptions {
+    fn default() -> Self {
+        Self::new(0, 0, 0, 0, false, false, 0, false, 0.0)
+    }
+}
+
+impl oxideav_core::CodecOptionsStruct for HeifDecoderOptions {
+    const SCHEMA: &'static [oxideav_core::OptionField] = &[
+        oxideav_core::OptionField {
+            name: "max_width",
+            kind: oxideav_core::OptionKind::U32,
+            default: oxideav_core::OptionValue::U32(0),
+            help: "Widest output accepted (0 = the contract default, 2^20)",
+        },
+        oxideav_core::OptionField {
+            name: "max_height",
+            kind: oxideav_core::OptionKind::U32,
+            default: oxideav_core::OptionValue::U32(0),
+            help: "Tallest output accepted (0 = the contract default, 2^20)",
+        },
+        oxideav_core::OptionField {
+            name: "max_pixels",
+            kind: oxideav_core::OptionKind::U32,
+            default: oxideav_core::OptionValue::U32(0),
+            help: "Largest output area accepted (0 = the contract default, 2^30)",
+        },
+        oxideav_core::OptionField {
+            name: "max_bytes",
+            kind: oxideav_core::OptionKind::U32,
+            default: oxideav_core::OptionValue::U32(0),
+            help: "Largest file accepted (0 = the contract default, 4 GiB)",
+        },
+        oxideav_core::OptionField {
+            name: "strict",
+            kind: oxideav_core::OptionKind::Bool,
+            default: oxideav_core::OptionValue::Bool(false),
+            help: "Require a HEIF-family brand and MIAF conformance of a miaf-branded file",
+        },
+        oxideav_core::OptionField {
+            name: "tone_mapped",
+            kind: oxideav_core::OptionKind::Bool,
+            default: oxideav_core::OptionValue::Bool(false),
+            help: "Decode a tmap item to its HDR reconstruction instead of the base rendition",
+        },
+        oxideav_core::OptionField {
+            name: "item_id",
+            kind: oxideav_core::OptionKind::U32,
+            default: oxideav_core::OptionValue::U32(0),
+            help: "Decode this item instead of the primary (0 = the pitm)",
+        },
+        oxideav_core::OptionField {
+            name: "base_layer_fallback",
+            kind: oxideav_core::OptionKind::Bool,
+            default: oxideav_core::OptionValue::Bool(false),
+            help:
+                "Decode the base layer of a layered item whose enhancement layers cannot be decoded",
+        },
+        oxideav_core::OptionField {
+            name: "reference_white",
+            kind: oxideav_core::OptionKind::F32,
+            default: oxideav_core::OptionValue::F32(0.0),
+            help: "SDR reference white in nits for a tone-mapped decode (0 = the contract default)",
+        },
+    ];
+
+    fn apply(&mut self, key: &str, value: &oxideav_core::OptionValue) -> CoreResult<()> {
+        match key {
+            "max_width" => self.max_width = value.as_u32()?,
+            "max_height" => self.max_height = value.as_u32()?,
+            "max_pixels" => self.max_pixels = value.as_u32()?,
+            "max_bytes" => self.max_bytes = value.as_u32()?,
+            "strict" => self.strict = value.as_bool()?,
+            "tone_mapped" => self.tone_mapped = value.as_bool()?,
+            "item_id" => self.item_id = value.as_u32()?,
+            "base_layer_fallback" => self.base_layer_fallback = value.as_bool()?,
+            "reference_white" => self.reference_white = value.as_f32()?,
+            other => {
+                return Err(CoreError::invalid(format!(
+                    "heif: unknown decoder option '{other}'"
+                )))
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The `"heif"` still-image decoder: one packet = one file, one frame
 /// = the primary item's output image.
 pub struct HeifCodec {
@@ -843,10 +1176,14 @@ pub struct HeifCodec {
     last: Option<decode::DecodedImage>,
     /// Thread budget from `set_execution_context` (serial by default).
     exec: oxideav_core::ExecutionContext,
+    /// The contract options (limits, strictness, tone mapping) this
+    /// decoder runs with.
+    opts: crate::api::DecodeOptions,
 }
 
 impl HeifCodec {
-    /// Construct with the id the decoder reports.
+    /// Construct with the id the decoder reports, at the contract's
+    /// default options.
     pub fn new(codec_id: CodecId) -> Self {
         Self {
             codec_id,
@@ -854,7 +1191,16 @@ impl HeifCodec {
             flushed: false,
             last: None,
             exec: oxideav_core::ExecutionContext::serial(),
+            opts: crate::api::DecodeOptions::default(),
         }
+    }
+
+    /// Run with these contract options (limits, strictness, item,
+    /// tone mapping; a thread budget set here wins over the execution
+    /// context's).
+    pub fn with_decode_options(mut self, opts: crate::api::DecodeOptions) -> Self {
+        self.opts = opts;
+        self
     }
 
     /// The last image decoded by [`Decoder::send_packet`].
@@ -862,11 +1208,15 @@ impl HeifCodec {
         self.last.as_ref()
     }
 
-    /// The contract options this decoder runs with: the thread budget
-    /// of `set_execution_context`, everything else default.
+    /// The contract options this decoder runs with: the configured
+    /// options, with the thread budget of `set_execution_context`
+    /// unless they carry one.
     fn decode_options(&self) -> crate::api::DecodeOptions {
-        crate::api::DecodeOptions::default()
-            .with_threads((self.exec.threads > 1).then_some(self.exec.threads))
+        let mut o = self.opts.clone();
+        if o.threads.is_none() {
+            o = o.with_threads((self.exec.threads > 1).then_some(self.exec.threads));
+        }
+        o
     }
 }
 
@@ -955,9 +1305,13 @@ impl Decoder for HeifCodec {
     }
 }
 
-/// Direct factory endpoint for the `"heif"` decoder.
+/// Direct factory endpoint for the `"heif"` decoder: `params.options`
+/// are the declared [`HeifDecoderOptions`] (unknown keys are refused).
 pub fn make_decoder(params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
-    Ok(Box::new(HeifCodec::new(params.codec_id.clone())))
+    let typed = oxideav_core::parse_options::<HeifDecoderOptions>(&params.options)?;
+    Ok(Box::new(
+        HeifCodec::new(params.codec_id.clone()).with_decode_options(typed.to_decode_options()),
+    ))
 }
 
 #[cfg(test)]

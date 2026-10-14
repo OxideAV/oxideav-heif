@@ -6,6 +6,71 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Framework surface proved cell by cell (r475).**
+  `tests/framework_matrix.rs` drives the registry `"heif"` encoder
+  over every declared option (`codec` × `mode` × `qp` / `quality` ×
+  `grid` × `thumbnail` × `range` × `rd` / `tiles` / `ctb` × `threads`
+  × `depth` × `filters` × `chroma`) and every input `VideoFrame`
+  layout the gateway can hand it (planar 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4
+  at 8 / 10 / 12 / 16 bits with and without alpha, `Gbrp*` /
+  `Gbrap*`, packed RGB / RGBA / BGR / BGRA, 16-bit packed, grey +
+  alpha; 1×1, odd, unaligned and ≥ 4 MP pictures): every file opens in
+  the framework demuxer and the contract `decode` with the documented
+  label, both paths return byte-identical planes, the bytes equal the
+  contract-path encode of the same picture under the same options,
+  lossless cells are exact, and `heif-info` / Apple ImageIO open every
+  file with its geometry. `tests/framework_decode_matrix.rs` runs the
+  demuxer + registry decoders against `decode_all` / `info` over every
+  HEIF-family file the checkout can see (vendored fixtures, the staged
+  corpus, the device samples, the MPEG / Nokia conformance set) —
+  pixels, labels, colour signal, item ids, timing.
+- **Several still streams.** Displayable items whose predicted output
+  (layout, geometry, colour description) differs from the primary's
+  used to be dropped by the demuxer; they now form further `"heif"`
+  streams, one per distinct output in first-appearance order (the
+  multi-part EXR rule), each with its `stream:<n>:item_ids`. The
+  streams follow `decode_all`'s selection exactly (an `altr` entry's
+  first buildable member — a `tmap` before its base; the other view
+  of a `ster` pair rides the pair's packet as the view-tagged second
+  frame rather than a packet of its own); a `pitm` the display order
+  leaves out (a thumbnail as primary, conformance C005) comes first
+  on both paths. Raw track streams carry `stream:<n>:track_id`.
+  `HeifDemuxer::still_stream_items`.
+- **Decoder options.** The `"heif"` decoder declares a schema
+  (`HeifDecoderOptions`: `max_width` / `max_height` / `max_pixels` /
+  `max_bytes` / `strict` / `tone_mapped` / `item_id` /
+  `base_layer_fallback` / `reference_white`) so a pipeline bounds a
+  decode before any allocation; `HeifCodec::with_decode_options`.
+- `encode::to_layout` (any planar layout → a coding layout: chroma
+  box-averaged or replicated, depth re-quantised) and
+  `encode::coded_layout` (the one coding-layout rule per codec).
+- Fuzz target `heif_framework`: the registry probe, the demuxer
+  (streams, packets, seeks, active streams), the `"heif"` decoder
+  under tight decoder options and the muxer pass-through.
+
+### Changed
+
+- **Planar sources keep their chroma sampling on HEVC.** A 4:0:0 /
+  4:2:2 / 4:4:4 planar source used to be coded 4:2:0 by the HEVC path
+  (grey with neutral chroma), which made the lossless mode lossy on
+  those layouts and ignored `chroma=444`; HEVC now codes the source's
+  own sampling at the coded depth (as AV1 did), `chroma` selects the
+  sampling of packed RGB sources on both codecs (4:2:0 by default,
+  4:4:4 on request), packed grey + alpha codes a 4:0:0 item, and
+  planar RGB converted for a lossy HEVC item lands in `chroma`'s
+  sampling. Apple ImageIO opens every such file (measured).
+- `depth` applies to AV1 items of ≤ 12-bit sources too (it was
+  ignored there).
+- `mode=pcm` on `codec=avc` is a typed refusal (the AVC encoder has no
+  lossless mode), as on VVC.
+- The `"heif"` encoder's packets carry `dts` and `duration` 1 (the
+  demuxer's shape).
+- `decode_all` lists the primary first even when the display order
+  leaves it out (a thumbnail named by `pitm`).
+- Conformance-matrix round trip: Apple ImageIO's cell is held within
+  1.5 dB of this crate (its own 4:2:0 pipeline lands 0.8–1.0 dB under
+  every other reader, run to run); the other readers stay within 1 dB.
+
 - **AVC items write path (HEIF Annex E).** `StillCodec::Avc` codes
   `avc1` items through `oxideav-h264`'s registry encoder
   (`encode::encode_avc_picture_owned`: one IDR picture at `qp`,

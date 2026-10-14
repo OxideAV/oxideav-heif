@@ -523,31 +523,24 @@ impl EncodeOptions {
             || coded.chroma != Chroma::Yuv420
     }
 
-    /// The layout HEVC items of a `source`-depth picture are coded in:
-    /// 4:2:0 at [`EncodeOptions::hevc_depth`] or the depth the source
-    /// implies (8 → 8, 9–10 → 10, 11+ → 12) — except a lossless
-    /// (`pcm`) identity-matrix picture ([`EncodeOptions::colr`] with
-    /// `matrix_coefficients = 0`, i.e. an RGB source kept as G, B, R
-    /// planes), which stays 4:4:4 at its own depth (≤ 12) so the
-    /// lossless mode is lossless on RGB too.
+    /// The layout HEVC items of a planar `source` picture are coded
+    /// in: the source's own chroma sampling (4:0:0 / 4:2:0 / 4:2:2 /
+    /// 4:4:4) at [`EncodeOptions::hevc_depth`] or the depth the source
+    /// implies (8 → 8, 9–10 → 10, 11–12 → 12, deeper → 10), so a planar
+    /// source loses no chroma and the lossless mode (`pcm`) is lossless
+    /// on every layout up to 12 bits; a lossless identity-matrix
+    /// picture ([`EncodeOptions::colr`] with `matrix_coefficients = 0`,
+    /// i.e. an RGB source kept as G, B, R planes) is 4:4:4 the same
+    /// way. Packed RGB sources are converted to
+    /// [`crate::api_registry::packed_target`]'s layout
+    /// ([`EncodeOptions::chroma`], 4:2:0 by default) before they reach
+    /// this rule.
     pub fn hevc_coded_format(&self, source: HeifPixelFormat) -> Result<HeifPixelFormat> {
-        if self.hevc_lossless_identity(source) {
-            return HeifPixelFormat::new(Chroma::Yuv444, source.bit_depth, false);
-        }
         HeifPixelFormat::new(
-            Chroma::Yuv420,
+            source.chroma,
             coded_depth(source.bit_depth, self.hevc_depth)?,
             false,
         )
-    }
-
-    /// `source` is a 4:4:4 picture (≤ 12 bits) coded losslessly under
-    /// an identity-matrix `colr`: planar RGB that HEVC keeps as-is.
-    pub(crate) fn hevc_lossless_identity(&self, source: HeifPixelFormat) -> bool {
-        self.hevc_mode == "pcm"
-            && crate::image::core_bridge::identity_matrix(&self.colr)
-            && source.chroma == Chroma::Yuv444
-            && source.bit_depth <= 12
     }
 }
 
@@ -647,9 +640,22 @@ pub fn to_yuv420_8(f: &HeifFrame) -> Result<HeifFrame> {
 /// box-averaged (rounded to nearest), deeper sources are rounded down
 /// to `depth`, shallower ones scaled up by bit replication. A frame
 /// already in that layout comes back tightly packed. The alpha plane
-/// is dropped.
+/// is dropped. [`to_layout`] with [`Chroma::Yuv420`].
 pub fn to_yuv420(f: &HeifFrame, depth: u8) -> Result<HeifFrame> {
-    let fmt = HeifPixelFormat::new(Chroma::Yuv420, depth, false)?;
+    to_layout(f, Chroma::Yuv420, depth)
+}
+
+/// Convert a frame to the colour layout `chroma` at `depth` bits —
+/// the coding layout of an item: a monochrome target keeps the luma
+/// alone, a monochrome source gains neutral chroma, chroma more
+/// finely sampled than the target is box-averaged over the luma
+/// block each target sample covers (rounded to nearest), chroma more
+/// coarsely sampled is replicated from the co-sited sample, deeper
+/// samples are rounded to `depth`, shallower ones scaled up by bit
+/// replication. A frame already in that layout comes back tightly
+/// packed. The alpha plane is dropped.
+pub fn to_layout(f: &HeifFrame, chroma: Chroma, depth: u8) -> Result<HeifFrame> {
+    let fmt = HeifPixelFormat::new(chroma, depth, false)?;
     if f.format.without_alpha() == fmt {
         let bps = fmt.bytes_per_sample();
         let planes = (0..fmt.plane_count())
@@ -684,24 +690,31 @@ pub fn to_yuv420(f: &HeifFrame, depth: u8) -> Result<HeifFrame> {
             ((v << shift) | (v >> (src_depth - shift))).min(max) as u16
         }
     };
-    let mut out = HeifFrame::filled(f.width, f.height, fmt, 1 << (depth - 1))?;
+    let mut out = if chroma == Chroma::Mono {
+        HeifFrame::zeroed(f.width, f.height, fmt)?
+    } else {
+        HeifFrame::filled(f.width, f.height, fmt, 1 << (depth - 1))?
+    };
     for y in 0..f.height {
         for x in 0..f.width {
             out.set_sample(0, x, y, round(f.sample(0, x, y) as u32));
         }
     }
-    if f.format.chroma != Chroma::Mono {
+    if f.format.chroma != Chroma::Mono && chroma != Chroma::Mono {
         let (sx, sy) = f.format.chroma.shift();
+        let (tx, ty) = chroma.shift();
         let (cw, ch) = out.plane_dims(1);
         for p in 1..3 {
+            let (spw, sph) = f.plane_dims(p);
             for cy in 0..ch {
                 for cx in 0..cw {
-                    // Average the source chroma samples covering this
-                    // 4:2:0 position.
-                    let x0 = (cx * 2) >> sx;
-                    let y0 = (cy * 2) >> sy;
-                    let x1 = ((cx * 2 + 1) >> sx).min(f.plane_dims(p).0 - 1);
-                    let y1 = ((cy * 2 + 1) >> sy).min(f.plane_dims(p).1 - 1);
+                    // Average the source chroma samples covering the
+                    // luma block of this target position (one sample
+                    // when the source is the coarser sampling).
+                    let x0 = (cx << tx) >> sx;
+                    let y0 = (cy << ty) >> sy;
+                    let x1 = ((((cx + 1) << tx) - 1) >> sx).min(spw - 1);
+                    let y1 = ((((cy + 1) << ty) - 1) >> sy).min(sph - 1);
                     let mut sum = 0u32;
                     let mut n = 0u32;
                     for yy in y0..=y1 {
@@ -1084,6 +1097,11 @@ pub fn encode_avc_picture_owned(frame: HeifFrame, opts: &EncodeOptions) -> Resul
             "AVC item encoding: the registry encoder codes 8-bit 4:2:0, not {:?} {}-bit",
             frame.format.chroma, frame.format.bit_depth
         )));
+    }
+    if opts.hevc_mode == "pcm" {
+        return Err(HeifError::unsupported(
+            "AVC items have no lossless (pcm) mode; code with `intra` at a QP",
+        ));
     }
     if frame.width % 16 != 0 || frame.height % 16 != 0 {
         return Err(HeifError::invalid(format!(
@@ -1910,25 +1928,24 @@ fn add_picture_item(
 /// at most (the converted picture); an already-matching source is
 /// copied once without its alpha plane.
 fn coding_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<HeifFrame> {
+    let coded = coded_layout(frame.format, opts)?;
+    to_layout(frame, coded.chroma, coded.bit_depth)
+}
+
+/// The colour layout a planar `source` is coded in by `opts.codec`:
+/// HEVC and AV1 keep the source's chroma sampling at the coded depth
+/// ([`coded_depth`]: the source's own up to 12 bits, 10 for deeper
+/// sources, or [`EncodeOptions::hevc_depth`]); VVC and AVC code 8-bit
+/// 4:2:0 (their encoders' line). The alpha plane is not part of it.
+pub fn coded_layout(source: HeifPixelFormat, opts: &EncodeOptions) -> Result<HeifPixelFormat> {
     match opts.codec {
-        StillCodec::Av1 if frame.format.bit_depth <= 12 => Ok(frame.without_alpha().tight()),
-        // AV1 keeps the chroma layout of a deeper source at the coded
-        // depth (16-bit 4:4:4 → 10-bit 4:4:4).
-        StillCodec::Av1 => to_depth(
-            &frame.without_alpha(),
-            coded_depth(frame.format.bit_depth, opts.hevc_depth)?,
+        StillCodec::Hevc => opts.hevc_coded_format(source),
+        StillCodec::Av1 => HeifPixelFormat::new(
+            source.chroma,
+            coded_depth(source.bit_depth, opts.hevc_depth)?,
+            false,
         ),
-        StillCodec::Hevc => {
-            let coded = opts.hevc_coded_format(frame.format)?;
-            if coded.chroma == Chroma::Yuv444 {
-                // Lossless identity-matrix RGB: the planes as they are.
-                to_depth(&frame.without_alpha(), coded.bit_depth)
-            } else {
-                to_yuv420(frame, coded.bit_depth)
-            }
-        }
-        // VVC / AVC: 8-bit 4:2:0, the encoders' line.
-        StillCodec::Vvc | StillCodec::Avc => to_yuv420(frame, 8),
+        StillCodec::Vvc | StillCodec::Avc => HeifPixelFormat::new(Chroma::Yuv420, 8, false),
     }
 }
 
@@ -1968,16 +1985,7 @@ fn coding_picture_owned(
     frame: HeifFrame,
     opts: &EncodeOptions,
 ) -> Result<(HeifFrame, Option<HeifFrame>)> {
-    let coded = match opts.codec {
-        StillCodec::Av1 if frame.format.bit_depth <= 12 => frame.format.without_alpha(),
-        StillCodec::Av1 => HeifPixelFormat::new(
-            frame.format.chroma,
-            coded_depth(frame.format.bit_depth, opts.hevc_depth)?,
-            false,
-        )?,
-        StillCodec::Hevc => opts.hevc_coded_format(frame.format)?,
-        StillCodec::Vvc | StillCodec::Avc => HeifPixelFormat::new(Chroma::Yuv420, 8, false)?,
-    };
+    let coded = coded_layout(frame.format, opts)?;
     let bps = frame.format.bytes_per_sample();
     let tight = frame
         .planes
@@ -3658,8 +3666,14 @@ impl Encoder for HeifEncoder {
                 encode_still_owned(hf, &opts)?
             }
         };
+        // An untimed still: `pts` = the frame's (the item index of a
+        // burst), duration 1 in a 1/1 time base — the shape the demuxer
+        // emits, so a muxer sees the same packet either way.
+        let pts = vf.pts.unwrap_or(0);
         let pkt = Packet::new(0, TimeBase::new(1, 1), bytes)
-            .with_pts(vf.pts.unwrap_or(0))
+            .with_pts(pts)
+            .with_dts(pts)
+            .with_duration(1)
             .with_keyframe(true);
         self.queue.push_back(pkt);
         Ok(())

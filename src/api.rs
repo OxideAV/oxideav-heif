@@ -57,7 +57,12 @@ pub fn info_of<D: AsRef<[u8]>>(file: &HeifFile<D>) -> Result<ImageInfo> {
                     it.item_type == ITEM_TYPE_TMAP
                         && meta.derivation_inputs(it.id).first() == Some(&node.item.id)
                 });
-            let items = meta.display_order().len().max(1) as u64;
+            // The primary counts even when the display order leaves it
+            // out (a thumbnail named by `pitm`): `decode_all` lists it
+            // first.
+            let order = meta.display_order();
+            let primary_listed = order.iter().any(|e| e.contains(&node.item.id));
+            let items = (order.len() + usize::from(!primary_listed)).max(1) as u64;
             Ok(ImageInfo {
                 width,
                 height,
