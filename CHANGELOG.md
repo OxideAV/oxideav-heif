@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/OxideAV/oxideav-heif/compare/v0.0.10...v0.0.11) - 2026-10-14
+
+### Other
+
+- the still streams stay first whatever the major brand (revert the 9b3e765 reorder) — the composed primary still is video stream 0, the gateway's primary() / max_frames(1) convention; the tracks follow
+- mini expansion refuses 'uuid' codec types (fuzz-found: the equivalent file carried a uuid property box without an extended type); heif_records' packed-channel oracle composes under a YCbCr description
+- cfen region planner refuses an item without inputs (fuzz-found index panic); fuzz corpus seeds for the two h265 0.0.14 recon crashes and the framework target; fuzz workflow lists seven targets
+- sequence-brand files list their track streams first (the CLI handed the MP4 muxer the cover still); README framework surface — matrix counts, per-codec limits, 12 MP CLI budgets each direction, black-box findings
+- framework surface proved cell by cell — 553-cell encoder matrix + decode matrix over every file, planar sources keep their chroma on HEVC, several still streams, decoder options, altr fallback, heif_framework fuzz target
+- README — the r474 round-trip table replaces the r464 one (the AVIF rows moved with av1 0.1.20; HEIC rows identical)
+- conformance matrix refreshed (r474) — every r464 cell unchanged; this crate's AVC and VVC items join the writer direction as measured rows
+- AVC items write path — StillCodec::Avc through oxideav-h264's registry encoder (avc1 + avcC, avci brand, alpha, grid, thumbnails, mif3), avcs image sequences as one IDR + P session, the heif muxer takes h264 streams; fuzz lockfile untracked
+- packed cfen inputs — Amd 2 §6.6.2.5.3 region planner (CfenRegionPlan), packer, writer entries, MIAF duplicate / zero channel rules, fuzz oracles
+- frame_from_planes refuses zero output dimensions (fuzz-found subtract overflow on a 5x0 sample entry) and sizes planes with saturating arithmetic
+- seed the heif_records fuzz corpus with the vvcC conformance-window overflow unit (tracked as a minimal.* seed)
+- track the heif_records fuzz crash unit (vvcC SPS head conformance-window overflow) and pin it at the parser level
+- vvcC SPS head — saturate the conformance-window derivation (fuzz-found multiply overflow on hostile ue(v) offsets)
+- README — VVC image items (Annex L) across the layout tables, options, capability matrix; a plainly stated HEVC / AVC / AV1 / VVC codec matrix with the VVC validator findings
+- VVC verification matrix — VVC vs HEVC at the same QP, vvcC / compact-record / SPS-head fuzz round trips, validator survey
+- VVC image items encode — StillCodec::Vvc through oxideav-h266's IDR encoder (items, alpha, grid, gain map, mini, sequences, framework encoder + muxer), vvcC from the encoder's parameter sets, vvic / vvis brands
+- VVC image items decode (HEIF Annex L) — vvcC record model, vvc1 items through oxideav-h266's stream decoder, vvic/vvis/vvi3 brands, Annex L MIAF rules, vvi3 compact-record expansion
+- oxideav-h265 >=0.0.13, <0.1 (an exact 0.0.x pin duplicated h265 in the umbrella graph)
+
 ### Added
 
 - **Framework surface proved cell by cell (r475).**
