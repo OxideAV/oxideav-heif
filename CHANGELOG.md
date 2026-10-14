@@ -62,6 +62,13 @@ All notable changes to this project will be documented in this file.
   (streams, packets, seeks, active streams), the `"heif"` decoder
   under tight decoder options and the muxer pass-through.
 
+### Fixed
+
+- `compose::plan_colour_format_enhancement_regions` indexed `inputs[0]`
+  on a `cfen` item without inputs (fuzz-found by `heif_records`, the
+  5-byte body `0f 00 00 00 00`): a typed `InvalidData` refusal now;
+  the input is a corpus seed and a unit test.
+
 ### Changed
 
 - **Planar sources keep their chroma sampling on HEVC.** A 4:0:0 /

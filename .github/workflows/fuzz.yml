@@ -2,9 +2,9 @@ name: Fuzz
 
 # Daily scheduled run of the cargo-fuzz harnesses under fuzz/ via the
 # OxideAV org-level reusable workflow (see OxideAV/.github). The
-# 30-minute budget is split evenly across the six targets
+# 30-minute budget is split evenly across the seven targets
 # (heif_parse, heif_compose, heif_sequence, heif_records, heif_api,
-# heif_decode — ~5 min each).
+# heif_decode, heif_framework — ~4 min each).
 
 on:
   schedule:

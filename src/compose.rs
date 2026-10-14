@@ -1032,6 +1032,11 @@ pub fn plan_colour_format_enhancement_regions(
     inputs: &[((u32, u32), u8)],
     colr: Option<&Colr>,
 ) -> Result<CfenRegionPlan> {
+    if inputs.is_empty() {
+        return Err(HeifError::invalid(
+            "cfen: a colour-format enhancement item needs at least one input image",
+        ));
+    }
     use crate::derived::CfenInput;
     if cfen.inputs.len() != inputs.len() {
         return Err(HeifError::invalid(format!(
@@ -1816,5 +1821,13 @@ mod tests {
         assert_eq!(mid.sample(0, 0, 0), 514);
         let back = rescale_depth(&mid, 8).unwrap();
         assert_eq!(back.sample(0, 0, 0), 128);
+    }
+
+    #[test]
+    fn cfen_plan_without_inputs_is_a_typed_refusal() {
+        // Fuzz-found (heif_records): `inputs[0]` on an empty slice.
+        let c = crate::derived::ColourFormatEnhancement::parse(&[0], 0).unwrap();
+        assert!(c.inputs.is_empty());
+        assert!(plan_colour_format_enhancement_regions(&c, &[], None).is_err());
     }
 }
