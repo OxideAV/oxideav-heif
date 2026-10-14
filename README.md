@@ -121,11 +121,11 @@ stream per image-sequence track (`"h265"` / `"av1"` / `"h264"` /
 per sample, `pts` / `dts` / `duration` from the sample table in the
 track's timescale, `stream:<n>:track_id`; a track with an alpha
 auxiliary track is also offered composed, as `"heif"` packets,
-`stream:<n>:composed_from_track`). A file whose major brand is a
-sequence brand (`msf1` / `hevc` / `avis` / `avcs` / `vvis` / …) lists
-its track streams first and the cover still after them; an image-brand
-file its stills first. The `"heif"` decoder takes `HeifDecoderOptions`
-(see *Limits*). Every still-stream frame and every sequence frame is
+`stream:<n>:composed_from_track`). The still streams come first
+whatever the major brand — the composed primary still is video stream
+0, what the gateway's `primary()` / `max_frames(1)` rely on — and the
+track streams follow them. The `"heif"` decoder takes
+`HeifDecoderOptions` (see *Limits*). Every still-stream frame and every sequence frame is
 byte-identical to the corresponding `decode_all` frame (pinned over
 the corpus and the real-world interop set). The framework decoder and encoder are thin adapters over the
 contract functions — one implementation — and `HeifImage` converts
@@ -202,9 +202,7 @@ still streams instead of being dropped; the still streams follow
 `decode_all`'s `altr` selection (a `tmap` before its base, the other
 view of a `ster` pair on the pair's packet, a `pitm` thumbnail first);
 a primary that cannot be decoded falls back to its `altr` alternatives
-on both paths; a sequence-brand file (`msf1` / `hevc` / `avis` / …)
-lists its track streams before the cover still; the decoder declares
-`HeifDecoderOptions`.
+on both paths; the decoder declares `HeifDecoderOptions`.
 
 ### CLI budgets (12 MP, `oxideav convert`, r475)
 
@@ -239,9 +237,9 @@ outside this crate (reported, not worked around): a 4:4:4 JPEG
 through the hardware JPEG decoder arrives labelled 4:4:4 with 4:2:0
 planes (`--no-hwaccel` converts it; a `videotoolbox` / cli finding),
 and `.heics → .mp4` is refused by the MP4 muxer (`no sample entry for
-codec heif`: the CLI hands it the cover still rather than the `h265`
-track — with the sequence-brand stream order of r475 the track is
-stream 0, so this is the CLI's stream selection to follow up).
+codec heif`: the CLI hands it stream 0, the cover still, rather than
+the first timed stream — a cli-convert fix in progress; the still
+stays stream 0 here by the workspace convention).
 
 ### Limits (what each codec refuses or converts)
 

@@ -24,11 +24,11 @@
 //!   items and the gain map are composed into or attached to their
 //!   master, never frames of their own.
 //! * **one stream per visual track** (`pict` / `vide` / `auxv`
-//!   handlers of the `moov` box, image sequences) — **first** in the
-//!   stream list when the file's major brand is a sequence brand
-//!   (`msf1` / `hevc` / `avis` / `avcs` / `vvis` / …: the sequence is
-//!   the content and the still its cover image, HEIF §7.1), after the
-//!   still streams otherwise: codec id resolved
+//!   handlers of the `moov` box, image sequences), after the still
+//!   streams — the workspace convention: the composed primary still is
+//!   video stream 0 (what the gateway's `primary()` / `max_frames(1)`
+//!   rely on), the sequence tracks follow it, whatever the major
+//!   brand: codec id resolved
 //!   from the sample-entry type (`hvc1` → `"h265"`, `av01` → `"av1"`,
 //!   `vvc1` → `"h266"`, …) through the [`CodecResolver`], `extradata`
 //!   = the `hvcC` / `av1C` / `avcC` / `vvcC` record, packets = the samples in decode order with `pts`
@@ -177,19 +177,6 @@ fn output_colour(node: &ImageNode) -> crate::props::Colr {
         (ImageKind::ToneMap(_), Some(base)) => item_colour(base),
         _ => item_colour(node),
     }
-}
-
-/// The file's major brand names an image sequence (`msf1` and the
-/// codec sequence brands): the tracks are the content, the still of
-/// the `meta` box the cover image (HEIF §7.1), so the track streams
-/// come first.
-fn sequence_major(ft: &crate::ftyp::FileType) -> bool {
-    use crate::ftyp::*;
-    [
-        BRAND_MSF1, BRAND_HEVC, BRAND_HEVX, BRAND_HEVM, BRAND_HEVS, BRAND_AVIS, BRAND_AVIO,
-        BRAND_JPGS, BRAND_AVCS, BRAND_VVIS,
-    ]
-    .contains(&ft.major_brand)
 }
 
 /// Codec id for a sample-entry type, through the resolver first and
@@ -489,10 +476,9 @@ impl HeifDemuxer {
         let movie = parse_movie(&file)?;
         let mut streams = Vec::new();
         let mut stills: Vec<StillStream> = Vec::new();
-        // The still streams, built before their indices are known: a
-        // sequence-brand file lists its tracks first.
+        // The still streams (always first), built before the track
+        // streams and spliced in at the front.
         let mut pending_stills: Vec<(CodecParameters, Vec<u32>)> = Vec::new();
-        let sequence_first = sequence_major(&file.file_type);
         let mut pitm_field: Option<(usize, usize)> = None;
         let mut metadata = vec![
             (
@@ -582,13 +568,8 @@ impl HeifDemuxer {
                 }
             }
         }
-        // Track streams take the indices after the stills, or from 0
-        // in a sequence-brand file (the stills then follow them).
-        let track_base = if sequence_first {
-            0
-        } else {
-            pending_stills.len()
-        };
+        // Track streams take the indices after the stills.
+        let track_base = pending_stills.len();
         // Composed streams: a master track with an alpha auxiliary
         // track yields a `"heif"` stream whose packets are synthesized
         // stills (master + time-parallel alpha) — frames with alpha
@@ -720,11 +701,10 @@ impl HeifDemuxer {
                 }
             }
         }
-        // The still streams at their indices.
-        let still_base = if sequence_first { streams.len() } else { 0 };
+        // The still streams at their indices (0..).
         let mut still_infos = Vec::with_capacity(pending_stills.len());
-        for (i, (params, items)) in pending_stills.into_iter().enumerate() {
-            let index = (still_base + i) as u32;
+        for (index, (params, items)) in pending_stills.into_iter().enumerate() {
+            let index = index as u32;
             metadata.push((
                 format!("stream:{index}:item_ids"),
                 items
@@ -746,11 +726,7 @@ impl HeifDemuxer {
                 cursor: 0,
             });
         }
-        if sequence_first {
-            streams.extend(still_infos);
-        } else {
-            streams.splice(0..0, still_infos);
-        }
+        streams.splice(0..0, still_infos);
         if streams.is_empty() {
             return Err(HeifError::unsupported(
                 "file carries neither a pict meta box with a primary item nor a visual track",

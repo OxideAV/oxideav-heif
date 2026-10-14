@@ -476,38 +476,11 @@ fn compare(ctx: &RuntimeContext, path: &Path) -> Vec<String> {
             last = g.pts.or(last);
         }
     }
-    // `info()` describes the first still stream; a sequence-brand file
-    // lists its tracks first.
-    let seq_major = parsed
-        .as_ref()
-        .map(|f| {
-            matches!(
-                &f.file_type.major_brand,
-                b"msf1"
-                    | b"hevc"
-                    | b"hevx"
-                    | b"hevm"
-                    | b"hevs"
-                    | b"avis"
-                    | b"avio"
-                    | b"jpgs"
-                    | b"avcs"
-                    | b"vvis"
-            )
-        })
-        .unwrap_or(false);
-    if let Some(first) = streams.first() {
-        let is_still = first.params.codec_id.as_str() == "heif"
-            && meta_of(
-                &metadata,
-                &format!("stream:{}:composed_from_track", first.index),
-            )
-            .is_none();
-        if seq_major && is_still && streams.len() > 1 {
-            issues.push("sequence-brand file lists its still first".into());
-        }
-        if !seq_major && !is_still && !items.is_empty() {
-            issues.push("image-brand file lists a track first".into());
+    // The composed primary still is stream 0 whenever there is one
+    // (the gateway's `primary()`); the tracks follow it.
+    if let Some(first) = stills.first() {
+        if first.index != 0 {
+            issues.push(format!("the first still stream is stream {}", first.index));
         }
     }
     match (info(&bytes), stills.first()) {

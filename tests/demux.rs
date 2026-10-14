@@ -44,8 +44,7 @@ fn probe_open_and_decode_every_bundle_through_the_registry() {
             .unwrap();
         let streams = demuxer.streams().to_vec();
         assert!(!streams.is_empty(), "{bundle}");
-        // The first still stream (a sequence-brand bundle lists its
-        // track first).
+        // The first still stream (stream 0 by the workspace convention).
         let still = still_stream(&*demuxer).unwrap_or_else(|| panic!("{bundle}: still stream"));
         let still = &streams[still as usize];
         assert_eq!(still.params.codec_id.as_str(), "heif", "{bundle}");
@@ -85,14 +84,14 @@ fn probe_open_and_decode_every_bundle_through_the_registry() {
             "{bundle}"
         );
         assert!(matches!(dec.receive_frame(), Err(Error::Eof)));
-        // The sequence bundle (an `msf1` file) lists its track first
-        // and the cover still after it.
+        // The still is stream 0 (the gateway's primary); the sequence
+        // bundle's track follows it.
+        assert_eq!(still.index, 0, "{bundle}");
         let n_tracks = streams.len() - 1;
         if bundle == "image-sequence-3frame" {
             assert_eq!(n_tracks, 1);
-            let s = &streams[0];
+            let s = &streams[1];
             assert_eq!(s.params.codec_id.as_str(), "h265");
-            assert_eq!(still.index, 1);
             assert!(!s.params.extradata.is_empty());
             let mut vdec = ctx.codecs.first_decoder(&s.params).unwrap();
             let mut demuxer = ctx
