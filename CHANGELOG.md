@@ -21,7 +21,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- fuzz: the two inputs the daily workflow crashed on (an HEVC item reaching a deblocking-filter index panic inside h265 0.0.14 — fixed by 0.0.15's hostile-input hardening; a `cfen` item without inputs — fixed in 0.0.11) are tracked as `minimal.*` seeds of `heif_decode` / `heif_framework` / `heif_records`.
+- fuzz: the two inputs the daily workflow crashed on (an HEVC item reaching a deblocking-filter index panic inside h265 0.0.14 — fixed by 0.0.15's hostile-input hardening; a `cfen` item without inputs — fixed in 0.0.11) are tracked as `minimal.*` seeds of `heif_decode` / `heif_framework` / `heif_records`. On the round's final state every target ran ≥ 10 minutes on its committed corpus (2 GiB RSS cap, 30 s per-input timeout) without a finding — `heif_parse` 5.98 M runs, `heif_compose` 8.13 M, `heif_sequence` 4.19 M, `heif_records` 9.77 M, `heif_api` 2.11 M, `heif_decode` 0.21 M, `heif_framework` 1.13 M — and the daily Fuzz workflow is green again on the released producers.
 
 ## [0.0.11](https://github.com/OxideAV/oxideav-heif/compare/v0.0.10...v0.0.11) - 2026-10-14
 
