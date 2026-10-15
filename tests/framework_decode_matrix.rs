@@ -11,7 +11,9 @@
 //! still stream with byte-identical pixels, the same label and colour
 //! signal, untimed (`pts` = index, duration 1, 1/1), and every contract
 //! track frame must come back from a track stream with the same pixels
-//! and a delay of `duration × time_base`. `info()` must describe the
+//! and a delay of `duration × time_base`, and every frame's metadata
+//! (ICC / Exif / XMP, the frame's blobs refined over the stream's) must
+//! equal the contract image's. `info()` must describe the
 //! primary stream. The framework decoders run under an 8-worker
 //! execution context, the contract path serial: the thread budget
 //! never changes a byte.
@@ -367,6 +369,34 @@ fn compare(ctx: &RuntimeContext, path: &Path) -> Vec<String> {
                     g.image.color, f.image.color
                 ));
             }
+            // Metadata (r476, core 0.1.40): the frame's blobs refined
+            // over the stream's are the contract image's metadata, byte
+            // for byte; the stream's own blobs are the first item's.
+            if g.image.metadata != f.image.metadata {
+                issues.push(format!(
+                    "item {id}: metadata (icc {:?} B, exif {:?} B, xmp {:?} B) vs contract \
+                     (icc {:?} B, exif {:?} B, xmp {:?} B)",
+                    g.image.metadata.icc.as_ref().map(Vec::len),
+                    g.image.metadata.exif.as_ref().map(Vec::len),
+                    g.image.metadata.xmp.as_ref().map(Vec::len),
+                    f.image.metadata.icc.as_ref().map(Vec::len),
+                    f.image.metadata.exif.as_ref().map(Vec::len),
+                    f.image.metadata.xmp.as_ref().map(Vec::len),
+                ));
+            }
+            if pos == 0 {
+                let stream_meta = oxideav_heif::metadata_of_blobs(&[], s.params.blobs());
+                if stream_meta != f.image.metadata {
+                    issues.push(format!(
+                        "item {id}: stream {} blobs (icc {:?} B, exif {:?} B, xmp {:?} B) vs \
+                         the first item's metadata",
+                        s.index,
+                        stream_meta.icc.as_ref().map(Vec::len),
+                        stream_meta.exif.as_ref().map(Vec::len),
+                        stream_meta.xmp.as_ref().map(Vec::len),
+                    ));
+                }
+            }
             if (g.pts, g.duration) != (Some(pos as i64), Some(1)) {
                 issues.push(format!(
                     "item {id}: timing {:?}/{:?}, expected {pos}/1",
@@ -471,6 +501,13 @@ fn compare(ctx: &RuntimeContext, path: &Path) -> Vec<String> {
         for (i, (g, w)) in have.iter().zip(&want).enumerate() {
             if let Err(e) = same_pixels(&g.image, &w.image) {
                 issues.push(format!("track {track} sample {i}: pixels: {e}"));
+            }
+            if g.image.metadata != w.image.metadata {
+                issues.push(format!(
+                    "track {track} sample {i}: metadata icc {:?} B vs contract {:?} B",
+                    g.image.metadata.icc.as_ref().map(Vec::len),
+                    w.image.metadata.icc.as_ref().map(Vec::len)
+                ));
             }
             let delay = g.duration.map(|d| delay_of(d, s.time_base));
             if delay != w.delay {

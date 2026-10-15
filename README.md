@@ -189,10 +189,13 @@ and the 13 encrypted ones: **152 files, 128 decode on both paths, 24
 refused on both** (the `cenc` items, the predictive `pred` items C043 /
 C044 and the L-HEVC enhancement layers this crate does not decode),
 0 disagreements — every contract image item is a packet of a still
-stream with byte-identical pixels, label and colour signal, `pts` =
-index / duration 1 / `1/1`; every track frame comes from its composed
-or raw track stream with the same pixels and `duration × time_base`
-= the contract delay; `info()` describes the first still stream; the
+stream with byte-identical pixels, label, colour signal and metadata
+(r476: the frame's ICC / Exif / XMP blobs refined over the stream's
+equal the contract image's `metadata`; a still stream's own blobs are
+its first item's, a track stream's the sample entry's ICC profile),
+`pts` = index / duration 1 / `1/1`; every track frame comes from its
+composed or raw track stream with the same pixels, metadata and
+`duration × time_base` = the contract delay; `info()` describes the first still stream; the
 framework decoders run under an 8-worker execution context against
 the serial contract path (r476: the AV1 items decode tile- /
 band-parallel under it, byte-identical). A
@@ -360,6 +363,20 @@ tool knobs: `tiles`, `wpp`, `dep_quant`, `sdh`, `palette`, `mtt_bt`,
 `threads`, `chroma`.
 
 ## Metadata and colour
+
+Framework carriage (r476, oxideav-core 0.1.40): the `"heif"` demuxer
+announces a still stream's ICC profile / Exif / XMP (the first item's)
+and a track stream's ICC profile as `CodecParameters::blobs`
+(`BlobKind::ICC` / `EXIF` / `XMP`, the payload conventions being this
+crate's own forms — a complete profile, the Exif block from the TIFF
+header, the XMP packet); the `"heif"` decoder puts each frame's item
+metadata on the `VideoFrame` as its blobs; the encoder embeds a
+frame's blobs (refined over the stream's) as the file's items; the
+sequence muxer writes the stream's ICC profile as the sample entry's
+`colr` and its Exif / XMP as items on the cover image.
+`HeifImage::into_video_frame` / `from_video_frame`
+(`blobs_of_metadata` / `metadata_of_blobs`) carry `Metadata` both ways.
+
 
 `HeifImage::color` is a `ColorInfo { range, primaries, transfer,
 matrix }` (H.273 code points) filled from the item's `colr` `nclx`, or

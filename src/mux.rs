@@ -303,34 +303,58 @@ impl HeifSequenceMuxer {
             };
         let timescale = self.stream.time_base.den().max(1) as u32;
         let mut sw = SequenceWriter::new(entry_type, config.clone(), w as u16, h as u16, timescale);
+        // The stream's metadata blobs (r476, core 0.1.40): the ICC
+        // profile as the sample entry's `colr` (next to the nclx one,
+        // as the still encoder writes them), Exif / XMP as items
+        // describing the cover image (the file-level `meta` the still
+        // path reads them from).
+        let metadata = crate::api_registry::metadata_of_blobs(&[], self.stream.params.blobs());
         sw.entry_properties.push(Property::Colr(Colr::MIAF_DEFAULT));
+        if let Some(icc) = &metadata.icc {
+            sw.entry_properties.push(Property::Colr(Colr::Icc {
+                restricted: false,
+                profile: icc.clone(),
+            }));
+        }
         for (data, dur, sync) in &self.samples {
             sw.push_sample(data.clone(), *dur, *sync);
         }
         // Cover image: the first sync sample as a still item.
         if let Some((data, _, true)) = self.samples.first() {
             let mut still = HeifWriter::new();
-            let id = still.add_coded_item(
-                entry_type,
-                data.clone(),
-                vec![
-                    (config, true),
-                    (
-                        Property::Ispe(Ispe {
-                            width: w,
-                            height: h,
-                        }),
-                        false,
-                    ),
-                    (
-                        Property::Pixi(Pixi {
-                            bits_per_channel: vec![layout.bit_depth; layout.chroma.colour_planes()],
-                        }),
-                        false,
-                    ),
-                    (Property::Colr(Colr::MIAF_DEFAULT), false),
-                ],
-            );
+            let mut props = vec![
+                (config, true),
+                (
+                    Property::Ispe(Ispe {
+                        width: w,
+                        height: h,
+                    }),
+                    false,
+                ),
+                (
+                    Property::Pixi(Pixi {
+                        bits_per_channel: vec![layout.bit_depth; layout.chroma.colour_planes()],
+                    }),
+                    false,
+                ),
+                (Property::Colr(Colr::MIAF_DEFAULT), false),
+            ];
+            if let Some(icc) = &metadata.icc {
+                props.push((
+                    Property::Colr(Colr::Icc {
+                        restricted: false,
+                        profile: icc.clone(),
+                    }),
+                    false,
+                ));
+            }
+            let id = still.add_coded_item(entry_type, data.clone(), props);
+            if let Some(exif) = &metadata.exif {
+                still.add_exif(id, exif);
+            }
+            if let Some(xmp) = &metadata.xmp {
+                still.add_xmp_bytes(id, xmp.clone());
+            }
             still.set_primary(id);
             sw.still = Some(still);
             // The cover aliases sample 0 (one copy of the bytes).

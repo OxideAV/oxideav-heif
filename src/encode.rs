@@ -3542,12 +3542,18 @@ impl Encoder for HeifEncoder {
                 _ => color.range,
             };
         }
+        // The metadata to embed (r476, core 0.1.40): the frame's blobs
+        // refined over the stream's — ICC / Exif / XMP items, as the
+        // contract `HeifImage::metadata` would be, unless the options
+        // carry their own.
+        let metadata = crate::api_registry::metadata_of_blobs(&vf.blobs(), self.params.blobs());
         let bytes = match crate::api::PixelFormat::try_from(pf) {
             // Planar YCbCr / grey / GBR and packed RGB(A): the contract
             // path, one implementation.
             Ok(_) => {
-                let image =
-                    crate::api::HeifImage::from_video_frame_parts(vf, w, h, pf)?.with_color(color);
+                let image = crate::api::HeifImage::from_video_frame_parts(vf, w, h, pf)?
+                    .with_color(color)
+                    .with_metadata(metadata.clone());
                 if image.format.is_packed() {
                     // Borrowed rows straight into the coding layout.
                     let plane = &vf.image_planes()[0];
@@ -3558,7 +3564,7 @@ impl Encoder for HeifEncoder {
                         plane.stride,
                         &plane.data,
                         &color,
-                        &crate::api::Metadata::default(),
+                        &metadata,
                         &self.opts,
                     )?
                 } else {
@@ -3575,10 +3581,12 @@ impl Encoder for HeifEncoder {
                     crate::api::PixelFormat::Rgb24,
                     &self.opts,
                 );
+                let with_metadata =
+                    crate::api_registry::effective_options(&metadata, colr.clone(), &self.opts);
                 let (colr, opts, target) = if !wide && !grey {
                     // 8-bit BGR(A): the same lossless identity rule as
                     // RGB(A).
-                    crate::api_registry::packed_coding(colr, self.opts.clone(), alpha)?
+                    crate::api_registry::packed_coding(colr, with_metadata, alpha)?
                 } else {
                     let target = crate::api_registry::packed_target(
                         &self.opts,
@@ -3586,11 +3594,7 @@ impl Encoder for HeifEncoder {
                         if wide { 16 } else { 8 },
                         alpha,
                     )?;
-                    let opts = EncodeOptions {
-                        colr: colr.clone(),
-                        ..self.opts.clone()
-                    };
-                    (colr, opts, target)
+                    (colr, with_metadata, target)
                 };
                 let hf = packed_to_planar_for(vf, w, h, pf, &colr, target)?;
                 encode_still_owned(hf, &opts)?

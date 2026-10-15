@@ -39,8 +39,9 @@ use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
 
 use oxideav_core::{
-    CodecId, CodecParameters, CodecResolver, CodecTag, Decoder, Error as CoreError, Frame, Packet,
-    PixelFormat, ProbeContext, ProbeData, ReadSeek, Result as CoreResult, StreamInfo, TimeBase,
+    CodecId, CodecParameters, CodecResolver, CodecTag, Decoder, Error as CoreError, Frame,
+    MetadataBlob, Packet, PixelFormat, ProbeContext, ProbeData, ReadSeek, Result as CoreResult,
+    StreamInfo, TimeBase,
 };
 
 use crate::decode;
@@ -224,6 +225,37 @@ struct TrackStream {
     /// each packet is a synthesized single-image HEIF file (master
     /// sample + time-parallel alpha sample) for the `"heif"` codec.
     alpha_track_index: Option<usize>,
+}
+
+/// The metadata blobs of an image item (r476, core 0.1.40): its ICC
+/// profile (`colr` `prof` / `rICC`), the Exif payload and the XMP
+/// packet of the metadata items describing it — the
+/// [`crate::Metadata`] the contract decode yields, as
+/// [`crate::api_registry::blobs_of_metadata`] forms it. An unreadable
+/// metadata item leaves its blob out (the decode reports it).
+fn item_blobs<D: AsRef<[u8]>>(file: &HeifFile<D>, node: &ImageNode) -> Vec<MetadataBlob> {
+    let (exif, xmp) = decode::metadata_payloads(file, node).unwrap_or((None, None));
+    crate::api_registry::blobs_of_metadata(&crate::api::Metadata::new(
+        node.properties.icc_profile().map(<[u8]>::to_vec),
+        exif,
+        xmp.map(String::into_bytes),
+        None,
+    ))
+}
+
+/// The metadata blobs of a visual sample entry: its ICC profile
+/// (`colr` `prof` / `rICC`) — what the contract `decode_all` puts on
+/// every frame of the track.
+fn entry_blobs(entry: &crate::sequence::SampleEntry) -> Vec<MetadataBlob> {
+    crate::api_registry::blobs_of_metadata(&crate::api::Metadata::new(
+        entry.colr.iter().find_map(|c| match c {
+            crate::props::Colr::Icc { profile, .. } => Some(profile.clone()),
+            _ => None,
+        }),
+        None,
+        None,
+        None,
+    ))
 }
 
 /// Sample layout a decoder-configuration property announces.
@@ -564,6 +596,11 @@ impl HeifDemuxer {
                             params = params.with_layers(layers);
                         }
                     }
+                    // The stream's metadata blobs (r476, core 0.1.40):
+                    // the first item's ICC profile / Exif / XMP — what
+                    // `info()` reports for the primary; every packet's
+                    // frame carries its own item's as per-frame blobs.
+                    params = params.with_blobs(item_blobs(&file, &g.first));
                     pending_stills.push((params, g.items.clone()));
                 }
             }
@@ -599,7 +636,8 @@ impl HeifDemuxer {
                     .cloned()
                     .unwrap_or(crate::props::Colr::MIAF_DEFAULT);
                 let mut params = CodecParameters::video(CodecId::new(CODEC_ID))
-                    .with_color_signal(crate::image::core_bridge::color_signal_of(&colour));
+                    .with_color_signal(crate::image::core_bridge::color_signal_of(&colour))
+                    .with_blobs(entry_blobs(entry));
                 params.width = Some(entry.width as u32);
                 params.height = Some(entry.height as u32);
                 params.pixel_format = core_pixel_format_for(layout.with_alpha(), &colour);
@@ -666,7 +704,9 @@ impl HeifDemuxer {
                     params =
                         params.with_color_signal(crate::image::core_bridge::color_signal_of(c));
                 }
-                params = params.with_tag(CodecTag::fourcc(&entry.entry_type));
+                params = params
+                    .with_tag(CodecTag::fourcc(&entry.entry_type))
+                    .with_blobs(entry_blobs(entry));
                 let time_base = TimeBase::new(1, t.timescale.max(1) as i64);
                 let index = (track_base + streams.len()) as u32;
                 streams.push(StreamInfo {
@@ -1249,20 +1289,32 @@ impl Decoder for HeifCodec {
         // The colour information rides on the frame (H.273 code points +
         // range; identity-matrix items as planar RGB), the way
         // HeifImage::into_video_frame labels it.
-        let signal_frame = |f: &crate::HeifFrame, nclx: &crate::props::Colr| {
-            let image = crate::api::HeifImage::from_frame(
-                f.clone(),
-                crate::api::ColorInfo::from_colr(nclx),
-                crate::api::Metadata::default(),
-            );
-            let (mut vf, _pf) = image.into_video_frame();
-            vf.pts = packet.pts;
-            Ok::<_, CoreError>(vf)
+        // The item's metadata (ICC / Exif / XMP) rides the frame as its
+        // blobs (r476, core 0.1.40) — what the contract `HeifImage`
+        // carries in `metadata`.
+        let metadata_of = |d: &decode::DecodedImage| {
+            crate::api::Metadata::new(
+                d.icc_profile.clone(),
+                d.exif.clone(),
+                d.xmp.as_ref().map(|x| x.as_bytes().to_vec()),
+                None,
+            )
         };
+        let signal_frame =
+            |f: &crate::HeifFrame, nclx: &crate::props::Colr, metadata: crate::api::Metadata| {
+                let image = crate::api::HeifImage::from_frame(
+                    f.clone(),
+                    crate::api::ColorInfo::from_colr(nclx),
+                    metadata,
+                );
+                let (mut vf, _pf) = image.into_video_frame();
+                vf.pts = packet.pts;
+                Ok::<_, CoreError>(vf)
+            };
         if !img.layers.is_empty() {
             // A layered item without lsel: every output layer, tagged.
             for l in &img.layers {
-                let vf = signal_frame(&l.frame, &img.nclx)?
+                let vf = signal_frame(&l.frame, &img.nclx, metadata_of(&img))?
                     .with_layer(oxideav_core::LayerIdentity::new(l.layer_id as u16));
                 self.queue.push_back(Frame::Video(vf));
             }
@@ -1281,12 +1333,12 @@ impl Decoder for HeifCodec {
             };
             for (view, image) in [(0u16, first), (1u16, second)] {
                 let layer = view_layer_id(&file, image.item_id).unwrap_or(view);
-                let vf = signal_frame(&image.frame, &image.nclx)?
+                let vf = signal_frame(&image.frame, &image.nclx, metadata_of(image))?
                     .with_layer(oxideav_core::LayerIdentity::new(layer).with_view_id(view));
                 self.queue.push_back(Frame::Video(vf));
             }
         } else {
-            let vf = signal_frame(&img.frame, &img.nclx)?;
+            let vf = signal_frame(&img.frame, &img.nclx, metadata_of(&img))?;
             self.queue.push_back(Frame::Video(vf));
         }
         self.last = Some(img);

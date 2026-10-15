@@ -12,7 +12,8 @@ use std::io::{Read, Write};
 use std::time::Duration;
 
 use oxideav_core::{
-    CodecId, CodecParameters, Error as CoreError, Frame as CoreFrame, Packet, TimeBase,
+    BlobKind, CodecId, CodecParameters, Error as CoreError, Frame as CoreFrame, MetadataBlob,
+    Packet, TimeBase,
 };
 
 use crate::api::{
@@ -835,7 +836,11 @@ pub(crate) fn effective_colr(color: &ColorInfo, format: PixelFormat, opts: &Enco
 
 /// `opts` with the effective `colr` and the image's metadata where
 /// `opts` carries none.
-fn effective_options(metadata: &Metadata, colr: Colr, opts: &EncodeOptions) -> EncodeOptions {
+pub(crate) fn effective_options(
+    metadata: &Metadata,
+    colr: Colr,
+    opts: &EncodeOptions,
+) -> EncodeOptions {
     let mut o = opts.clone();
     o.colr = colr;
     if o.icc_profile.is_none() {
@@ -1008,12 +1013,53 @@ impl ColorInfo {
     }
 }
 
+/// The framework blobs of an image's metadata (round 476, core
+/// 0.1.40): the ICC profile, the Exif payload (TIFF header on) and the
+/// XMP packet under the well-known kinds — the payload conventions of
+/// `oxideav_core::blob` are this crate's own forms, so the bytes move
+/// unchanged.
+pub fn blobs_of_metadata(metadata: &Metadata) -> Vec<MetadataBlob> {
+    let mut v = Vec::new();
+    if let Some(icc) = &metadata.icc {
+        v.push(MetadataBlob::new(BlobKind::ICC, icc.clone()));
+    }
+    if let Some(exif) = &metadata.exif {
+        v.push(MetadataBlob::new(BlobKind::EXIF, exif.clone()));
+    }
+    if let Some(xmp) = &metadata.xmp {
+        v.push(MetadataBlob::new(BlobKind::XMP, xmp.clone()).with_mime("application/rdf+xml"));
+    }
+    v
+}
+
+/// The image metadata of framework blobs: the frame's own
+/// (`per_frame`) refine the stream's (`stream`) per kind — the first
+/// blob of each well-known kind wins; other kinds are not this
+/// crate's.
+pub fn metadata_of_blobs(per_frame: &[MetadataBlob], stream: &[MetadataBlob]) -> Metadata {
+    let pick = |kind: &BlobKind| -> Option<Vec<u8>> {
+        per_frame
+            .iter()
+            .chain(stream.iter())
+            .find(|b| b.is(kind))
+            .map(|b| b.data.clone())
+    };
+    Metadata::new(
+        pick(&BlobKind::ICC),
+        pick(&BlobKind::EXIF),
+        pick(&BlobKind::XMP),
+        None,
+    )
+}
+
 impl HeifImage {
     /// Into a framework frame plus the label it carries (the planes
     /// move; the colour description rides as the frame's
-    /// `ColorSignal`).
+    /// `ColorSignal`, the metadata as its blobs —
+    /// [`blobs_of_metadata`]).
     pub fn into_video_frame(self) -> (oxideav_core::VideoFrame, oxideav_core::PixelFormat) {
         let pf = self.format.to_core_labelled(&self.color);
+        let blobs = blobs_of_metadata(&self.metadata);
         let planes = self
             .planes
             .into_iter()
@@ -1022,18 +1068,21 @@ impl HeifImage {
                 data: p.data,
             })
             .collect();
-        (
-            oxideav_core::VideoFrame { pts: None, planes }
-                .with_color_signal(self.color.to_color_signal()),
-            pf,
-        )
+        let mut vf = oxideav_core::VideoFrame { pts: None, planes }
+            .with_color_signal(self.color.to_color_signal());
+        if !blobs.is_empty() {
+            vf.set_blobs(blobs);
+        }
+        (vf, pf)
     }
 
     /// From a framework frame and the stream parameters that describe
     /// it (`width`, `height`, `pixel_format`): the planar YCbCr / grey /
     /// `Gbrp*` layouts and packed `Rgb24` / `Rgba` (planes copied). The
     /// colour description comes from the frame's `ColorSignal`, else the
-    /// parameters' (unspecified when neither says).
+    /// parameters' (unspecified when neither says); the metadata from
+    /// the frame's blobs refined over the parameters'
+    /// ([`metadata_of_blobs`]).
     pub fn from_video_frame(
         frame: &oxideav_core::VideoFrame,
         params: &CodecParameters,
@@ -1049,12 +1098,13 @@ impl HeifImage {
         if frame.color_signal().is_none() {
             img.color = ColorInfo::from_color_signal(&params.color_signal);
         }
+        img.metadata = metadata_of_blobs(&frame.blobs(), params.blobs());
         Ok(img)
     }
 
     /// [`HeifImage::from_video_frame`] with the geometry and label given
     /// directly; the colour description is the frame's signal
-    /// (unspecified without one).
+    /// (unspecified without one), the metadata the frame's blobs.
     pub fn from_video_frame_parts(
         frame: &oxideav_core::VideoFrame,
         width: u32,
@@ -1083,6 +1133,7 @@ impl HeifImage {
             Some(s) => ColorInfo::from_color_signal(&s),
             None => ColorInfo::unspecified(),
         };
+        img.metadata = metadata_of_blobs(&frame.blobs(), &[]);
         Ok(img)
     }
 }

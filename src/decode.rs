@@ -1404,32 +1404,7 @@ pub fn decode_item<D: AsRef<[u8]>>(
     };
     let icc_profile = colour_node.properties.icc_profile().map(<[u8]>::to_vec);
     let gain_map = find_gain_map(file, &node, &mut session)?;
-    let mut exif = None;
-    let mut xmp = None;
-    for m in &node.metadata {
-        if m.item_type == crate::meta::ITEM_TYPE_EXIF && exif.is_none() {
-            exif = Some(exif_payload(&file.item_data(m.id)?)?);
-        } else if m.item_type == crate::meta::ITEM_TYPE_DEXF && exif.is_none() {
-            // Amd 2:2026 A.2.1: a deflate()-compressed ExifDataBlock.
-            if let Some(block) = inflate_metadata(&file.item_data(m.id)?)? {
-                exif = Some(exif_payload(&block)?);
-            }
-        } else if m.is_xmp() && xmp.is_none() {
-            let body = file.item_data(m.id)?;
-            let deflated = m
-                .content_encoding
-                .as_deref()
-                .map(|e| e.eq_ignore_ascii_case("deflate"))
-                .unwrap_or(false);
-            if deflated {
-                if let Some(packet) = inflate_metadata(&body)? {
-                    xmp = Some(String::from_utf8_lossy(&packet).into_owned());
-                }
-            } else {
-                xmp = Some(String::from_utf8_lossy(&body).into_owned());
-            }
-        }
-    }
+    let (exif, xmp) = metadata_payloads(file, &node)?;
     let mut img = DecodedImage {
         item_id,
         premultiplied_alpha: node.premultiplied_alpha && node.alpha.is_some(),
@@ -1589,6 +1564,44 @@ pub fn exif_payload(item: &[u8]) -> Result<Vec<u8>> {
             HeifError::invalid(format!("Exif tiff header offset {off} past the item"))
         })?;
     Ok(item[start..].to_vec())
+}
+
+/// The Exif payload (from the TIFF header on) and the XMP packet of the
+/// metadata items describing `node` (`cdsc`): the first `Exif` /
+/// `dExf` item and the first XMP `mime` item, deflated ones inflated
+/// (Amd 2:2026 A.2.1 / O.4.3). What [`decode_item`] puts on the
+/// [`DecodedImage`] and the framework demuxer on its stream's blobs.
+pub(crate) fn metadata_payloads<D: AsRef<[u8]>>(
+    file: &HeifFile<D>,
+    node: &ImageNode,
+) -> Result<(Option<Vec<u8>>, Option<String>)> {
+    let mut exif = None;
+    let mut xmp = None;
+    for m in &node.metadata {
+        if m.item_type == crate::meta::ITEM_TYPE_EXIF && exif.is_none() {
+            exif = Some(exif_payload(&file.item_data(m.id)?)?);
+        } else if m.item_type == crate::meta::ITEM_TYPE_DEXF && exif.is_none() {
+            // Amd 2:2026 A.2.1: a deflate()-compressed ExifDataBlock.
+            if let Some(block) = inflate_metadata(&file.item_data(m.id)?)? {
+                exif = Some(exif_payload(&block)?);
+            }
+        } else if m.is_xmp() && xmp.is_none() {
+            let body = file.item_data(m.id)?;
+            let deflated = m
+                .content_encoding
+                .as_deref()
+                .map(|e| e.eq_ignore_ascii_case("deflate"))
+                .unwrap_or(false);
+            if deflated {
+                if let Some(packet) = inflate_metadata(&body)? {
+                    xmp = Some(String::from_utf8_lossy(&packet).into_owned());
+                }
+            } else {
+                xmp = Some(String::from_utf8_lossy(&body).into_owned());
+            }
+        }
+    }
+    Ok((exif, xmp))
 }
 
 #[cfg(test)]

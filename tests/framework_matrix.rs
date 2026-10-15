@@ -1413,6 +1413,111 @@ fn framework_encoder_matrix() {
     }
 }
 
+/// r476 (core 0.1.40): the framework encoder embeds the frame's
+/// metadata blobs (ICC / Exif / XMP, refined over the stream's) as the
+/// file's `colr` / `Exif` / `mime` items — byte-identical to the
+/// contract encode of the same image with that `Metadata` — and the
+/// framework decoder hands them back as the frame's blobs, equal to
+/// the contract decode's `metadata`; across every codec and the
+/// planar / packed / wide-packed input routes.
+#[test]
+fn framework_encoder_round_trips_metadata_blobs() {
+    use oxideav_core::{BlobKind, MetadataBlob};
+    let ctx = context();
+    let icc: Vec<u8> = (0..400u32).map(|i| (i * 7 % 251) as u8).collect();
+    let exif: Vec<u8> = b"II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0".to_vec();
+    let xmp = b"<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?><x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/><?xpacket end=\"w\"?>".to_vec();
+    let metadata = oxideav_heif::Metadata::new(
+        Some(icc.clone()),
+        Some(exif.clone()),
+        Some(xmp.clone()),
+        None,
+    );
+    let cells = [
+        ("hevc", Pf::Yuv420P),
+        ("hevc", Pf::Rgb24),
+        ("hevc", Pf::Bgra),
+        ("hevc", Pf::Rgb48Le),
+        ("av1", Pf::Gbrp8),
+        ("av1", Pf::Ya8),
+        ("avc", Pf::Yuv422P10Le),
+        ("avc", Pf::Rgba),
+        ("vvc", Pf::Gray8),
+    ];
+    for (codec, pf) in cells {
+        let tag = format!("{codec} {pf:?} metadata");
+        let c = Cell::new(&tag, pf, 32, 32, &[("codec", codec)]);
+        let l = layout_of(pf);
+        let (mut vf, contract_img, _) = source(l, 32, 32);
+        // The frame carries the Exif and XMP; the stream the ICC profile
+        // (a per-frame blob refines a stream blob of the same kind).
+        vf.set_blobs(vec![
+            MetadataBlob::new(BlobKind::EXIF, exif.clone()),
+            MetadataBlob::new(BlobKind::XMP, xmp.clone()),
+        ]);
+        let mut params = c.params();
+        params.push_blob(MetadataBlob::new(BlobKind::ICC, icc.clone()));
+        let mut enc = ctx
+            .codecs
+            .first_encoder(&params)
+            .unwrap_or_else(|e| panic!("{tag}: encoder: {e}"));
+        enc.send_frame(&Frame::Video(vf))
+            .unwrap_or_else(|e| panic!("{tag}: {e}"));
+        enc.flush().unwrap();
+        let bytes = enc.receive_packet().unwrap().data;
+        // Contract decode: the metadata is back, byte for byte.
+        let img = oxideav_heif::decode(&bytes).unwrap_or_else(|e| panic!("{tag}: decode: {e}"));
+        assert_eq!(img.metadata, metadata, "{tag}: contract metadata");
+        let info = oxideav_heif::info(&bytes).unwrap();
+        assert!(
+            info.has_icc && info.has_exif && info.has_xmp,
+            "{tag}: info()"
+        );
+        // Contract encode of the same image with that metadata: the
+        // same bytes (where the contract has the layout).
+        if let Some(ci) = contract_img {
+            let cbytes = oxideav_heif::encode(
+                &ci.with_color(ColorInfo::unspecified())
+                    .with_metadata(metadata.clone()),
+                &c.encode_options(),
+            )
+            .unwrap();
+            assert!(
+                cbytes == bytes,
+                "{tag}: framework bytes differ from the contract encode"
+            );
+        }
+        // Framework demuxer + decoder: the stream announces the blobs
+        // and the frame carries them.
+        let mut demuxer = ctx
+            .containers
+            .open_demuxer("heif", Box::new(Cursor::new(bytes.clone())), &ctx.codecs)
+            .unwrap();
+        let info = demuxer.streams()[0].clone();
+        assert_eq!(
+            oxideav_heif::metadata_of_blobs(&[], info.params.blobs()),
+            metadata,
+            "{tag}: stream blobs"
+        );
+        let pkt = demuxer.next_packet().unwrap();
+        let mut dec = ctx.codecs.first_decoder(&info.params).unwrap();
+        dec.send_packet(&pkt).unwrap();
+        let Frame::Video(frame) = dec.receive_frame().unwrap() else {
+            panic!("{tag}: video frame")
+        };
+        assert_eq!(
+            oxideav_heif::metadata_of_blobs(&frame.blobs(), &[]),
+            metadata,
+            "{tag}: frame blobs"
+        );
+        let back = HeifImage::from_video_frame(&frame, &info.params).unwrap();
+        assert_eq!(
+            back.metadata, metadata,
+            "{tag}: HeifImage::from_video_frame"
+        );
+    }
+}
+
 /// Invalid parameters are typed refusals at construction / first frame.
 #[test]
 fn framework_encoder_refuses_bad_parameters() {

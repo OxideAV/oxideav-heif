@@ -174,6 +174,109 @@ fn sequence_mux_demux_round_trip_is_exact() {
 }
 
 /// Find a top-level / nested box type anywhere in the file bytes.
+/// r476 (core 0.1.40): the sequence muxer writes the stream's metadata
+/// blobs — the ICC profile as the sample entry's `colr` (and the cover
+/// item's), Exif / XMP as items describing the cover image — and the
+/// demuxer / contract decode hand them back: every track frame carries
+/// the ICC profile, the cover still the three.
+#[test]
+fn sequence_muxer_writes_the_stream_blobs() {
+    use oxideav_core::{BlobKind, MetadataBlob};
+    let ctx = context();
+    let mut params = CodecParameters::video(CodecId::new("h265"));
+    params.width = Some(32);
+    params.height = Some(32);
+    params.pixel_format = Some(PixelFormat::Yuv420P);
+    params.options = oxideav_core::CodecOptions::new().set("mode", "pcm");
+    let mut enc = ctx.codecs.first_encoder(&params).unwrap();
+    let mut packets = Vec::new();
+    for i in 0..2u32 {
+        let (mut vf, _) = frame(i).to_core().unwrap();
+        vf.pts = Some(i as i64);
+        enc.send_frame(&Frame::Video(vf)).unwrap();
+        while let Ok(p) = enc.receive_packet() {
+            packets.push(p);
+        }
+    }
+    enc.flush().unwrap();
+    while let Ok(p) = enc.receive_packet() {
+        packets.push(p);
+    }
+    let icc: Vec<u8> = (0..300u32).map(|i| (i * 13 % 250) as u8).collect();
+    let exif: Vec<u8> = b"MM\0*\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0".to_vec();
+    let xmp = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>".to_vec();
+    let mut sparams = enc.output_params().clone();
+    sparams.push_blob(MetadataBlob::new(BlobKind::ICC, icc.clone()));
+    sparams.push_blob(MetadataBlob::new(BlobKind::EXIF, exif.clone()));
+    sparams.push_blob(MetadataBlob::new(BlobKind::XMP, xmp.clone()));
+    let path = std::env::temp_dir().join(format!(
+        "oxideav-heif-mux-blobs-{}.heic",
+        std::process::id()
+    ));
+    let stream = StreamInfo {
+        index: 0,
+        time_base: TimeBase::new(1, 10),
+        duration: Some(2),
+        start_time: Some(0),
+        params: sparams,
+    };
+    let sink: Box<dyn oxideav_core::WriteSeek> = Box::new(std::fs::File::create(&path).unwrap());
+    let mut muxer = ctx.containers.open_muxer("heif", sink, &[stream]).unwrap();
+    muxer.write_header().unwrap();
+    for p in &packets {
+        muxer
+            .write_packet(&p.clone().with_duration(1).with_stream_index(0))
+            .unwrap();
+    }
+    muxer.write_trailer().unwrap();
+    drop(muxer);
+    let bytes = std::fs::read(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    // Contract: the cover still carries all three, the track frames the
+    // ICC profile.
+    let info = oxideav_heif::info(&bytes).unwrap();
+    assert!(
+        info.has_icc && info.has_exif && info.has_xmp,
+        "info(): {info:?}"
+    );
+    let frames = oxideav_heif::decode_all(&bytes).unwrap();
+    let cover = frames.iter().find(|f| f.track_id.is_none()).unwrap();
+    assert_eq!(
+        cover.image.metadata,
+        oxideav_heif::Metadata::new(
+            Some(icc.clone()),
+            Some(exif.clone()),
+            Some(xmp.clone()),
+            None
+        )
+    );
+    let timed: Vec<_> = frames.iter().filter(|f| f.track_id.is_some()).collect();
+    assert_eq!(timed.len(), 2);
+    for f in &timed {
+        assert_eq!(f.image.metadata.icc.as_deref(), Some(icc.as_slice()));
+    }
+    // Framework: the still stream's blobs and the track stream's.
+    let demuxer = ctx
+        .containers
+        .open_demuxer("heif", Box::new(Cursor::new(bytes)), &ctx.codecs)
+        .unwrap();
+    let streams = demuxer.streams();
+    assert_eq!(
+        oxideav_heif::metadata_of_blobs(&[], streams[0].params.blobs()),
+        cover.image.metadata,
+        "still stream blobs"
+    );
+    let track = streams
+        .iter()
+        .find(|s| s.params.codec_id.as_str() == "h265")
+        .unwrap();
+    assert_eq!(
+        track.params.blob(&BlobKind::ICC).map(|b| b.data.as_slice()),
+        Some(icc.as_slice()),
+        "track stream ICC blob"
+    );
+}
+
 fn has_box(bytes: &[u8], t: &[u8; 4]) -> bool {
     bytes.windows(4).any(|w| w == t)
 }
