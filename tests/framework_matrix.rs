@@ -490,28 +490,32 @@ fn expect(c: &Cell) -> Expect {
         Chroma::Yuv420
     };
     let lossless_mode = match codec {
-        "hevc" | "h265" => mode == "pcm",
+        "hevc" | "h265" | "avc" | "h264" | "vvc" | "h266" => mode == "pcm",
         "av1" => mode == "pcm" || quality == Some(100),
         _ => false,
     };
     let rgb8 = l.packed.is_some() && !l.grey_packed && l.depth == 8;
     let (chroma, depth, identity, lossless): (Chroma, u8, bool, bool) = match codec {
-        "vvc" | "h266" => {
-            if mode == "pcm" {
-                return Expect::Refuse("no lossless");
-            }
-            (Chroma::Yuv420, 8, false, false)
-        }
-        "avc" | "h264" => {
-            if mode == "pcm" {
-                return Expect::Refuse("no lossless");
-            }
-            (Chroma::Yuv420, 8, false, false)
-        }
-        "hevc" | "h265" | "av1" => {
+        "hevc" | "h265" | "av1" | "avc" | "h264" | "vvc" | "h266" => {
             let av1 = codec == "av1";
-            let d = coded_d(l.depth);
-            if lossless_mode && full && (rgb8 || (l.planar_rgb && l.depth <= 12)) {
+            let avc = matches!(codec, "avc" | "h264");
+            let vvc = matches!(codec, "vvc" | "h266");
+            // VVC codes 8 – 10 bits: deeper sources at 10, an explicit
+            // deeper `depth` refused.
+            if vvc && depth_opt.map(|d| d > 10).unwrap_or(false) {
+                return Expect::Refuse("8 – 10-bit");
+            }
+            let d = if vvc {
+                coded_d(l.depth).min(10)
+            } else {
+                coded_d(l.depth)
+            };
+            if avc && (l.chroma == Chroma::Mono && l.packed.is_none() || l.grey_packed) {
+                // The AVC registry encoder codes grey input as 4:2:0 with
+                // neutral chroma: the item is a 4:2:0 item (never exact
+                // against a grey source, whose layout it does not keep).
+                (Chroma::Yuv420, d, false, false)
+            } else if lossless_mode && full && (rgb8 || (l.planar_rgb && l.depth <= 12)) {
                 // Lossless RGB: the G, B, R planes as an identity item.
                 (Chroma::Yuv444, d, true, d == l.depth)
             } else if av1 && l.planar_rgb && l.depth <= 12 {
@@ -561,6 +565,123 @@ struct Outcome {
     identical_to_contract: Option<bool>,
     heif_info: Option<bool>,
     sips: Option<bool>,
+    /// AVC cells: every `avc1` item of the file decodes byte-identically
+    /// in this crate's AVC decoder and in the black-box reference
+    /// decoder (`None` without the binary / on other codecs).
+    avc_black_box: Option<bool>,
+}
+
+/// Every `avc1` item of `bytes` through oxideav-h264's registry decoder
+/// (the item's `avcC` as extradata, its length-prefixed payload as the
+/// packet) and through the black-box reference decoder over the Annex B
+/// reconstruction (parameter sets + NAL units with start codes), at the
+/// coded (macroblock-aligned) size: the planes must be byte-identical.
+fn avc_items_match_black_box(bytes: &[u8], dir: &std::path::Path, tag: &str) -> bool {
+    use oxideav_heif::hvcc::split_length_prefixed;
+    let f = HeifFile::parse(bytes).unwrap();
+    let meta = f.meta().unwrap();
+    let mut n = 0usize;
+    for it in &meta.items {
+        if &it.item_type != b"avc1" {
+            continue;
+        }
+        let props = oxideav_heif::props::ItemProperties::resolve(meta, it.id).unwrap();
+        let cfg = props.avcc().unwrap();
+        let data = f.item_data_owned(it.id).unwrap();
+        let mut annex_b = Vec::new();
+        for nal in cfg
+            .sps
+            .iter()
+            .chain(cfg.pps.iter())
+            .map(|v| v.as_slice())
+            .chain(split_length_prefixed(&data, cfg.length_size).unwrap())
+        {
+            annex_b.extend_from_slice(&[0, 0, 0, 1]);
+            annex_b.extend_from_slice(nal);
+        }
+        // Ours.
+        let layout = cfg.layout().unwrap();
+        let mut params = CodecParameters::video(CodecId::new("h264"));
+        params.extradata = cfg.raw.clone();
+        params.pixel_format = layout.to_core();
+        let mut dec = oxideav_h264::h264_decoder::make_decoder(&params).unwrap();
+        let pkt = oxideav_core::Packet::new(0, TimeBase::new(1, 1), data)
+            .with_pts(0)
+            .with_keyframe(true);
+        dec.send_packet(&pkt)
+            .unwrap_or_else(|e| panic!("{tag}: item {}: our decoder: {e}", it.id));
+        dec.flush().unwrap();
+        let Ok(Frame::Video(ours)) = dec.receive_frame() else {
+            panic!("{tag}: item {}: our decoder yielded no picture", it.id)
+        };
+        // Theirs.
+        let (pix_fmt, bps) = match (layout.chroma, layout.bit_depth) {
+            (Chroma::Yuv420, 8) => ("yuv420p", 1),
+            (Chroma::Yuv422, 8) => ("yuv422p", 1),
+            (Chroma::Yuv444, 8) => ("yuv444p", 1),
+            (Chroma::Yuv420, 10) => ("yuv420p10le", 2),
+            (Chroma::Yuv422, 10) => ("yuv422p10le", 2),
+            (Chroma::Yuv444, 10) => ("yuv444p10le", 2),
+            (Chroma::Yuv420, 12) => ("yuv420p12le", 2),
+            (Chroma::Yuv422, 12) => ("yuv422p12le", 2),
+            (Chroma::Yuv444, 12) => ("yuv444p12le", 2),
+            other => panic!("{tag}: item {}: layout {other:?}", it.id),
+        };
+        let h264 = dir.join(format!(
+            "{}_{}.h264",
+            tag.replace(['/', ' ', ':'], "_"),
+            it.id
+        ));
+        let raw = dir.join(format!(
+            "{}_{}.raw",
+            tag.replace(['/', ' ', ':'], "_"),
+            it.id
+        ));
+        std::fs::write(&h264, &annex_b).unwrap();
+        let st = Command::new("ffmpeg")
+            .args(["-nostdin", "-loglevel", "error", "-y", "-i"])
+            .arg(&h264)
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", pix_fmt])
+            .arg(&raw)
+            .output()
+            .unwrap();
+        assert!(
+            st.status.success(),
+            "{tag}: item {}: the black-box decoder refused the stream: {}",
+            it.id,
+            String::from_utf8_lossy(&st.stderr)
+        );
+        let theirs = std::fs::read(&raw).unwrap();
+        // The coded picture size: the SPS carries no cropping (this
+        // crate pads to 16 and crops with `clap`), so both decoders
+        // emit the macroblock-aligned picture — the `ispe` of the item.
+        let (cw, ch) = props.ispe().map(|i| (i.width, i.height)).unwrap();
+        let mut mine = Vec::with_capacity(theirs.len());
+        let (sx, sy) = layout.chroma.shift();
+        for (p, plane) in ours.image_planes().iter().enumerate() {
+            let (pw, ph) = if p == 0 {
+                (cw, ch)
+            } else {
+                (cw.div_ceil(1 << sx), ch.div_ceil(1 << sy))
+            };
+            for y in 0..ph as usize {
+                let row = &plane.data[y * plane.stride..y * plane.stride + pw as usize * bps];
+                mine.extend_from_slice(row);
+            }
+        }
+        if mine != theirs {
+            eprintln!(
+                "{tag}: item {}: {} bytes ours vs {} the black-box decoder's differ",
+                it.id,
+                mine.len(),
+                theirs.len()
+            );
+            return false;
+        }
+        n += 1;
+    }
+    assert!(n > 0, "{tag}: no avc1 item");
+    true
 }
 
 fn encode_framework(ctx: &RuntimeContext, c: &Cell, vf: &VideoFrame) -> Result<Vec<u8>, String> {
@@ -827,6 +948,8 @@ fn run_cell(ctx: &RuntimeContext, c: &Cell, dir: &std::path::Path) -> Result<Out
             && text.contains(&format!("pixelWidth: {}", c.w))
             && text.contains(&format!("pixelHeight: {}", c.h))
     });
+    let avc_black_box = (matches!(c.codec(), "avc" | "h264") && have_binary("ffmpeg"))
+        .then(|| avc_items_match_black_box(&bytes, dir, &c.tag));
     Ok(Outcome {
         bytes,
         label: want_label,
@@ -834,6 +957,7 @@ fn run_cell(ctx: &RuntimeContext, c: &Cell, dir: &std::path::Path) -> Result<Out
         identical_to_contract,
         heif_info,
         sips,
+        avc_black_box,
     })
 }
 
@@ -849,6 +973,7 @@ fn cells() -> Vec<Cell> {
         ("av1", "intra"),
         ("av1", "pcm"),
         ("avc", "intra"),
+        ("avc", "pcm"),
     ];
     // Every layout × every codec / mode at a block-aligned size.
     for l in LAYOUTS {
@@ -883,23 +1008,48 @@ fn cells() -> Vec<Cell> {
             &[("codec", "vvc")],
         ));
     }
-    v.push(Cell::new(
-        "vvc/pcm Yuv420P 32x32",
+    for pf in [
         Pf::Yuv420P,
-        32,
-        32,
-        &[("codec", "vvc"), ("mode", "pcm")],
-    ));
-    v.push(Cell::new(
-        "avc/pcm Yuv420P 48x32",
-        Pf::Yuv420P,
-        48,
-        32,
-        &[("codec", "avc"), ("mode", "pcm")],
-    ));
+        Pf::Gray8,
+        Pf::Yuv444P,
+        Pf::Yuv420P10Le,
+        Pf::Gbrp8,
+        Pf::Rgb24,
+        Pf::Rgba,
+        Pf::Ya8,
+    ] {
+        v.push(Cell::new(
+            &format!("vvc/pcm {pf:?} 32x32"),
+            pf,
+            32,
+            32,
+            &[("codec", "vvc"), ("mode", "pcm")],
+        ));
+    }
+    for (name, o) in [
+        ("depth10", &[("depth", "10")][..]),
+        ("depth12", &[("depth", "12")][..]),
+        ("chroma444", &[("chroma", "444")][..]),
+        ("pcm+chroma444", &[("mode", "pcm"), ("chroma", "444")][..]),
+        ("limited", &[("range", "limited")][..]),
+        ("pcm+limited", &[("mode", "pcm"), ("range", "limited")][..]),
+    ] {
+        let mut opts: Vec<(&str, &str)> = vec![("codec", "vvc")];
+        opts.extend_from_slice(o);
+        v.push(Cell::new(
+            &format!("vvc {name} Rgb24 32x32"),
+            Pf::Rgb24,
+            32,
+            32,
+            &opts,
+        ));
+    }
     // Sizes: 1×1, odd, unaligned, through every codec.
     for (w, h) in [(1u32, 1u32), (7, 5), (65, 33), (2, 2)] {
-        for &(codec, mode) in codec_modes.iter().chain([("vvc", "intra")].iter()) {
+        for &(codec, mode) in codec_modes
+            .iter()
+            .chain([("vvc", "intra"), ("vvc", "pcm")].iter())
+        {
             for pf in [Pf::Rgb24, Pf::Rgba, Pf::Gray8, Pf::Yuv420P, Pf::Yuv444P10Le] {
                 if codec == "vvc" && pf != Pf::Rgb24 && pf != Pf::Yuv420P {
                     continue;
@@ -977,18 +1127,41 @@ fn cells() -> Vec<Cell> {
             ));
         }
     }
-    for (name, o) in [
-        ("qp30", ("qp", "30")),
-        ("thumbnail16", ("thumbnail", "16")),
-        ("limited", ("range", "limited")),
-    ] {
-        for pf in [Pf::Rgb24, Pf::Rgba] {
+    // AVC (round 476, oxideav-h264 0.1.9): every High-family layout,
+    // lossless, CABAC, the depth / chroma / range knobs.
+    let avc_opts: &[(&str, &[(&str, &str)])] = &[
+        ("qp4", &[("qp", "4")]),
+        ("qp30", &[("qp", "30")]),
+        ("qp40", &[("qp", "40")]),
+        ("thumbnail16", &[("thumbnail", "16")]),
+        ("limited", &[("range", "limited")]),
+        ("pcm+limited", &[("mode", "pcm"), ("range", "limited")]),
+        ("cabac", &[("cabac", "1")]),
+        ("pcm+cabac", &[("mode", "pcm"), ("cabac", "1")]),
+        ("depth8", &[("depth", "8")]),
+        ("depth10", &[("depth", "10")]),
+        ("depth12", &[("depth", "12")]),
+        ("chroma444", &[("chroma", "444")]),
+        ("pcm+chroma444", &[("mode", "pcm"), ("chroma", "444")]),
+        ("threads2", &[("threads", "2")]),
+    ];
+    for &(name, o) in avc_opts {
+        for pf in [
+            Pf::Rgb24,
+            Pf::Rgba,
+            Pf::Yuv420P10Le,
+            Pf::Gray8,
+            Pf::Yuv444P,
+            Pf::Yuv422P12Le,
+        ] {
+            let mut opts: Vec<(&str, &str)> = vec![("codec", "avc")];
+            opts.extend_from_slice(o);
             v.push(Cell::new(
                 &format!("avc {name} {pf:?} 48x32"),
                 pf,
                 48,
                 32,
-                &[("codec", "avc"), o],
+                &opts,
             ));
         }
     }
@@ -1014,6 +1187,7 @@ fn cells() -> Vec<Cell> {
         ("av1", "intra"),
         ("av1", "pcm"),
         ("avc", "intra"),
+        ("avc", "pcm"),
     ] {
         for pf in [Pf::Rgb24, Pf::Rgba, Pf::Yuv420P] {
             v.push(Cell::new(
@@ -1096,6 +1270,25 @@ fn byte_twins() -> Vec<(String, String)> {
         "hevc/intra Yuv420P10Le 48x32".into(),
         "hevc rd0 Yuv420P10Le 48x32".into(),
     ));
+    for pf in [Pf::Rgb24, Pf::Rgba, Pf::Gray8, Pf::Yuv444P] {
+        v.push((
+            format!("avc/intra {pf:?} 48x32"),
+            format!("avc depth8 {pf:?} 48x32"),
+        ));
+    }
+    for pf in [
+        Pf::Rgb24,
+        Pf::Rgba,
+        Pf::Yuv420P10Le,
+        Pf::Gray8,
+        Pf::Yuv444P,
+        Pf::Yuv422P12Le,
+    ] {
+        v.push((
+            format!("avc/intra {pf:?} 48x32"),
+            format!("avc threads2 {pf:?} 48x32"),
+        ));
+    }
     v
 }
 
@@ -1129,7 +1322,7 @@ fn framework_encoder_matrix() {
         match r {
             Ok(o) => {
                 lines.push(format!(
-                    "{:<48} {:<14} {:>7} B {:>6} dB contract={} heif-info={} sips={}",
+                    "{:<48} {:<14} {:>7} B {:>6} dB contract={} heif-info={} sips={}{}",
                     c.tag,
                     format!("{:?}", o.label),
                     o.bytes.len(),
@@ -1143,6 +1336,9 @@ fn framework_encoder_matrix() {
                         .unwrap_or("n/a"),
                     o.heif_info.map(|b| b.to_string()).unwrap_or("-".into()),
                     o.sips.map(|b| b.to_string()).unwrap_or("-".into()),
+                    o.avc_black_box
+                        .map(|b| format!(" avc-black-box={b}"))
+                        .unwrap_or_default(),
                 ));
                 outcomes.insert(c.tag.clone(), o);
             }
@@ -1196,6 +1392,20 @@ fn framework_encoder_matrix() {
         .map(|(t, _)| t)
         .collect();
     eprintln!("sips refused {} files: {bad_sips:?}", bad_sips.len());
+    let bad_avc: Vec<&String> = outcomes
+        .iter()
+        .filter(|(_, o)| o.avc_black_box == Some(false))
+        .map(|(t, _)| t)
+        .collect();
+    assert!(
+        bad_avc.is_empty(),
+        "avc1 items differ from the black-box decoder: {bad_avc:?}"
+    );
+    let avc_checked = outcomes
+        .values()
+        .filter(|o| o.avc_black_box == Some(true))
+        .count();
+    eprintln!("avc1 files byte-identical in the black-box decoder: {avc_checked}");
     // The thread budget and the aliases never change a byte.
     for (a, b) in byte_twins() {
         let (oa, ob) = (&outcomes[&a], &outcomes[&b]);

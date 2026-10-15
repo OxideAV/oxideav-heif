@@ -127,7 +127,8 @@ mod tests {
                 "threads",
                 "depth",
                 "filters",
-                "chroma"
+                "chroma",
+                "cabac"
             ]
         );
         let schema = ctx

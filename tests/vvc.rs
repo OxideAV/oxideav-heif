@@ -265,6 +265,17 @@ fn ffmpeg_item(f: &HeifFile, item_id: u32, tag: &str) -> Option<Vec<u8>> {
     let cfg = props.vvcc().expect("vvcC");
     let data = f.item_data(item_id).unwrap();
     let au = oxideav_heif::vvcc::access_unit_annex_b(cfg, &data, props.tols()).unwrap();
+    let pix_fmt = match (cfg.chroma_format_idc, cfg.bit_depth_minus8) {
+        (0, 0) => "gray",
+        (0, 2) => "gray10le",
+        (1, 0) => "yuv420p",
+        (1, 2) => "yuv420p10le",
+        (2, 0) => "yuv422p",
+        (2, 2) => "yuv422p10le",
+        (3, 0) => "yuv444p",
+        (3, 2) => "yuv444p10le",
+        other => panic!("{tag}: vvcC layout {other:?}"),
+    };
     let dir = common::scratch_dir(&format!("vvc-item-{tag}"));
     let es = dir.join("au.266");
     let raw = dir.join("au.yuv");
@@ -272,7 +283,7 @@ fn ffmpeg_item(f: &HeifFile, item_id: u32, tag: &str) -> Option<Vec<u8>> {
     let st = std::process::Command::new("ffmpeg")
         .args(["-nostdin", "-loglevel", "error", "-y", "-i"])
         .arg(&es)
-        .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+        .args(["-f", "rawvideo", "-pix_fmt", pix_fmt])
         .arg(&raw)
         .status()
         .unwrap();
@@ -335,14 +346,23 @@ fn vvc_encode_round_trips_every_size() {
             oxideav_heif::props::ItemProperties::resolve(f.meta().unwrap(), primary.id).unwrap();
         let cfg = props.vvcc().unwrap();
         let (cw, ch) = (cfg.max_picture_width as u32, cfg.max_picture_height as u32);
-        // Padded to the encoder's 64-sample grid, cropped back by clap.
-        assert_eq!((cw % 64, ch % 64), (0, 0), "{tag}: coded {cw}x{ch}");
-        assert_eq!(props.clap().is_some(), (cw, ch) != (w, h), "{tag}");
+        // r476 (h266 0.0.10): the encoder codes any size — it pads the
+        // coded picture (the vvcC `max_picture_*`, 14496-15 §11.2.4.2.2)
+        // to its own 8-sample grid and crops with the SPS conformance
+        // window, so the item's picture (`ispe`) is the even-rounded
+        // source and only an odd edge needs `clap`.
+        let (iw, ih) = props.ispe().map(|i| (i.width, i.height)).unwrap();
         assert_eq!(
-            props.ispe().map(|i| (i.width, i.height)),
-            Some((cw, ch)),
-            "{tag}"
+            (iw, ih),
+            (w.div_ceil(2) * 2, h.div_ceil(2) * 2),
+            "{tag}: item picture {iw}x{ih}"
         );
+        assert_eq!(
+            (cw, ch),
+            (iw.div_ceil(8) * 8, ih.div_ceil(8) * 8),
+            "{tag}: coded {cw}x{ch}"
+        );
+        assert_eq!(props.clap().is_some(), (iw, ih) != (w, h), "{tag}");
         let info = oxideav_heif::info(&bytes).unwrap();
         assert_eq!((info.width, info.height), (w, h), "{tag}");
         let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
@@ -356,14 +376,25 @@ fn vvc_encode_round_trips_every_size() {
     }
 }
 
+/// A gentle test picture in any planar layout (the 8-bit 4:2:0 one
+/// scaled to the depth, chroma resampled).
+fn gentle_in(w: u32, h: u32, chroma: oxideav_heif::Chroma, depth: u8) -> HeifFrame {
+    oxideav_heif::encode::to_layout(&gentle(w, h), chroma, depth).unwrap()
+}
+
+/// r476 (h266 0.0.10): `pcm` is lossless on VVC — transform-skip
+/// coding, the decoded picture equals the source — here and in the
+/// black-box decoder; and the tool options are checked.
 #[test]
-fn vvc_refuses_pcm_and_checks_tool_options() {
+fn vvc_pcm_is_lossless_and_checks_tool_options() {
     let src = gentle(64, 64);
     let pcm = vvc().with_hevc_mode("pcm".into());
-    assert!(matches!(
-        encode_still(&src, &pcm),
-        Err(oxideav_heif::HeifError::Unsupported(_))
-    ));
+    let bytes = encode_still(&src, &pcm).unwrap();
+    let f = HeifFile::parse(&bytes).unwrap();
+    let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+    assert_eq!(tight_bytes(&img.frame), tight_bytes(&src), "pcm: exact");
+    assert_items_black_box_exact(&f, "pcm");
+    contract_equals_direct(&bytes, &img.frame);
     let bad = vvc().with_vvc_options(vec![("nonsense".into(), "1".into())]);
     assert!(encode_still(&src, &bad).is_err());
     let bad = vvc().with_vvc_options(vec![("tiles".into(), "x".into())]);
@@ -395,6 +426,62 @@ fn vvc_refuses_pcm_and_checks_tool_options() {
         assert!(p >= 30.0, "{name}: PSNR_Y {p:.2} dB");
         assert_items_black_box_exact(&f, name);
     }
+}
+
+/// r476 (h266 0.0.10): VVC items keep the source's chroma sampling at
+/// 8 / 10 bits — 4:0:0 / 4:2:2 / 4:4:4, lossy and lossless — decoded
+/// here and in the black-box decoder byte-exact; a 12-bit source codes
+/// at 10 bits, an explicit `depth=12` is a typed refusal.
+#[test]
+fn vvc_layouts_round_trip_in_both_decoders() {
+    use oxideav_heif::Chroma;
+    for (chroma, depth) in [
+        (Chroma::Mono, 8),
+        (Chroma::Yuv422, 8),
+        (Chroma::Yuv444, 8),
+        (Chroma::Yuv420, 10),
+        (Chroma::Yuv444, 10),
+        (Chroma::Mono, 10),
+    ] {
+        for mode in ["intra", "pcm"] {
+            let tag = format!("{chroma:?} {depth}-bit {mode}");
+            let src = gentle_in(48, 32, chroma, depth);
+            let opts = vvc().with_hevc_mode(mode.into()).with_qp(18);
+            let bytes = encode_still(&src, &opts).unwrap_or_else(|e| panic!("{tag}: {e}"));
+            let f = HeifFile::parse(&bytes).unwrap();
+            let primary = f.primary_item().unwrap();
+            let props = oxideav_heif::props::ItemProperties::resolve(f.meta().unwrap(), primary.id)
+                .unwrap();
+            let cfg = props.vvcc().unwrap();
+            assert_eq!(
+                (cfg.chroma_format_idc, cfg.bit_depth_minus8),
+                (chroma.idc(), depth - 8),
+                "{tag}: vvcC layout"
+            );
+            let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+            assert_eq!(img.frame.format, src.format, "{tag}: decoded layout");
+            if mode == "pcm" {
+                assert_eq!(tight_bytes(&img.frame), tight_bytes(&src), "{tag}: exact");
+            } else {
+                // PSNR over the luma plane at the source depth.
+                let a = oxideav_heif::encode::to_depth(&src, 8).unwrap();
+                let b = oxideav_heif::encode::to_depth(&img.frame, 8).unwrap();
+                let p = psnr_y(&a, &b);
+                assert!(p >= 30.0, "{tag}: PSNR_Y {p:.2} dB");
+            }
+            contract_equals_direct(&bytes, &img.frame);
+            assert_items_black_box_exact(&f, &tag.replace(' ', "-"));
+        }
+    }
+    // Depth: a 12-bit source codes at 10 bits; an explicit 12 is refused.
+    let deep = gentle_in(48, 32, Chroma::Yuv420, 12);
+    let bytes = encode_still(&deep, &vvc()).unwrap();
+    let img = oxideav_heif::decode(&bytes).unwrap();
+    assert_eq!(img.format, PixelFormat::Yuv420P10Le);
+    assert!(matches!(
+        encode_still(&deep, &vvc().with_hevc_depth(Some(12))),
+        Err(oxideav_heif::HeifError::Unsupported(_))
+    ));
 }
 
 #[test]

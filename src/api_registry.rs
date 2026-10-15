@@ -706,14 +706,12 @@ pub(crate) fn packed_coding(
     Ok((colr, opts, target))
 }
 
-/// The configured coding is lossless: HEVC `pcm`, or AV1 without a
-/// quality (`mode=pcm`) / at quality 100.
+/// The configured coding is lossless: HEVC / AVC / VVC `pcm`, or AV1
+/// without a quality (`mode=pcm`) / at quality 100.
 pub(crate) fn lossless_mode(opts: &EncodeOptions) -> bool {
     match opts.codec {
-        StillCodec::Hevc => opts.hevc_mode == "pcm",
+        StillCodec::Hevc | StillCodec::Avc | StillCodec::Vvc => opts.hevc_mode == "pcm",
         StillCodec::Av1 => !matches!(opts.av1_quality, Some(q) if q < 100),
-        // The VVC and AVC encoders have no lossless mode.
-        StillCodec::Vvc | StillCodec::Avc => false,
     }
 }
 
@@ -762,9 +760,9 @@ pub(crate) fn identity_colr(colr: &Colr) -> Colr {
 
 /// The coding layout a packed source of `depth` bits is converted to
 /// for the configured codec: [`EncodeOptions::chroma`] (4:2:0 by
-/// default, 4:4:4 on request) for HEVC and AV1 — monochrome for a
-/// packed grey source — at the coded depth; VVC and AVC items are
-/// 8-bit 4:2:0 (their encoders' line). With the source's alpha.
+/// default, 4:4:4 on request) — monochrome for a packed grey source
+/// (4:2:0 with neutral chroma on AVC, its encoder's grey line) — at
+/// the coded depth (VVC: at most 10 bits). With the source's alpha.
 #[doc(hidden)]
 pub fn packed_target(
     opts: &EncodeOptions,
@@ -772,12 +770,16 @@ pub fn packed_target(
     depth: u8,
     alpha: bool,
 ) -> Result<HeifPixelFormat> {
-    let coded = coded_depth(depth, opts.hevc_depth)?;
-    let (chroma, coded) = match opts.codec {
-        StillCodec::Hevc | StillCodec::Av1 if grey => (Chroma::Mono, coded),
-        StillCodec::Hevc | StillCodec::Av1 => (opts.chroma.unwrap_or(Chroma::Yuv420), coded),
-        // VVC and AVC items are 8-bit 4:2:0.
-        StillCodec::Vvc | StillCodec::Avc => (Chroma::Yuv420, 8),
+    let coded = match opts.codec {
+        StillCodec::Vvc => {
+            opts.vvc_coded_format(HeifPixelFormat::new(Chroma::Yuv420, depth, false)?)?
+                .bit_depth
+        }
+        _ => coded_depth(depth, opts.hevc_depth)?,
+    };
+    let chroma = match opts.codec {
+        StillCodec::Hevc | StillCodec::Av1 | StillCodec::Vvc if grey => Chroma::Mono,
+        _ => opts.chroma.unwrap_or(Chroma::Yuv420),
     };
     HeifPixelFormat::new(chroma, coded, alpha)
 }
@@ -785,13 +787,14 @@ pub fn packed_target(
 /// The chroma sampling a planar RGB source is converted to when the
 /// codec does not keep it as an identity-matrix item: AV1 converts to
 /// 4:4:4 (it codes any sampling; a 16-bit RGB source becomes 4:4:4 at
-/// the coded depth), HEVC to [`EncodeOptions::chroma`] (4:2:0 by
-/// default, as a packed RGB source), VVC / AVC to 4:2:0.
+/// the coded depth), HEVC, AVC and VVC to [`EncodeOptions::chroma`]
+/// (4:2:0 by default, as a packed RGB source).
 pub(crate) fn planar_rgb_target_chroma(opts: &EncodeOptions) -> Chroma {
     match opts.codec {
         StillCodec::Av1 => Chroma::Yuv444,
-        StillCodec::Hevc => opts.chroma.unwrap_or(Chroma::Yuv420),
-        StillCodec::Vvc | StillCodec::Avc => Chroma::Yuv420,
+        StillCodec::Hevc | StillCodec::Avc | StillCodec::Vvc => {
+            opts.chroma.unwrap_or(Chroma::Yuv420)
+        }
     }
 }
 
