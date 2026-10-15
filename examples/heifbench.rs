@@ -49,7 +49,10 @@ fn median(mut v: Vec<Duration>) -> Duration {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: heifbench [--runs N] [--no-encode] [--all-encodes] <file>...");
+        eprintln!(
+            "usage: heifbench [--runs N] [--threads N|auto] [--no-encode] [--all-encodes] \
+             [--grid none|<tile>] [--write <out.avif|out.heic>] <file>..."
+        );
         std::process::exit(2);
     }
     // Child mode: decode once (peak RSS measured by the parent).
@@ -67,6 +70,13 @@ fn main() {
     let mut threads = 1usize;
     let mut encode = true;
     let mut all_encodes = false;
+    // `--grid none` codes one item whatever the size (the automatic
+    // 512-px grid above 4 MP otherwise); `--grid <tile>` an explicit grid.
+    let mut grid: Option<u32> = None;
+    // `--write <path>`: the first file's decoded primary re-encoded —
+    // AV1 (quality 60) for an `.avif` path, HEVC (the defaults) for any
+    // other — and written out: the 12 MP decode-budget sources.
+    let mut write: Option<PathBuf> = None;
     let mut files: Vec<PathBuf> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -84,6 +94,17 @@ fn main() {
             }
             "--no-encode" => encode = false,
             "--all-encodes" => all_encodes = true,
+            "--grid" => {
+                grid = Some(match args[i + 1].as_str() {
+                    "none" => 0,
+                    n => n.parse().expect("--grid none|<tile>"),
+                });
+                i += 1;
+            }
+            "--write" => {
+                write = Some(PathBuf::from(&args[i + 1]));
+                i += 1;
+            }
             a => files.push(PathBuf::from(a)),
         }
         i += 1;
@@ -161,11 +182,34 @@ fn main() {
         };
         let mut enc_hevc = "—".to_string();
         let mut enc_av1 = "—".to_string();
+        if let Some(out) = write.take() {
+            let avif = out
+                .extension()
+                .map(|e| e.eq_ignore_ascii_case("avif"))
+                .unwrap_or(false);
+            let mut opts = EncodeOptions::default()
+                .with_grid_tile(grid)
+                .with_threads(Some(threads));
+            if avif {
+                opts = opts.with_codec(StillCodec::Av1).with_av1_quality(Some(60));
+            }
+            let s = Instant::now();
+            let bytes = encode_still(&img.frame, &opts).expect("encode");
+            eprintln!(
+                "wrote {} ({} bytes, {:.2} s)",
+                out.display(),
+                bytes.len(),
+                s.elapsed().as_secs_f64()
+            );
+            std::fs::write(&out, bytes).expect("write");
+        }
         if encode {
             let mut t = Vec::new();
             for _ in 0..runs {
                 let s = Instant::now();
-                let opts = EncodeOptions::default().with_threads(Some(threads));
+                let opts = EncodeOptions::default()
+                    .with_grid_tile(grid)
+                    .with_threads(Some(threads));
                 let out = encode_still(&img.frame, &opts).expect("hevc encode");
                 t.push(s.elapsed());
                 if t.len() == 1 {
@@ -184,6 +228,7 @@ fn main() {
                 let opts = EncodeOptions::default()
                     .with_codec(StillCodec::Av1)
                     .with_av1_quality(Some(60))
+                    .with_grid_tile(grid)
                     .with_threads(Some(threads));
                 let mut size = 0;
                 for _ in 0..runs {

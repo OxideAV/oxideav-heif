@@ -131,6 +131,69 @@ fn grid_tiles_in_parallel_are_byte_identical_to_serial() {
     }
 }
 
+/// r476 (oxideav-av1 0.1.21): a single AV1 item is decoded under the
+/// item decoder's thread budget — the codec walks its tiles in
+/// parallel and runs the post-filters by row band — byte-identical at
+/// every worker count, through the direct item decoder, the contract
+/// `DecodeOptions::threads` and the framework `"heif"` decoder's
+/// execution context.
+#[test]
+fn av1_item_decodes_byte_identical_under_every_budget() {
+    use oxideav_core::{Packet, RuntimeContext, TimeBase};
+    // 1024x512: the size-derived layout is 4 x 2 tiles (one av01 item,
+    // under the automatic-grid threshold).
+    let src = picture(1024, 512, 8, Chroma::Yuv420, false);
+    let opts = EncodeOptions::default()
+        .with_codec(StillCodec::Av1)
+        .with_av1_quality(Some(60))
+        .with_grid_tile(Some(0));
+    let bytes = encode_still(&src, &opts).unwrap();
+    let f = HeifFile::parse(&bytes).unwrap();
+    assert_eq!(f.meta().unwrap().items.len(), 1, "one av01 item (no grid)");
+    let serial = decode_primary(&f, ItemDecoder::direct()).unwrap().frame;
+    for threads in [2usize, 3, 4, 8] {
+        let got = decode_primary(&f, ItemDecoder::direct().with_threads(threads))
+            .unwrap()
+            .frame;
+        assert_eq!(got, serial, "direct item decoder, {threads} workers");
+        let got = oxideav_heif::decode_with(
+            &bytes,
+            &oxideav_heif::DecodeOptions::default().with_threads(Some(threads)),
+        )
+        .unwrap()
+        .to_frame()
+        .unwrap();
+        assert_eq!(
+            got.tight(),
+            serial.tight(),
+            "contract decode, {threads} workers"
+        );
+    }
+    // The framework decoder under an execution context.
+    let mut ctx = RuntimeContext::new();
+    oxideav_av1::register(&mut ctx);
+    oxideav_heif::register(&mut ctx);
+    let mut dec = ctx
+        .codecs
+        .first_decoder(&CodecParameters::video(CodecId::new("heif")))
+        .unwrap();
+    dec.set_execution_context(&ExecutionContext::with_threads(8));
+    let pkt = Packet::new(0, TimeBase::new(1, 1), bytes.clone())
+        .with_pts(0)
+        .with_keyframe(true);
+    dec.send_packet(&pkt).unwrap();
+    let Frame::Video(vf) = dec.receive_frame().unwrap() else {
+        panic!("video frame")
+    };
+    let planes: Vec<&[u8]> = vf
+        .image_planes()
+        .iter()
+        .map(|p| p.data.as_slice())
+        .collect();
+    let want: Vec<&[u8]> = serial.planes.iter().map(|p| p.data.as_slice()).collect();
+    assert_eq!(planes, want, "framework decoder, 8 workers");
+}
+
 #[test]
 fn hevc_wavefront_budget_keeps_the_bytes() {
     // The quadtree coder (rd set) runs the wavefront: the bytes are

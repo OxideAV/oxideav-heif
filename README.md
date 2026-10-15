@@ -192,7 +192,10 @@ C044 and the L-HEVC enhancement layers this crate does not decode),
 stream with byte-identical pixels, label and colour signal, `pts` =
 index / duration 1 / `1/1`; every track frame comes from its composed
 or raw track stream with the same pixels and `duration × time_base`
-= the contract delay; `info()` describes the first still stream. A
+= the contract delay; `info()` describes the first still stream; the
+framework decoders run under an 8-worker execution context against
+the serial contract path (r476: the AV1 items decode tile- /
+band-parallel under it, byte-identical). A
 debug build skips the files whose header announces more than 4 M
 samples of decode work (the 12 MP device samples, the 720p
 conformance sequences) unless `OXIDEAV_HEIF_MATRIX_FULL=1`; a release
@@ -209,6 +212,32 @@ still streams instead of being dropped; the still streams follow
 view of a `ster` pair on the pair's packet, a `pitm` thumbnail first);
 a primary that cannot be decoded falls back to its `altr` alternatives
 on both paths; the decoder declares `HeifDecoderOptions`.
+
+### Still-image decode budgets (12 MP, this crate, r476)
+
+`examples/heifbench` (release, `--no-encode --runs 5 --threads N`,
+Apple M4 Max) over the 12 MP iPhone device sample re-encoded by this
+crate (`--write`): a single-item AVIF (one `av01` item, the AV1
+encoder's size-derived 4×2 tiles) and the 48-tile grid AVIF / HEIC.
+oxideav-av1 0.1.21 decodes under an `ExecutionContext` — tile-,
+band-, wave- and stripe-parallel, byte-identical at any budget — and
+this crate hands it the item decoder's thread budget (`DecodeOptions::
+threads`, `ItemDecoder::with_threads`, the `"heif"` decoder's
+`set_execution_context`, the `threads` option); the output digest is
+the same at every worker count.
+
+| file | 1 worker | 2 | 4 | 8 |
+|---|---|---|---|---|
+| 12 MP AVIF, one `av01` item (720 KiB) | 0.456 s (= before r476 at any budget) | 0.246 s | 0.147 s | 0.102 s |
+| 12 MP AVIF, 48-tile grid (740 KiB) | 0.446 s | 0.234 s | 0.135 s | 0.075 s (tiles in parallel, as before) |
+| 12 MP HEIC, one `hvc1` item (2180 KiB) | 0.438 s | — | — | 0.415 s with the budget (measured, not granted: ≈5 % for eight threads) |
+| 12 MP HEIC, 48-tile grid (the device file) | 0.445 s | — | — | 0.092 s (tiles in parallel, as before) |
+
+The HEVC decoder keeps its budget for independent items (grid tiles):
+a single-item still gains ≈5 % under it (r463 measured a loss), so it
+is not granted. The AV1 grid file is faster than the single item at
+8 workers because its tiles are independent decodes; the single item
+is now within 35 % of it.
 
 ### CLI budgets (12 MP, `oxideav convert`, r475)
 
@@ -228,7 +257,7 @@ refused by the pure-Rust MJPEG encoder (`expected 3 planes`: an
 | PNG → HEIC (`png→heic`, 48-tile automatic grid) | 0.77 s | 253 MiB | 2 238 585 B |
 | HEIC → PNG | 0.17 s | 192 MiB | 14 994 518 B |
 | HEIC → AVIF | 0.87 s | 214 MiB | 730 000 B |
-| AVIF → HEIC | 0.46 s | 199 MiB | 1 466 171 B |
+| AVIF → HEIC | 0.46 s (r475; the AV1 decode under the r476 budget is 0.35 s faster when the CLI grants it) | 199 MiB | 1 466 171 B |
 | JPEG (4:2:0) → HEIC | 0.50 s | 175 MiB | 2 234 977 B |
 | HEIC → JPEG | 0.19 s | 151 MiB | 2 708 883 B |
 | device HEIC (Apple 48-tile grid, `irot`) → PNG | 0.19 s | 191 MiB | 14 618 082 B |

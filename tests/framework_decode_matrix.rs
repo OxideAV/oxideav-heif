@@ -12,7 +12,9 @@
 //! signal, untimed (`pts` = index, duration 1, 1/1), and every contract
 //! track frame must come back from a track stream with the same pixels
 //! and a delay of `duration × time_base`. `info()` must describe the
-//! primary stream.
+//! primary stream. The framework decoders run under an 8-worker
+//! execution context, the contract path serial: the thread budget
+//! never changes a byte.
 #![cfg(feature = "registry")]
 
 mod common;
@@ -22,7 +24,9 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use oxideav_core::{Decoder, Error, Frame as CoreFrame, RuntimeContext, StreamInfo, TimeBase};
+use oxideav_core::{
+    Decoder, Error, ExecutionContext, Frame as CoreFrame, RuntimeContext, StreamInfo, TimeBase,
+};
 use oxideav_heif::{decode_all_with, info, ColorInfo, DecodeOptions, Frame, HeifImage};
 
 fn context() -> RuntimeContext {
@@ -159,9 +163,17 @@ fn pump_all(ctx: &RuntimeContext, bytes: Vec<u8>) -> Result<Pumped, String> {
         .map_err(|e| format!("open: {e}"))?;
     let streams = d.streams().to_vec();
     let metadata = d.metadata().to_vec();
+    // The framework side runs under an 8-worker execution context (the
+    // AV1 items then decode tile- / band-parallel, r476) against the
+    // serial contract path: the budget never changes a byte.
     let mut decoders: Vec<Option<Box<dyn Decoder>>> = streams
         .iter()
-        .map(|s| ctx.codecs.first_decoder(&s.params).ok())
+        .map(|s| {
+            ctx.codecs.first_decoder(&s.params).ok().map(|mut d| {
+                d.set_execution_context(&ExecutionContext::with_threads(8));
+                d
+            })
+        })
         .collect();
     let mut timing: Vec<VecDeque<(Option<i64>, Option<i64>)>> =
         vec![VecDeque::new(); streams.len()];

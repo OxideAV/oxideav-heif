@@ -129,9 +129,35 @@ impl<'r> ItemDecoder<'r> {
     }
 
     /// A codec instance for `params` through the configured route
-    /// (registry or direct factories).
+    /// (registry or direct factories), granted this decoder's thread
+    /// budget when the codec runs byte-identical under one
+    /// ([`Self::make_budgeted`]).
     pub(crate) fn instantiate(&self, params: &CodecParameters) -> Result<Box<dyn Decoder>> {
-        self.make(params)
+        self.make_budgeted(params)
+    }
+
+    /// Whether a codec instance for `params` is handed the thread
+    /// budget (round 476): the AV1 decoder (oxideav-av1 0.1.21) walks
+    /// a multi-tile intra frame tile-parallel and runs its post-filters
+    /// by row band under an `ExecutionContext`, byte-identical to the
+    /// serial decode for any budget — a 12 MP tiled still decodes in
+    /// 0.456 s serial → 0.102 s on 8 workers (12 MP single-item AVIF,
+    /// this machine). The HEVC decoder is left serial: a single-item
+    /// 12 MP HEIC measured 0.438 s → 0.415 s on 8 workers (r476; r463
+    /// had it slower), not worth the threads — its budget is spent on
+    /// independent items (grid tiles) instead.
+    fn codec_takes_budget(params: &CodecParameters) -> bool {
+        params.codec_id.as_str() == CODEC_ID_AV1
+    }
+
+    /// [`Self::make`] plus the thread budget for the codecs that take
+    /// it ([`Self::codec_takes_budget`]); serial budgets change nothing.
+    fn make_budgeted(&self, params: &CodecParameters) -> Result<Box<dyn Decoder>> {
+        let mut dec = self.make(params)?;
+        if self.threads > 1 && Self::codec_takes_budget(params) {
+            dec.set_execution_context(&ExecutionContext::with_threads(self.threads));
+        }
+        Ok(dec)
     }
 
     /// Select what a decoded `tmap` item yields (see [`ToneMapOutput`]).
@@ -246,11 +272,11 @@ impl<'r> ItemDecoder<'r> {
         file: &HeifFile<D>,
         node: &ImageNode,
     ) -> Result<HeifFrame> {
-        // The codec instance stays serial: handing a single still's
-        // codec the budget measured slower (r463, 12 MP HEVC 0.30 s →
-        // 0.34 s), so the budget is spent on independent items.
+        // The budget reaches the codecs that run byte-identical under
+        // it (AV1); the others stay serial and the budget is spent on
+        // independent items (see `codec_takes_budget`).
         let job = self.prepare(file, node)?;
-        let dec = self.make(&job.params)?;
+        let dec = self.make_budgeted(&job.params)?;
         job.run(dec)
     }
 
@@ -345,7 +371,7 @@ impl<'r> ItemDecoder<'r> {
         node: &ImageNode,
     ) -> Result<Vec<LayerFrame>> {
         let job = self.prepare(file, node)?;
-        let dec = self.make(&job.params)?;
+        let dec = self.make_budgeted(&job.params)?;
         job.run_all(dec)
     }
 }
@@ -1259,8 +1285,9 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         let workers =
             ExecutionContext::with_threads(self.decoder.threads).effective_workers(jobs.len());
         if workers == 1 {
+            // One job at a time: the whole budget is the codec's.
             for (i, job) in jobs {
-                let dec = self.decoder.make(&job.params)?;
+                let dec = self.decoder.make_budgeted(&job.params)?;
                 let f = job.run(dec)?;
                 canvas.place(i, &f)?;
             }
