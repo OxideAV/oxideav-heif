@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **producer adoption (round 476)** — `oxideav-h264 0.1.9`, `oxideav-h265 >=0.0.15`, `oxideav-h266 >=0.0.10`, `oxideav-av1 0.1.21`, `oxideav-core 0.1.40` (the crate manifest and the fuzz sub-crate).
+- AVC image sequences: the H.264 §7.4.3 `idr_pic_id` rotation this crate applied to consecutive IDR samples (`encode::avc_rotate_idr_pic_id`, the muxer's `rotate_idr`) is gone — the registry encoder rotates a per-session counter itself since 0.1.9. `tests/avc_lhevc.rs` codes a three-frame `avcs` sequence as an IDR + P session and as three IDR access units (`avc_options` `gop=1`, and the `"heif"` muxer over an all-IDR `"h264"` stream): three sync samples, three distinct pictures in this crate's decoder and in the black-box reference decoder, byte-identical.
+
+### Fixed
+
+- fuzz: the two inputs the daily workflow crashed on (an HEVC item reaching a deblocking-filter index panic inside h265 0.0.14 — fixed by 0.0.15's hostile-input hardening; a `cfen` item without inputs — fixed in 0.0.11) are tracked as `minimal.*` seeds of `heif_decode` / `heif_framework` / `heif_records`.
+
 ## [0.0.11](https://github.com/OxideAV/oxideav-heif/compare/v0.0.10...v0.0.11) - 2026-10-14
 
 ### Other

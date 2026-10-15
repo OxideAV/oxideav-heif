@@ -628,11 +628,18 @@ fn avc1_items_written_by_this_crate_decode_in_both_decoders() {
             ) > 40.0
         );
     }
-    // encode_all: an avcs image sequence of three frames.
-    {
-        let opts = EncodeOptions::default()
+    // encode_all: an avcs image sequence of three frames — as one
+    // IDR + P session (the default) and as three IDR access units
+    // (`gop=1`): H.264 §7.4.3 asks consecutive IDR pictures for distinct
+    // idr_pic_id values, which the registry encoder rotates itself
+    // (oxideav-h264 0.1.9), so every sample stays its own picture.
+    for gop1 in [false, true] {
+        let mut opts = EncodeOptions::default()
             .with_codec(StillCodec::Avc)
             .with_qp(20);
+        if gop1 {
+            opts = opts.with_avc_options(vec![("gop".into(), "1".into())]);
+        }
         let frames: Vec<oxideav_heif::Frame> = (0..3u32)
             .map(|i| {
                 let mut p = picture(64, 48, Chroma::Yuv420, 8);
@@ -661,13 +668,21 @@ fn avc1_items_written_by_this_crate_decode_in_both_decoders() {
         );
         let out =
             oxideav_heif::decode_all_with(&bytes, &oxideav_heif::DecodeOptions::default()).unwrap();
-        // The cover item plus the three samples, each a distinct picture
-        // (H.264 §7.4.3: rotated idr_pic_ids keep them apart).
-        assert_eq!(out.iter().filter(|f| f.track_id.is_some()).count(), 3);
+        // The cover item plus the three samples, each a distinct picture.
+        assert_eq!(
+            out.iter().filter(|f| f.track_id.is_some()).count(),
+            3,
+            "gop1 {gop1}: three track frames"
+        );
         for fr in &out {
             assert_eq!((fr.image.width, fr.image.height), (64, 48));
         }
-        let seq = dir.join("sequence.heifs");
+        // Every sample a sync sample under gop=1, only the first otherwise.
+        let movie = oxideav_heif::sequence::parse_movie(&f).unwrap().unwrap();
+        let track = movie.tracks.iter().find(|t| t.is_visual()).unwrap();
+        let syncs = track.samples.iter().filter(|s| s.is_sync).count();
+        assert_eq!(syncs, if gop1 { 3 } else { 1 }, "gop1 {gop1}: sync samples");
+        let seq = dir.join(format!("sequence-gop1-{gop1}.heifs"));
         std::fs::write(&seq, &bytes).unwrap();
         // The track is an ordinary ISO-BMFF `avc1` track: the black-box
         // demuxer + decoder play all three samples, byte-exact with ours.
@@ -698,9 +713,9 @@ fn avc1_items_written_by_this_crate_decode_in_both_decoders() {
             );
         }
     }
-    // The "heif" muxer over an "h264" Annex B stream from this crate's
-    // AVC picture encoder (an IDR per packet).
-    {
+    // The "heif" muxer over an "h264" Annex B stream from the registry
+    // AVC encoder: an IDR + P session, then an all-IDR one (`gop=1`).
+    for gop in ["30", "1"] {
         let mut ctx = oxideav_core::RuntimeContext::new();
         oxideav_h264::register(&mut ctx);
         oxideav_heif::register(&mut ctx);
@@ -714,7 +729,7 @@ fn avc1_items_written_by_this_crate_decode_in_both_decoders() {
             start_time: Some(0),
             params,
         };
-        let path = dir.join("muxed.heifs");
+        let path = dir.join(format!("muxed-gop{gop}.heifs"));
         let sink: Box<dyn oxideav_core::WriteSeek> =
             Box::new(std::fs::File::create(&path).unwrap());
         let mut mx = ctx
@@ -729,11 +744,20 @@ fn avc1_items_written_by_this_crate_decode_in_both_decoders() {
         eparams.pixel_format = Some(oxideav_core::PixelFormat::Yuv420P);
         eparams.options = oxideav_core::CodecOptions::new()
             .set("rc", "cqp")
-            .set("qp", "20");
+            .set("qp", "20")
+            .set("gop", gop);
         let mut enc = ctx.codecs.first_encoder(&eparams).unwrap();
         let mut n = 0;
+        let mut sources = Vec::new();
         for i in 0..3i64 {
-            let (mut vf, _) = picture(64, 48, Chroma::Yuv420, 8).to_core().unwrap();
+            let mut p = picture(64, 48, Chroma::Yuv420, 8);
+            for y in 0..48 {
+                for x in 0..64 {
+                    p.set_sample(0, x, y, (p.sample(0, x, y) + i as u16 * 20) % 256);
+                }
+            }
+            sources.push(p.clone());
+            let (mut vf, _) = p.to_core().unwrap();
             vf.pts = Some(i);
             enc.send_frame(&oxideav_core::Frame::Video(vf)).unwrap();
             while let Ok(p) = enc.receive_packet() {
@@ -759,10 +783,54 @@ fn avc1_items_written_by_this_crate_decode_in_both_decoders() {
         );
         let out =
             oxideav_heif::decode_all_with(&bytes, &oxideav_heif::DecodeOptions::default()).unwrap();
+        let samples: Vec<&oxideav_heif::Frame> =
+            out.iter().filter(|f| f.track_id.is_some()).collect();
+        assert_eq!(samples.len(), 3, "muxer gop {gop}: three samples");
+        let movie = oxideav_heif::sequence::parse_movie(&f).unwrap().unwrap();
+        let track = movie.tracks.iter().find(|t| t.is_visual()).unwrap();
+        let syncs = track.samples.iter().filter(|s| s.is_sync).count();
         assert_eq!(
-            out.iter().filter(|f| f.track_id.is_some()).count(),
-            3,
-            "muxer: three samples"
+            syncs,
+            if gop == "1" { 3 } else { 1 },
+            "muxer gop {gop}: syncs"
         );
+        // Each sample is its own picture: it tracks its own source
+        // (the three sources differ by 20 luma codes).
+        for (i, fr) in samples.iter().enumerate() {
+            let hf = fr.image.to_frame().unwrap();
+            let p = psnr8(
+                &hf.tight().planes[0].data,
+                &sources[i].tight().planes[0].data,
+            );
+            assert!(p > 35.0, "muxer gop {gop}: sample {i} luma PSNR {p:.2} dB");
+        }
+        if ffmpeg {
+            let raw = dir.join(format!("muxed-gop{gop}.yuv"));
+            let st = Command::new("ffmpeg")
+                .args(["-nostdin", "-loglevel", "error", "-y", "-i"])
+                .arg(&path)
+                .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+                .arg(&raw)
+                .status()
+                .unwrap();
+            assert!(
+                st.success(),
+                "muxer gop {gop}: the black-box decoder refused the file"
+            );
+            let theirs = std::fs::read(&raw).unwrap();
+            let mut ours = Vec::new();
+            for fr in &samples {
+                ours.extend(planes_concat(&fr.image.to_frame().unwrap()));
+            }
+            assert_eq!(
+                theirs.len(),
+                ours.len(),
+                "muxer gop {gop}: three pictures out"
+            );
+            assert!(
+                ours == theirs,
+                "muxer gop {gop}: samples differ from the black-box decoder"
+            );
+        }
     }
 }

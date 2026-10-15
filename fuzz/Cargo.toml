@@ -53,16 +53,16 @@ path = ".."
 # The framework target registers the codec crates the still decoder
 # resolves through (published versions, as the crate's own CI does).
 [dependencies.oxideav-core]
-version = "0.1"
+version = "0.1.40"
 
 [dependencies.oxideav-h265]
-version = ">=0.0.13, <0.1"
+version = ">=0.0.15, <0.1"
 
 [dependencies.oxideav-av1]
-version = "0.1.19"
+version = "0.1.21"
 
 [dependencies.oxideav-h264]
-version = "0.1"
+version = "0.1.9"
 
 # Prevent this fuzz package from being pulled into the umbrella
 # workspace at `crates/*` glob-resolve time.

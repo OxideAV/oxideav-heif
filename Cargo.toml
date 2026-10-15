@@ -22,16 +22,24 @@ exclude = ["/tests", "/fuzz"]
 # container parser + composition layer (crate-local HeifFrame /
 # HeifPixelFormat / HeifError) and never references the framework or a
 # codec crate.
-oxideav-core = { version = "0.1", optional = true }
+# 0.1.40: metadata blobs on CodecParameters / VideoFrame (the ICC /
+# Exif / XMP carriage of the framework path).
+oxideav-core = { version = "0.1.40", optional = true }
 # A 0.0.x caret requirement is exact; the range keeps heif on the latest
-# h265 0.0 line (0.0.13 brought the Annex F/G/H surface heif needs).
-oxideav-h265 = { version = ">=0.0.13, <0.1", optional = true }
-oxideav-h264 = { version = "0.1", optional = true }
-oxideav-av1 = { version = "0.1.19", optional = true }
+# h265 0.0 line (0.0.15: hostile-input hardening of the CABAC
+# binarizations and the parameter-set bounds the HEIF fuzzer reached).
+oxideav-h265 = { version = ">=0.0.15, <0.1", optional = true }
+# 0.1.9: the registry encoder rotates idr_pic_id itself, takes every
+# High-family layout, `format=avcc`, and ships the avcC record module.
+oxideav-h264 = { version = "0.1.9", optional = true }
+# 0.1.21: the decoder takes an ExecutionContext budget (tile / band /
+# wave / stripe parallel, byte-identical at any budget).
+oxideav-av1 = { version = "0.1.21", optional = true }
 # VVC items (HEIF Annex L) decode / encode through the workspace's own
 # VVC crate; its registry factory is a parser-only placeholder on the
-# 0.0 line, so `vvcdec` drives `stream::StreamDecoder` directly.
-oxideav-h266 = { version = ">=0.0.9, <0.1", optional = true }
+# 0.0 line, so `vvcdec` drives `stream::StreamDecoder` directly. 0.0.10:
+# any picture geometry, 4:0:0 / 4:2:2 / 4:4:4, 10-bit, lossless.
+oxideav-h266 = { version = ">=0.0.10, <0.1", optional = true }
 # Inflate for deflate-compressed metadata items (`dExf`, deflated XMP;
 # HEIF Amd 2:2026 A.2.1 / O.4.3). Optional: `deflate` feature.
 compcol = { version = "0.6", default-features = false, features = ["deflate"], optional = true }

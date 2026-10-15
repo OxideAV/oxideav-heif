@@ -58,8 +58,6 @@ pub struct HeifSequenceMuxer {
     av1c: Option<Av1Config>,
     vvcc: Option<VvcConfig>,
     avcc: Option<AvcConfig>,
-    /// The last AVC sample's `idr_pic_id` (H.264 §7.4.3 rotation).
-    last_idr_pic_id: Option<u32>,
     coded_size: Option<(u32, u32)>,
     samples: Vec<(Vec<u8>, u32, bool)>,
     /// The whole-file packet of a still stream.
@@ -125,7 +123,6 @@ impl HeifSequenceMuxer {
             av1c,
             vvcc,
             avcc,
-            last_idr_pic_id: None,
             coded_size,
             samples: Vec::new(),
             still: None,
@@ -219,7 +216,7 @@ impl HeifSequenceMuxer {
                     // others are length-prefixed as they are.
                     let has_sps = oxideav_h264::nal::AnnexBSplitter::new(&packet.data)
                         .any(|n| n.first().map(|h| h & 0x1f) == Some(7));
-                    let mut data = if has_sps {
+                    let data = if has_sps {
                         let (cfg, data, w, h, _) = avc_item_from_annex_b(&packet.data)?;
                         if self.avcc.is_none() {
                             self.avcc = Some(cfg);
@@ -229,7 +226,6 @@ impl HeifSequenceMuxer {
                     } else {
                         avc_sample_from_annex_b(&packet.data)?
                     };
-                    self.rotate_idr(&mut data)?;
                     self.samples.push((data, duration, packet.is_keyframe()));
                 } else {
                     let cfg = self.avcc.as_ref().ok_or_else(|| {
@@ -238,28 +234,15 @@ impl HeifSequenceMuxer {
                         )
                     })?;
                     let nals = split_length_prefixed(&packet.data, cfg.length_size)?;
-                    let mut data = if cfg.length_size == 4 {
+                    let data = if cfg.length_size == 4 {
                         packet.data.clone()
                     } else {
                         join_length_prefixed(&nals, 4)?
                     };
-                    self.rotate_idr(&mut data)?;
                     self.samples.push((data, duration, packet.is_keyframe()));
                 }
             }
         }
-        Ok(())
-    }
-
-    /// H.264 §7.4.3 on an AVC sample: consecutive IDR samples get
-    /// distinct `idr_pic_id`s (see `encode::avc_rotate_idr_pic_id`).
-    fn rotate_idr(&mut self, data: &mut Vec<u8>) -> Result<()> {
-        let Some(cfg) = &self.avcc else { return Ok(()) };
-        let sps = crate::encode::avcc_sps(cfg)?;
-        // `None` after a non-IDR sample: the rule binds consecutive IDR
-        // access units only.
-        self.last_idr_pic_id =
-            crate::encode::avc_rotate_idr_pic_id(data, &sps, self.last_idr_pic_id)?;
         Ok(())
     }
 
