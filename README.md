@@ -345,7 +345,10 @@ Gateway contract (r476): the same codec is registered as `"heif"`
 `codec=av1`, an `avif` / `avis`-branded file), so a gateway picking
 the encoder by the requested extension gets the right coding; both
 decoders open every HEIF-family file. The framework `quality`
-(0..=100) steers every codec: AV1's own scale, and on HEVC / VVC / AVC
+(0..=100) steers every codec: AV1 codes `mode=intra` at it (an
+explicit `quality` < 100 without a `mode` is lossy; 100 is the
+lossless coding, the same bytes as `mode=pcm`; absent = 60), and on
+HEVC / VVC / AVC
 — when `qp` is not given — `qp = round((100 − quality) × 51 / 100)`
 (90 → 5, 50 → 26, 0 → 51), with `quality` 100 the lossless `pcm` mode
 unless `mode` is given; an explicit `qp` wins; neither given keeps

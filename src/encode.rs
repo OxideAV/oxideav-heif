@@ -3318,7 +3318,7 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             name: "quality",
             kind: oxideav_core::OptionKind::U32,
             default: oxideav_core::OptionValue::U32(60),
-            help: "Quality 0..=100 for mode=intra: AV1's own scale (100 = lossless); on HEVC / VVC / AVC, when qp is not given, qp = round((100 - quality) * 51 / 100) and 100 is lossless (mode=pcm) unless mode is given; neither given = qp 18 / AV1 quality 60",
+            help: "Quality 0..=100: AV1 codes mode=intra at it (100 = lossless, the same bytes as mode=pcm; absent = 60); on HEVC / VVC / AVC, when qp is not given, qp = round((100 - quality) * 51 / 100) and 100 is lossless (mode=pcm) unless mode is given; neither given = qp 18 / AV1 quality 60",
         },
         oxideav_core::OptionField {
             name: "speed",

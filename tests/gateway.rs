@@ -256,3 +256,103 @@ fn quality_governs_every_codec() {
         assert_eq!(default, explicit, "{codec}: default bytes");
     }
 }
+
+/// The AV1 rule of the gateway `quality` (round 476): an explicit
+/// `quality` < 100 with no explicit `mode` codes `mode=intra` at that
+/// quality — a 16x16 RGB picture through the `avif` encoder and through
+/// `heif` + `codec=av1` shrinks and loses PSNR from 100 to 90 to 50;
+/// `quality` 100 is the lossless coding (`mode=pcm`'s bytes); absent,
+/// today's default (quality 60).
+#[test]
+fn av1_quality_selects_a_lossy_intra_coding() {
+    let ctx = context();
+    let mut rgb = Vec::new();
+    for y in 0..16u32 {
+        for x in 0..16u32 {
+            rgb.extend_from_slice(&[(x * 16) as u8, (y * 16) as u8, ((x * y) % 256) as u8]);
+        }
+    }
+    let truth = oxideav_heif::HeifImage::new(
+        16,
+        16,
+        oxideav_heif::PixelFormat::Rgb24,
+        vec![oxideav_heif::Plane::new(48, rgb.clone())],
+    )
+    .unwrap();
+    let encode_rgb = |id: &str, opts: &[(&str, &str)]| -> Vec<u8> {
+        let mut params = CodecParameters::video(CodecId::new(id));
+        params.width = Some(16);
+        params.height = Some(16);
+        params.pixel_format = Some(oxideav_core::PixelFormat::Rgb24);
+        let mut o = CodecOptions::new();
+        for (k, v) in opts {
+            o = o.set(*k, *v);
+        }
+        params.options = o;
+        let mut enc = ctx.codecs.first_encoder(&params).unwrap();
+        let vf = oxideav_core::VideoFrame {
+            pts: Some(0),
+            planes: vec![oxideav_core::VideoPlane {
+                stride: 48,
+                data: rgb.clone(),
+            }],
+        };
+        enc.send_frame(&Frame::Video(vf)).unwrap();
+        enc.flush().unwrap();
+        enc.receive_packet().unwrap().data
+    };
+    let psnr_rgb = |bytes: &[u8]| -> f64 {
+        let img = oxideav_heif::decode(bytes).unwrap();
+        let (a, b) = (img.to_rgb8(), truth.to_rgb8());
+        let se: f64 = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| (*x as f64 - *y as f64).powi(2))
+            .sum();
+        10.0 * (255.0f64 * 255.0 / (se / a.len() as f64).max(1e-9)).log10()
+    };
+    for (id, base) in [("avif", &[][..]), ("heif", &[("codec", "av1")][..])] {
+        let mut sizes = Vec::new();
+        let mut psnrs = Vec::new();
+        for q in ["100", "90", "50"] {
+            let mut opts = base.to_vec();
+            opts.push(("quality", q));
+            let bytes = encode_rgb(id, &opts);
+            assert_eq!(&bytes[8..12], b"avif", "{id} quality {q}: brand");
+            assert!(has_fourcc(&bytes, b"av01"), "{id} quality {q}");
+            sizes.push(bytes.len());
+            psnrs.push(psnr_rgb(&bytes));
+        }
+        assert!(
+            sizes[0] > sizes[1] && sizes[1] > sizes[2],
+            "{id}: bytes {sizes:?}"
+        );
+        assert!(
+            psnrs[0] > psnrs[1] && psnrs[1] > psnrs[2],
+            "{id}: PSNR {psnrs:?}"
+        );
+        assert!(
+            psnrs[0] > 90.0,
+            "{id}: quality 100 is lossless ({:.1} dB)",
+            psnrs[0]
+        );
+        eprintln!("{id}: bytes {sizes:?}, PSNR {psnrs:?}");
+        // quality 100 = the lossless mode's bytes; absent = quality 60.
+        let mut pcm = base.to_vec();
+        pcm.push(("mode", "pcm"));
+        let mut q100 = base.to_vec();
+        q100.push(("quality", "100"));
+        assert_eq!(
+            encode_rgb(id, &pcm),
+            encode_rgb(id, &q100),
+            "{id}: 100 = pcm"
+        );
+        let mut q60 = base.to_vec();
+        q60.push(("quality", "60"));
+        assert_eq!(
+            encode_rgb(id, base),
+            encode_rgb(id, &q60),
+            "{id}: default = 60"
+        );
+    }
+}
