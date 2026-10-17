@@ -53,6 +53,8 @@ pub fn register_codecs(reg: &mut oxideav_core::CodecRegistry) {
         .with_decode()
         .with_encode()
         .with_intra_only(true)
+        .with_lossy(true)
+        .with_lossless(true)
         .with_pixel_formats(crate::encode::ENCODER_PIXEL_FORMATS.to_vec());
     // The same codec under two ids (round 476): `"heif"` (encoder
     // default HEVC, `heic`) and `"avif"` (encoder default AV1, `avif`

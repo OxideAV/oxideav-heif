@@ -356,3 +356,117 @@ fn av1_quality_selects_a_lossy_intra_coding() {
         );
     }
 }
+
+/// Through `oxideav_core`'s registry alone (no gateway): the `avif`
+/// implementation carries the `heif` one's capabilities (the 26
+/// accepted layouts, lossy + lossless), and `params.options` `quality`
+/// drives both ids' AV1 bytes on a 16x16 `Yuv420P` / `Yuv444P` /
+/// `Rgb24` frame — 100 (lossless, the largest) > none (quality 60) >
+/// 50; an `Rgb24` frame at quality 50 comes back as lossy YCbCr, at 100
+/// as the lossless identity `Gbrp8` item.
+#[test]
+fn registry_avif_capabilities_and_quality_bytes() {
+    let ctx = context();
+    let caps_of = |id: &str| {
+        let impls = ctx.codecs.implementations(&CodecId::new(id));
+        assert_eq!(impls.len(), 1, "{id}: one implementation");
+        impls[0].caps.clone()
+    };
+    let (heif, avif) = (caps_of("heif"), caps_of("avif"));
+    assert_eq!(
+        heif.accepted_pixel_formats.len(),
+        26,
+        "heif accepted layouts"
+    );
+    assert_eq!(
+        avif.accepted_pixel_formats, heif.accepted_pixel_formats,
+        "avif accepts what heif accepts"
+    );
+    assert!(heif.lossy && heif.lossless && avif.lossy && avif.lossless);
+    assert_eq!(
+        ctx.codecs
+            .encoder_options_schema(&CodecId::new("avif"))
+            .map(|s| s.len()),
+        ctx.codecs
+            .encoder_options_schema(&CodecId::new("heif"))
+            .map(|s| s.len())
+    );
+    for pf in [
+        oxideav_core::PixelFormat::Yuv420P,
+        oxideav_core::PixelFormat::Yuv444P,
+        oxideav_core::PixelFormat::Rgb24,
+    ] {
+        let fmt = oxideav_heif::PixelFormat::try_from(pf).unwrap();
+        let planes = match fmt.packed_bytes_per_pixel() {
+            Some(b) => vec![oxideav_core::VideoPlane {
+                stride: 16 * b,
+                data: (0..16 * 16 * b).map(|i| (i * 7 % 251) as u8).collect(),
+            }],
+            None => (0..fmt.plane_count())
+                .map(|p| {
+                    let (w, h) = fmt.plane_dims(p, 16, 16);
+                    oxideav_core::VideoPlane {
+                        stride: w as usize,
+                        data: (0..(w * h) as usize).map(|i| (i * 7 % 251) as u8).collect(),
+                    }
+                })
+                .collect(),
+        };
+        for (id, base) in [("avif", &[][..]), ("heif", &[("codec", "av1")][..])] {
+            let encode = |q: Option<&str>| -> (Vec<u8>, oxideav_heif::PixelFormat) {
+                let mut params = CodecParameters::video(CodecId::new(id));
+                params.width = Some(16);
+                params.height = Some(16);
+                params.pixel_format = Some(pf);
+                let mut o = CodecOptions::new();
+                for (k, v) in base {
+                    o = o.set(*k, *v);
+                }
+                if let Some(q) = q {
+                    o = o.set("quality", q);
+                }
+                params.options = o;
+                let mut enc = ctx.codecs.first_encoder(&params).unwrap();
+                enc.send_frame(&Frame::Video(oxideav_core::VideoFrame {
+                    pts: Some(0),
+                    planes: planes.clone(),
+                }))
+                .unwrap();
+                enc.flush().unwrap();
+                let bytes = enc.receive_packet().unwrap().data;
+                assert_eq!(&bytes[8..12], b"avif", "{id} {pf:?} quality {q:?}: brand");
+                let label = oxideav_heif::decode(&bytes).unwrap().format;
+                (bytes, label)
+            };
+            let (b100, l100) = encode(Some("100"));
+            let (bnone, lnone) = encode(None);
+            let (b50, l50) = encode(Some("50"));
+            assert!(
+                b100.len() > bnone.len() && bnone.len() > b50.len(),
+                "{id} {pf:?}: bytes 100 / none / 50 = {} / {} / {}",
+                b100.len(),
+                bnone.len(),
+                b50.len()
+            );
+            if pf == oxideav_core::PixelFormat::Rgb24 {
+                assert_eq!(
+                    l100,
+                    oxideav_heif::PixelFormat::Gbrp8,
+                    "{id}: lossless RGB identity"
+                );
+                assert_eq!(
+                    l50,
+                    oxideav_heif::PixelFormat::Yuv420P,
+                    "{id}: lossy RGB as YCbCr"
+                );
+                assert_eq!(lnone, oxideav_heif::PixelFormat::Yuv420P, "{id}");
+            } else {
+                assert_eq!(
+                    (l100, lnone, l50),
+                    (fmt, fmt, fmt),
+                    "{id} {pf:?}: layout kept"
+                );
+            }
+        }
+    }
+}
