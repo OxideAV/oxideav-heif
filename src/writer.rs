@@ -37,6 +37,7 @@ use crate::boxes::write::{boxed, full_boxed, push_box};
 use crate::boxes::FourCc;
 use crate::derived::{GridDescriptor, OverlayDescriptor};
 use crate::error::{HeifError, Result};
+use crate::file::HeifFile;
 use crate::ftyp::{
     BRAND_AVIF, BRAND_AVIS, BRAND_HEIC, BRAND_HEIX, BRAND_HEVC, BRAND_HEVX, BRAND_ISO8, BRAND_MIAF,
     BRAND_MIF1, BRAND_MSF1, BRAND_TMAP, BRAND_VVIC, BRAND_VVIS,
@@ -99,6 +100,9 @@ pub struct WriterItem {
     pub name: String,
     /// `content_type` (for `mime` items).
     pub content_type: Option<String>,
+    /// `content_encoding` (for `mime` items; `"deflate"` on a deflated
+    /// XMP packet — the body is written as given).
+    pub content_encoding: Option<String>,
     /// Hidden flag (`infe` flags bit 0).
     pub hidden: bool,
     /// Body.
@@ -164,6 +168,7 @@ impl HeifWriter {
             item_type,
             name: String::new(),
             content_type: None,
+            content_encoding: None,
             hidden: false,
             body: ItemBody::Coded(data),
             properties,
@@ -238,6 +243,7 @@ impl HeifWriter {
             item_type: crate::meta::ITEM_TYPE_CFEN,
             name: String::new(),
             content_type: None,
+            content_encoding: None,
             hidden: false,
             body: ItemBody::ColourFormatEnhancement(body),
             properties,
@@ -309,6 +315,7 @@ impl HeifWriter {
             item_type,
             name: String::new(),
             content_type: None,
+            content_encoding: None,
             hidden: false,
             body: ItemBody::CodedExtents(tiles),
             properties,
@@ -373,6 +380,7 @@ impl HeifWriter {
             item_type: crate::meta::ITEM_TYPE_TILI,
             name: String::new(),
             content_type: None,
+            content_encoding: None,
             hidden: false,
             body: ItemBody::Tiled {
                 data,
@@ -408,6 +416,7 @@ impl HeifWriter {
             item_type: ITEM_TYPE_GRID,
             name: String::new(),
             content_type: None,
+            content_encoding: None,
             hidden: false,
             body: ItemBody::Grid(desc),
             properties,
@@ -437,6 +446,7 @@ impl HeifWriter {
             item_type: ITEM_TYPE_IOVL,
             name: String::new(),
             content_type: None,
+            content_encoding: None,
             hidden: false,
             body: ItemBody::Overlay(desc),
             properties,
@@ -454,6 +464,7 @@ impl HeifWriter {
             item_type: ITEM_TYPE_IDEN,
             name: String::new(),
             content_type: None,
+            content_encoding: None,
             hidden: false,
             body: ItemBody::Identity,
             properties,
@@ -506,6 +517,7 @@ impl HeifWriter {
             item_type: crate::meta::ITEM_TYPE_TMAP,
             name: String::new(),
             content_type: None,
+            content_encoding: None,
             hidden: false,
             body: ItemBody::ToneMap(metadata.serialize_tmap_body()),
             properties,
@@ -601,6 +613,7 @@ impl HeifWriter {
             item_type: ITEM_TYPE_EXIF,
             name: String::new(),
             content_type: None,
+            content_encoding: None,
             hidden: false,
             body: ItemBody::Metadata(body),
             properties: Vec::new(),
@@ -644,6 +657,7 @@ impl HeifWriter {
             item_type,
             name: String::new(),
             content_type: content_type.map(str::to_owned),
+            content_encoding: None,
             hidden: false,
             body: ItemBody::Metadata(body),
             properties: Vec::new(),
@@ -784,6 +798,163 @@ impl HeifWriter {
     /// The items queued so far.
     pub fn items(&self) -> &[WriterItem] {
         &self.items
+    }
+
+    /// Import image item `id` of a parsed `file` — with everything it
+    /// needs to display as it did there: its derivation inputs (`dimg`,
+    /// recursively), its auxiliaries (`auxl`), thumbnails (`thmb`) and
+    /// metadata items (`cdsc`: Exif / XMP / any `mime` or `uri `
+    /// item), the members of every `altr` group it is in (a `tmap`
+    /// alternate and its gain map come along with their base), every
+    /// reference among the imported items (`prem`, `base`, … included)
+    /// and every entity group whose members were all imported (an
+    /// `altr` group with at least two imported members is kept with
+    /// those). Bodies are copied byte for byte (a multi-extent coded
+    /// item keeps its extents — `cexg`), properties re-typed through
+    /// [`Property::parse`] (unknown boxes verbatim), the hidden flags
+    /// and item names kept; ids are re-assigned. Returns the new id of
+    /// `id`. A protected item (`ipro`) or a `tili` tiled item is a
+    /// typed refusal. The caller chooses the primary.
+    pub fn import_item<D: AsRef<[u8]>>(&mut self, file: &HeifFile<D>, id: u32) -> Result<u32> {
+        use std::collections::BTreeMap;
+        let meta = file.meta()?;
+        let mut map: BTreeMap<u32, u32> = BTreeMap::new();
+        let mut work = vec![id];
+        while let Some(src) = work.pop() {
+            if map.contains_key(&src) {
+                continue;
+            }
+            let info = meta
+                .item(src)
+                .ok_or_else(|| HeifError::invalid(format!("import: item {src} is not in iinf")))?;
+            if info.protection_index != 0 {
+                return Err(HeifError::unsupported(format!(
+                    "import: item {src} is protected (ipro)"
+                )));
+            }
+            if info.is_tiled_image() {
+                return Err(HeifError::unsupported(format!(
+                    "import: item {src} is a tili tiled item"
+                )));
+            }
+            let dimg = meta.references_from(src, &reference::DIMG);
+            let body = match info.item_type {
+                ITEM_TYPE_GRID => ItemBody::Grid(GridDescriptor::parse(&file.item_data(src)?)?),
+                ITEM_TYPE_IOVL => {
+                    ItemBody::Overlay(OverlayDescriptor::parse(&file.item_data(src)?, dimg.len())?)
+                }
+                ITEM_TYPE_IDEN => ItemBody::Identity,
+                crate::meta::ITEM_TYPE_TMAP => ItemBody::ToneMap(file.item_data_owned(src)?),
+                crate::meta::ITEM_TYPE_CFEN => ItemBody::ColourFormatEnhancement(
+                    crate::derived::ColourFormatEnhancement::parse(
+                        &file.item_data(src)?,
+                        dimg.len(),
+                    )?,
+                ),
+                _ if !info.is_image() => ItemBody::Metadata(file.item_data_owned(src)?),
+                _ => match file.item_extents(src) {
+                    Ok(extents) if extents.len() > 1 => {
+                        ItemBody::CodedExtents(extents.iter().map(|e| e.to_vec()).collect())
+                    }
+                    Ok(extents) => ItemBody::Coded(extents.concat()),
+                    // Construction method 2 (an item built from other
+                    // items' extents) resolves to one body.
+                    Err(_) => ItemBody::Coded(file.item_data_owned(src)?),
+                },
+            };
+            let properties = meta
+                .properties_of(src)
+                .into_iter()
+                .map(|(_, raw, essential)| Ok((Property::parse(raw)?, essential)))
+                .collect::<Result<Vec<_>>>()?;
+            let new_id = self.alloc_id();
+            self.items.push(WriterItem {
+                id: new_id,
+                item_type: info.item_type,
+                name: info.name.clone(),
+                content_type: info.content_type.clone(),
+                content_encoding: info.content_encoding.clone(),
+                hidden: info.is_hidden(),
+                body,
+                properties,
+            });
+            map.insert(src, new_id);
+            // What this item needs: its inputs, and the items that
+            // describe or accompany it.
+            work.extend(dimg);
+            for t in [reference::AUXL, reference::THMB, reference::CDSC] {
+                work.extend(meta.references_to(src, &t));
+            }
+            for g in meta.groups_containing(src, b"altr") {
+                // An entity may be a track (MIAF §7.3.11.2: an image
+                // and a track as alternates); only items are imported.
+                work.extend(
+                    g.entity_ids
+                        .iter()
+                        .copied()
+                        .filter(|e| meta.item(*e).is_some()),
+                );
+            }
+        }
+        // References among the imported items, in file order.
+        for r in &meta.references {
+            let Some(from) = map.get(&r.from_item_id) else {
+                continue;
+            };
+            let to: Vec<u32> = r
+                .to_item_ids
+                .iter()
+                .filter_map(|t| map.get(t).copied())
+                .collect();
+            if to.is_empty() {
+                continue;
+            }
+            // Only whole derivations are meaningful; the closure above
+            // imported every input, so a partial `dimg` cannot occur.
+            self.references.push((r.reference_type, *from, to));
+        }
+        for g in &meta.entity_groups {
+            let mapped: Vec<u32> = g
+                .entity_ids
+                .iter()
+                .filter_map(|e| map.get(e).copied())
+                .collect();
+            let whole = mapped.len() == g.entity_ids.len();
+            let alternates = &g.grouping_type == b"altr" && mapped.len() >= 2;
+            if mapped.is_empty() || !(whole || alternates) {
+                continue;
+            }
+            let gid = self.alloc_id();
+            self.entity_groups.push((
+                g.grouping_type,
+                gid,
+                g.flags & 0x00ff_ffff,
+                mapped,
+                g.payload.clone(),
+            ));
+        }
+        Ok(map[&id])
+    }
+
+    /// A writer holding the primary images of `files` (every one a
+    /// HEIF-family file this crate reads — a low-overhead `mini` file
+    /// included) as an image collection: each primary with everything
+    /// it needs ([`Self::import_item`]), the first file's as the
+    /// primary of the collection, the others in order. Each image keeps
+    /// its own Exif / XMP / ICC items, so a burst stays per-picture;
+    /// the brands follow the items ([`Self::selected_brands`]'s rule,
+    /// truthfully).
+    pub fn from_files<B: AsRef<[u8]>>(files: &[B]) -> Result<Self> {
+        let mut w = Self::new();
+        for (i, bytes) in files.iter().enumerate() {
+            let f = HeifFile::parse_borrowed(bytes.as_ref())?;
+            let primary = f.primary_item()?.id;
+            let id = w.import_item(&f, primary)?;
+            if i == 0 {
+                w.set_primary(id);
+            }
+        }
+        Ok(w)
     }
 
     fn selected_brands(&self) -> (FourCc, Vec<FourCc>) {
@@ -1130,6 +1301,10 @@ impl HeifWriter {
             if it.item_type == ITEM_TYPE_MIME {
                 b.extend_from_slice(it.content_type.as_deref().unwrap_or("").as_bytes());
                 b.push(0);
+                if let Some(enc) = &it.content_encoding {
+                    b.extend_from_slice(enc.as_bytes());
+                    b.push(0);
+                }
             }
             infes.push(full_boxed(b"infe", version, it.hidden as u32, &b));
         }
@@ -2198,7 +2373,6 @@ fn relocate_iloc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file::HeifFile;
     use crate::hvcc::HevcConfig;
     use crate::props::{Colr, Ispe, Pixi};
 

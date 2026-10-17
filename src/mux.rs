@@ -60,8 +60,8 @@ pub struct HeifSequenceMuxer {
     avcc: Option<AvcConfig>,
     coded_size: Option<(u32, u32)>,
     samples: Vec<(Vec<u8>, u32, bool)>,
-    /// The whole-file packet of a still stream.
-    still: Option<Vec<u8>>,
+    /// The whole-file packets of a still stream (one picture each).
+    still: Vec<Vec<u8>>,
     header_written: bool,
     finished: bool,
 }
@@ -128,7 +128,7 @@ impl HeifSequenceMuxer {
             avcc,
             coded_size,
             samples: Vec::new(),
-            still: None,
+            still: Vec::new(),
             header_written: false,
             finished: false,
         })
@@ -138,17 +138,15 @@ impl HeifSequenceMuxer {
         let duration = packet.duration.unwrap_or(1).max(1) as u32;
         match self.codec {
             Codec::Still => {
-                if self.still.is_some() {
-                    return Err(HeifError::invalid(
-                        "heif muxer: a still stream carries exactly one packet (one file); \
-                         a second packet cannot be appended",
-                    ));
-                }
                 // The packet must be a HEIF file this crate can read.
+                // One packet is the file; several (a burst: the still
+                // encoder's packets for the frames of one stream, or
+                // the demuxer's per-item packets) are merged into one
+                // image collection at `finish`.
                 crate::file::HeifFile::parse_borrowed(&packet.data).map_err(|e| {
                     HeifError::invalid(format!("heif muxer: still packet is not a HEIF file: {e}"))
                 })?;
-                self.still = Some(packet.data.clone());
+                self.still.push(packet.data.clone());
             }
             Codec::Hevc => {
                 // Length-prefixed input when an hvcC was supplied and the
@@ -251,10 +249,22 @@ impl HeifSequenceMuxer {
 
     fn finish(&mut self) -> Result<()> {
         if let Codec::Still = self.codec {
-            let bytes = self
-                .still
-                .take()
-                .ok_or_else(|| HeifError::invalid("heif muxer: no still packet was written"))?;
+            let stills = std::mem::take(&mut self.still);
+            let bytes = match stills.as_slice() {
+                [] => {
+                    return Err(HeifError::invalid(
+                        "heif muxer: no still packet was written",
+                    ))
+                }
+                // One picture: the encoder's file, through unchanged.
+                [one] => one.clone(),
+                // A burst: every packet's primary image (with its own
+                // derivations, auxiliaries, thumbnails and metadata
+                // items) becomes an item of one collection, the first
+                // the primary — what the demuxer reads back as this
+                // stream's packets, each frame with its own blobs.
+                many => HeifWriter::from_files(many)?.write_to_vec()?,
+            };
             self.output
                 .write_all(&bytes)
                 .map_err(|e| HeifError::invalid(format!("heif muxer: write: {e}")))?;
@@ -400,7 +410,7 @@ impl Muxer for HeifSequenceMuxer {
             return Ok(());
         }
         self.finished = true;
-        if self.samples.is_empty() && self.still.is_none() {
+        if self.samples.is_empty() && self.still.is_empty() {
             return Err(CoreError::invalid("heif muxer: no packets were written"));
         }
         self.finish()?;

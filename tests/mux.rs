@@ -310,9 +310,8 @@ fn still_stream_passes_through_as_the_file() {
     muxer.write_header().unwrap();
     let pkt = oxideav_core::Packet::new(0, TimeBase::new(1, 1), bytes.clone()).with_keyframe(true);
     muxer.write_packet(&pkt).unwrap();
-    // A second still packet is a typed refusal, not a silent append.
-    let err = muxer.write_packet(&pkt).unwrap_err();
-    assert!(err.to_string().contains("exactly one packet"), "{err}");
+    // One packet is the file (a second one would make a two-item
+    // collection — see `still_burst_merges_into_one_collection…`).
     muxer.write_trailer().unwrap();
     drop(muxer);
     let written = std::fs::read(&path).unwrap();
@@ -617,4 +616,145 @@ fn sequence_looping_round_trips_through_the_edit_list() {
             Some(other) => panic!("unexpected loop behaviour {other:?}"),
         }
     }
+}
+
+/// A burst through the framework: several frames of one `"heif"` still
+/// stream, each with its own Exif / XMP blobs over the stream's ICC
+/// profile, become the still encoder's whole-file packets; the `"heif"`
+/// muxer merges them into one image collection — the first picture the
+/// primary, every item with its own metadata items — that the demuxer
+/// reads back as the same packets (per-item blobs on each frame) and
+/// the contract `decode_all` as per-item images.
+#[test]
+fn still_burst_merges_into_one_collection_with_per_item_metadata() {
+    use oxideav_core::{BlobKind, MetadataBlob};
+    let ctx = context();
+    let icc: Vec<u8> = (0..300u32).map(|i| (i * 13 % 250) as u8).collect();
+    let exif_of = |i: u8| -> Vec<u8> {
+        let mut e = b"MM\0*\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0".to_vec();
+        e[19] = i + 1;
+        e
+    };
+    let xmp_of = |i: u8| format!("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" n=\"{i}\"/>").into_bytes();
+    let mut params = CodecParameters::video(CodecId::new("heif"));
+    params.width = Some(32);
+    params.height = Some(32);
+    params.pixel_format = Some(PixelFormat::Yuv420P);
+    params.options = oxideav_core::CodecOptions::new().set("mode", "pcm");
+    params.push_blob(MetadataBlob::new(BlobKind::ICC, icc.clone()));
+    let mut enc = ctx.codecs.first_encoder(&params).unwrap();
+    let mut packets = Vec::new();
+    for i in 0..3u8 {
+        let (mut vf, _) = frame(i as u32).to_core().unwrap();
+        vf.pts = Some(i as i64);
+        vf.push_blob(MetadataBlob::new(BlobKind::EXIF, exif_of(i)));
+        vf.push_blob(MetadataBlob::new(BlobKind::XMP, xmp_of(i)));
+        enc.send_frame(&Frame::Video(vf)).unwrap();
+        while let Ok(p) = enc.receive_packet() {
+            packets.push(p);
+        }
+    }
+    enc.flush().unwrap();
+    while let Ok(p) = enc.receive_packet() {
+        packets.push(p);
+    }
+    assert_eq!(packets.len(), 3, "one file per frame");
+    let stream = StreamInfo {
+        index: 0,
+        time_base: TimeBase::new(1, 1),
+        duration: Some(3),
+        start_time: Some(0),
+        params: enc.output_params().clone(),
+    };
+    let path = std::env::temp_dir().join(format!(
+        "oxideav-heif-mux-burst-{}.heic",
+        std::process::id()
+    ));
+    let sink: Box<dyn oxideav_core::WriteSeek> = Box::new(std::fs::File::create(&path).unwrap());
+    let mut muxer = ctx.containers.open_muxer("heif", sink, &[stream]).unwrap();
+    muxer.write_header().unwrap();
+    for p in &packets {
+        muxer.write_packet(&p.clone().with_stream_index(0)).unwrap();
+    }
+    muxer.write_trailer().unwrap();
+    drop(muxer);
+    let bytes = std::fs::read(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    // Structure: three coded images, each described by its own Exif and
+    // XMP item, one shared ICC `colr`; MIAF-conformant with the HEVC
+    // profile brands.
+    let f = oxideav_heif::HeifFile::parse(&bytes).unwrap();
+    let meta = f.meta().unwrap();
+    let images: Vec<u32> = meta
+        .items
+        .iter()
+        .filter(|i| i.is_image())
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(images.len(), 3, "{:?}", meta.items);
+    for id in &images {
+        assert_eq!(meta.metadata_of(*id).len(), 2, "item {id}: Exif + XMP");
+    }
+    assert_eq!(meta.primary_item_id, Some(images[0]));
+    let rep = oxideav_heif::miaf::check(&f, oxideav_heif::miaf::MiafProfile::Miaf).unwrap();
+    assert!(rep.is_conformant(), "{:#?}", rep.violations);
+    assert!(f.file_type.has_brand(b"MiHB") && f.file_type.has_brand(b"heic"));
+    // Contract: three item frames, each with its own metadata and the
+    // exact picture (lossless mode).
+    let frames = oxideav_heif::decode_all(&bytes).unwrap();
+    assert_eq!(frames.len(), 3);
+    for (i, fr) in frames.iter().enumerate() {
+        assert!(fr.delay.is_none() && fr.item_id.is_some());
+        assert_eq!(
+            fr.image.to_frame().unwrap(),
+            frame(i as u32),
+            "frame {i} pixels"
+        );
+        assert_eq!(
+            fr.image.metadata,
+            oxideav_heif::Metadata::new(
+                Some(icc.clone()),
+                Some(exif_of(i as u8)),
+                Some(xmp_of(i as u8)),
+                None
+            ),
+            "frame {i} metadata"
+        );
+    }
+    // Framework: one still stream of three packets; the decoder puts
+    // each item's blobs on its frame, the stream carries the first's.
+    let mut demuxer = ctx
+        .containers
+        .open_demuxer("heif", Box::new(Cursor::new(bytes)), &ctx.codecs)
+        .unwrap();
+    let streams = demuxer.streams().to_vec();
+    assert_eq!(streams.len(), 1);
+    assert_eq!(
+        oxideav_heif::metadata_of_blobs(&[], streams[0].params.blobs()),
+        frames[0].image.metadata
+    );
+    let mut dec = ctx.codecs.first_decoder(&streams[0].params).unwrap();
+    let mut n = 0;
+    loop {
+        let pkt = match demuxer.next_packet() {
+            Ok(p) => p,
+            Err(Error::Eof) => break,
+            Err(e) => panic!("{e}"),
+        };
+        dec.send_packet(&pkt).unwrap();
+        while let Ok(Frame::Video(vf)) = dec.receive_frame() {
+            assert_eq!(
+                vf.blob(&BlobKind::EXIF).map(|b| b.data),
+                Some(exif_of(n as u8)),
+                "packet {n} exif"
+            );
+            assert_eq!(
+                vf.blob(&BlobKind::XMP).map(|b| b.data),
+                Some(xmp_of(n as u8)),
+                "packet {n} xmp"
+            );
+            n += 1;
+        }
+    }
+    assert_eq!(n, 3);
 }
