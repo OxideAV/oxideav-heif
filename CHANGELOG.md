@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.13](https://github.com/OxideAV/oxideav-heif/compare/v0.0.12...v0.0.13) - 2026-10-17
+
+### Other
+
+- tests/remux.rs gates on no refusals and a floor the vendored set clears (CI has the 57 vendored fixtures, not the docs corpus)
+- heif_writer fuzz target (corpus re-mux oracle + encoder-driven writer → reader round trip) and its two findings fixed — the padding and caller crops fold into one exact clap with companions carrying the orientation only (chain order enforced), and overlays compose layers of mixed chroma after their transforms instead of refusing a conformant file
+- writer interop measured — the conformance matrix builds every shape from its bytes and adds iden / depth / overlay / manual grid / collection rows; Apple ImageIO probed through ImageIO itself (irot / imir map onto the reported Exif orientation, applied before comparing); overlay fill-domain and ffmpeg iden / iovl findings in the README; writer_interop gains the iden, depth, overlay and collection gates
+- derived items from the high-level encoder — encode_overlay writes an iovl from an OverlaySpec (hidden layers with alpha, canvas fill, thumbnail of the composite), TransformCarrier::Identity puts the chain on an iden over the un-rotated picture, EncodeOptions::depth_map writes a depth auxiliary, the gain map follows the primary's irot / imir; framework irot / imir options
+- re-muxing without re-encoding — HeifWriter::import_item carries an item with its derivations, auxiliaries, thumbnails, metadata items and altr alternates byte for byte, from_files collects several files' primaries; the heif muxer merges a still stream's packets (a burst) into one collection with per-item Exif / XMP / ICC; tests/remux.rs re-muxes every corpus file to the same image
+- brands are claimed truthfully — the writer decides miaf and the Annex A profile brands (MiHB / MiHA / MiHE, MA1B / MA1A, MiAB with a new A.6.2 check) on a header-only probe of its own layout, the sequence writer on its assembled file; a file the checker rejects keeps the structural brands only
+
 ### Fixed
 
 - **Overlays over layers of mixed chroma sampling** (round 477, found by the `heif_writer` fuzz target): an odd-sized 4:2:0 input comes out of its own `clap` promoted to 4:4:4 (MIAF §7.3.6.7) while an even-sized one stays 4:2:0, and `compose::composite_overlay` refused the mix as "layouts differ" — a MIAF-conformant file this crate itself writes. The inputs must share a bit depth (§7.3.11.3); differing chroma samplings now compose in 4:4:4 like any other promotion trigger. Seed `fuzz/corpus/heif_writer/minimal.overlay-odd-and-even-420-layers`.
