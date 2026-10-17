@@ -45,7 +45,7 @@ enum Codec {
     /// AVC (`"h264"`): Annex B access units or length-prefixed samples
     /// with an `avcC` extradata (HEIF Annex E.3).
     Avc,
-    /// A `"heif"` still stream: one whole-file packet.
+    /// A `"heif"` / `"avif"` still stream: one whole-file packet.
     Still,
 }
 
@@ -79,10 +79,13 @@ impl HeifSequenceMuxer {
             "av1" => Codec::Av1,
             "h266" | "vvc" => Codec::Vvc,
             "h264" | "avc" => Codec::Avc,
-            crate::demux::CODEC_ID => Codec::Still,
+            // The `"heif"` and `"avif"` still encoders emit the same
+            // packet shape — one composed HEIF-family file per packet,
+            // already branded — written through unchanged.
+            crate::demux::CODEC_ID | crate::demux::CODEC_ID_AVIF => Codec::Still,
             other => {
                 return Err(HeifError::unsupported(format!(
-                    "heif muxer: codec '{other}' (heif still, h265 / av1 / h266 / h264 sequences supported)"
+                    "heif muxer: codec '{other}' (heif / avif still, h265 / av1 / h266 / h264 sequences supported)"
                 )))
             }
         };

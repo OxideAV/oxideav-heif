@@ -124,6 +124,64 @@ fn avif_codec_id_writes_av1_into_an_avif_branded_file() {
     }
 }
 
+/// The gateway's full write path: frame → `"avif"` encoder → `"heif"`
+/// muxer writes the encoder's packet through unchanged — an
+/// `avif`-branded file carrying `av01`; the `"heif"` encoder's goes
+/// through as a `heic` / `heix` file.
+#[test]
+fn still_muxer_passes_the_avif_and_heif_encoders_through() {
+    let ctx = context();
+    let src = picture(64, 48);
+    for (id, brands, item) in [
+        ("avif", &[b"avif"][..], b"av01"),
+        ("heif", &[b"heic", b"heix"][..], b"hvc1"),
+    ] {
+        let (vf, pf) = src.to_core().unwrap();
+        let mut params = CodecParameters::video(CodecId::new(id));
+        params.width = Some(src.width);
+        params.height = Some(src.height);
+        params.pixel_format = Some(pf);
+        let mut enc = ctx.codecs.first_encoder(&params).unwrap();
+        enc.send_frame(&Frame::Video(vf)).unwrap();
+        enc.flush().unwrap();
+        let pkt = enc.receive_packet().unwrap();
+        let stream = oxideav_core::StreamInfo {
+            index: 0,
+            time_base: oxideav_core::TimeBase::new(1, 1),
+            duration: Some(1),
+            start_time: Some(0),
+            params: enc.output_params().clone(),
+        };
+        let path = std::env::temp_dir().join(format!(
+            "oxideav-heif-gateway-{id}-{}.bin",
+            std::process::id()
+        ));
+        let sink: Box<dyn oxideav_core::WriteSeek> =
+            Box::new(std::fs::File::create(&path).unwrap());
+        let mut mx = ctx
+            .containers
+            .open_muxer("heif", sink, std::slice::from_ref(&stream))
+            .unwrap_or_else(|e| panic!("{id}: open_muxer: {e}"));
+        mx.write_header().unwrap();
+        mx.write_packet(&pkt.clone().with_stream_index(0))
+            .unwrap_or_else(|e| panic!("{id}: write_packet: {e}"));
+        mx.write_trailer().unwrap();
+        drop(mx);
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(bytes, pkt.data, "{id}: the muxer writes the packet through");
+        assert_eq!(&bytes[4..8], b"ftyp", "{id}");
+        assert!(
+            brands.iter().any(|b| &bytes[8..12] == *b),
+            "{id}: major brand {:?}",
+            std::str::from_utf8(&bytes[8..12])
+        );
+        assert!(has_fourcc(&bytes, item), "{id}: {item:?} item");
+        let got = oxideav_heif::decode(&bytes).unwrap().to_frame().unwrap();
+        assert!(psnr_y(&src, &got.tight()) > 30.0, "{id}");
+    }
+}
+
 /// The gateway's `quality` steers HEVC / VVC / AVC through
 /// `qp_of_quality` (lossless at 100), AV1 through its own scale: bytes
 /// shrink and PSNR falls from 100 to 90 to 50; without `quality` or
