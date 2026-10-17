@@ -41,13 +41,16 @@ use std::process::Command;
 
 use common::png::read_png;
 use common::pngw::write_png;
-use common::{have_binary, scratch_dir};
+use common::{apply_exif_orientation, have_binary, imageio_report, scratch_dir};
 use oxideav_heif::decode::{decode_primary, ItemDecoder};
-use oxideav_heif::encode::{encode_still, EncodeOptions, StillCodec};
+use oxideav_heif::encode::{
+    encode_overlay, encode_still, EncodeOptions, OverlayLayer, OverlaySpec, StillCodec,
+    TransformCarrier,
+};
 use oxideav_heif::image::{Chroma, HeifFrame, HeifPixelFormat};
 use oxideav_heif::props::{Clap, CropRect, Imir, Irot, Property};
 use oxideav_heif::rgb::to_rgb;
-use oxideav_heif::HeifFile;
+use oxideav_heif::{HeifFile, HeifWriter};
 
 // ───────────────────────── sources ─────────────────────────
 
@@ -974,6 +977,21 @@ fn render_delta(
     Some((max, sum / n.max(1) as f64, note))
 }
 
+/// Re-write `png` with the Exif `orientation` applied (what a viewer
+/// honouring ImageIO's orientation shows); returns the new path.
+fn orient_png(png: &Path, orientation: u8) -> PathBuf {
+    let bytes = std::fs::read(png).unwrap();
+    if bytes.len() < 26 || bytes[25] == 3 || bytes[24] < 8 {
+        return png.to_path_buf();
+    }
+    let p = read_png(&bytes);
+    let (w, h, samples) =
+        apply_exif_orientation(p.width, p.height, p.channels, &p.samples, orientation);
+    let out = png.with_extension(format!("o{orientation}.png"));
+    std::fs::write(&out, write_png(w, h, p.channels, p.bit_depth, &samples)).unwrap();
+    out
+}
+
 fn frame_from_source(w: u32, h: u32, channels: usize, depth: u8) -> HeifFrame {
     let s = source(w, h, channels, depth);
     let chroma = if channels <= 2 {
@@ -1023,7 +1041,134 @@ fn frame_from_source(w: u32, h: u32, channels: usize, depth: u8) -> HeifFrame {
 }
 
 /// Our writer's shapes: `(name, extension, frame, options)`.
-fn writer_shapes() -> Vec<(String, &'static str, HeifFrame, EncodeOptions)> {
+/// Every shape the writer produces, as the written bytes: `encode_still`
+/// over the listed options and frames, plus the derived-item paths
+/// (`encode_overlay`, the `iden` carrier, the depth auxiliary, a
+/// three-picture collection through `HeifWriter::from_files`).
+fn writer_shapes() -> Vec<(String, &'static str, Vec<u8>)> {
+    let mut out: Vec<(String, &'static str, Vec<u8>)> = Vec::new();
+    for (name, ext, frame, opts) in writer_still_shapes() {
+        let bytes = encode_still(&frame, &opts).expect(&name);
+        out.push((name, ext, bytes));
+    }
+    let pcm = || EncodeOptions::default().with_hevc_mode("pcm".into());
+    let chain = vec![Property::Irot(Irot::new(1)), Property::Imir(Imir::new(1))];
+    let pic = frame_from_source(96, 80, 3, 8);
+    out.push((
+        "hevc irot+imir".into(),
+        "heic",
+        encode_still(&pic, &pcm().with_transforms(chain.clone())).unwrap(),
+    ));
+    out.push((
+        "hevc iden (irot+imir on an iden)".into(),
+        "heic",
+        encode_still(
+            &pic,
+            &pcm()
+                .with_transforms(chain.clone())
+                .with_transform_carrier(TransformCarrier::Identity),
+        )
+        .unwrap(),
+    ));
+    out.push((
+        "av1 iden (irot+imir on an iden)".into(),
+        "avif",
+        encode_still(
+            &pic,
+            &EncodeOptions::default()
+                .with_codec(StillCodec::Av1)
+                .with_transforms(chain)
+                .with_transform_carrier(TransformCarrier::Identity),
+        )
+        .unwrap(),
+    ));
+    let mut depth = HeifFrame::zeroed(
+        48,
+        40,
+        HeifPixelFormat::new(Chroma::Mono, 8, false).unwrap(),
+    )
+    .unwrap();
+    for y in 0..40 {
+        for x in 0..48 {
+            depth.set_sample(0, x, y, ((x + y) * 2) as u16);
+        }
+    }
+    out.push((
+        "hevc depth auxiliary".into(),
+        "heic",
+        encode_still(&pic, &pcm().with_depth_map(Some(depth.clone()))).unwrap(),
+    ));
+    out.push((
+        "av1 depth auxiliary".into(),
+        "avif",
+        encode_still(
+            &pic,
+            &EncodeOptions::default()
+                .with_codec(StillCodec::Av1)
+                .with_depth_map(Some(depth)),
+        )
+        .unwrap(),
+    ));
+    let overlay = OverlaySpec::new(
+        96,
+        80,
+        [12000, 30000, 50000, 65535],
+        vec![
+            OverlayLayer::new(frame_from_source(64, 48, 3, 8), 4, 4),
+            OverlayLayer::new(frame_from_source(40, 40, 4, 8), 48, 32),
+        ],
+    );
+    out.push((
+        "hevc overlay (2 layers, alpha)".into(),
+        "heic",
+        encode_overlay(&overlay, &pcm().with_thumbnail_max_dim(Some(32))).unwrap(),
+    ));
+    out.push((
+        "av1 overlay (2 layers, alpha)".into(),
+        "avif",
+        encode_overlay(
+            &overlay,
+            &EncodeOptions::default().with_codec(StillCodec::Av1),
+        )
+        .unwrap(),
+    ));
+    out.push((
+        "hevc grid 64 + thumbnail".into(),
+        "heic",
+        encode_still(
+            &frame_from_source(200, 150, 3, 8),
+            &EncodeOptions::default()
+                .with_hevc_mode("intra".into())
+                .with_qp(22)
+                .with_grid_tile(Some(64))
+                .with_thumbnail_max_dim(Some(48)),
+        )
+        .unwrap(),
+    ));
+    let files: Vec<Vec<u8>> = (0..3u32)
+        .map(|i| {
+            let mut f = frame_from_source(96, 80, 3, 8);
+            for y in 0..80 {
+                for x in 0..96 {
+                    let v = f.sample(0, x, y) as u32;
+                    f.set_sample(0, x, y, (v + i * 40).min(255) as u16);
+                }
+            }
+            encode_still(&f, &pcm().with_exif(Some(b"II*\0\x08\0\0\0\0\0".to_vec()))).unwrap()
+        })
+        .collect();
+    out.push((
+        "hevc collection (3 pictures, per-item Exif)".into(),
+        "heic",
+        HeifWriter::from_files(&files)
+            .unwrap()
+            .write_to_vec()
+            .unwrap(),
+    ));
+    out
+}
+
+fn writer_still_shapes() -> Vec<(String, &'static str, HeifFrame, EncodeOptions)> {
     let pcm = || EncodeOptions::default().with_hevc_mode("pcm".into());
     let intra = |qp: u8| {
         EncodeOptions::default()
@@ -1357,17 +1502,18 @@ fn conformance_matrix_both_directions() {
     }
     // ── writer direction
     let mut writer_rows: Vec<(String, Vec<(Reader, RCell)>)> = Vec::new();
-    for (name, ext, frame, opts) in writer_shapes() {
-        if name.contains("12 MP") && !twelve_mp() {
-            continue;
-        }
-        let bytes = encode_still(&frame, &opts).expect(&name);
-        let tag = name.replace(['×', ' ', ':', '(', ')', '+'], "_");
+    for (name, ext, bytes) in writer_shapes() {
+        let tag = name.replace(['×', ' ', ':', '(', ')', '+', ','], "_");
         let path = dir.join(format!("w_{tag}.{ext}"));
         std::fs::write(&path, &bytes).unwrap();
         let hf = HeifFile::parse(&bytes).unwrap();
         let img = decode_primary(&hf, ItemDecoder::direct()).expect(&name);
         let want = to_rgb(&img.frame, Some(&img.nclx)).unwrap();
+        // Apple ImageIO maps `irot` / `imir` onto the Exif orientation
+        // it reports and hands out the un-rotated pixels (`sips` writes
+        // them as they are); the orientation it reports is applied to
+        // its render before the comparison, and noted.
+        let imageio = imageio_report(&path);
         let mut row = Vec::new();
         for r in readers {
             let bin = r.name();
@@ -1376,10 +1522,30 @@ fn conformance_matrix_both_directions() {
             } else {
                 match render(&dir, r, &path, &tag) {
                     Ok(None) => RCell::Opens,
-                    Ok(Some(png)) => match render_delta(&png, &want) {
-                        Some((max, mean, note)) => RCell::Render(max, mean, note),
-                        None => RCell::Opens,
-                    },
+                    Ok(Some(png)) => {
+                        let (png, oriented) = match (r, imageio) {
+                            (Reader::Sips, Some(rep)) if rep.orientation != 1 => {
+                                (orient_png(&png, rep.orientation), rep.orientation)
+                            }
+                            _ => (png, 1),
+                        };
+                        match render_delta(&png, &want) {
+                            Some((max, mean, note)) => {
+                                let note = if oriented != 1 {
+                                    let o = format!("ImageIO orientation {oriented} applied");
+                                    if note.is_empty() {
+                                        o
+                                    } else {
+                                        format!("{o}; {note}")
+                                    }
+                                } else {
+                                    note
+                                };
+                                RCell::Render(max, mean, note)
+                            }
+                            None => RCell::Opens,
+                        }
+                    }
                     Err(e) => RCell::Refused(e),
                 }
             };
@@ -1556,9 +1722,14 @@ fn conformance_matrix_both_directions() {
         // (With a single rendering reader present — macOS CI has only
         // `sips`, whose 4:2:0 HEVC pipeline differs by design — the
         // cell is reported, not judged.)
+        // An overlay's sRGB canvas fill is composed in the item's 8-bit
+        // YCbCr here and in RGB by the readers: the fill (and what is
+        // blended over it) differs by that colour's YCbCr quantisation,
+        // up to 3 codes; the layers match exactly.
+        let tol = if name.contains("overlay") { 3.0 } else { 2.0 };
         assert!(
-            renders.len() < 2 || renders.iter().any(|m| *m <= 2.0),
-            "{name}: no reader renders our decode within 2 codes: {renders:?}"
+            renders.len() < 2 || renders.iter().any(|m| *m <= tol),
+            "{name}: no reader renders our decode within {tol} codes: {renders:?}"
         );
     }
 }

@@ -356,6 +356,32 @@ fn cases() -> Vec<(&'static str, &'static str, EncodeOptions, bool, bool)> {
             false,
             true,
         ),
+        (
+            "hevc_iden_irot1_imir1",
+            "heic",
+            pcm()
+                .with_transforms(vec![
+                    Property::Irot(Irot::new(1)),
+                    Property::Imir(Imir::new(1)),
+                ])
+                .with_transform_carrier(oxideav_heif::encode::TransformCarrier::Identity),
+            false,
+            false,
+        ),
+        (
+            "hevc_depth",
+            "heic",
+            pcm().with_depth_map(Some(
+                HeifFrame::zeroed(
+                    48,
+                    40,
+                    HeifPixelFormat::new(Chroma::Mono, 8, false).unwrap(),
+                )
+                .unwrap(),
+            )),
+            false,
+            true,
+        ),
         ("hevc_alpha", "heic", pcm(), false, true),
         (
             "av1_alpha",
@@ -717,5 +743,111 @@ fn apple_imageio_renders_the_alpha_plane_exactly() {
             max == 0.0,
             "{name}: sips alpha differs from ours (max {max} mean {mean:.3})"
         );
+    }
+}
+
+/// The derived-item files — an `iovl` with hidden layers (one with
+/// alpha) and a thumbnail, and a three-picture collection — open in
+/// every third-party reader present and render the primary within the
+/// reader's rounding of our decode (ImageMagick's uncompressed render
+/// as the pixel oracle, as above).
+#[test]
+fn overlay_and_collection_files_open_in_third_party_readers() {
+    use oxideav_heif::decode::{decode_primary, ItemDecoder};
+    use oxideav_heif::encode::{encode_overlay, OverlayLayer, OverlaySpec};
+    let dir = scratch_dir("writer-interop-derived");
+    let overlay = OverlaySpec::new(
+        96,
+        80,
+        [12000, 30000, 50000, 65535],
+        vec![
+            OverlayLayer::new(picture(64, 48, false, false), 4, 4),
+            OverlayLayer::new(picture(40, 40, false, true), 48, 32),
+        ],
+    );
+    let files: Vec<(&str, &str, Vec<u8>)> = vec![
+        (
+            "overlay_hevc",
+            "heic",
+            encode_overlay(&overlay, &pcm().with_thumbnail_max_dim(Some(32))).unwrap(),
+        ),
+        (
+            "overlay_av1",
+            "avif",
+            encode_overlay(
+                &overlay,
+                &EncodeOptions::default().with_codec(StillCodec::Av1),
+            )
+            .unwrap(),
+        ),
+        (
+            "collection_hevc",
+            "heic",
+            HeifWriter::from_files(
+                &(0..3u32)
+                    .map(|i| encode_still(&picture(64 + 16 * i, 48, false, false), &pcm()).unwrap())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+            .write_to_vec()
+            .unwrap(),
+        ),
+    ];
+    let readers: &[(&str, Render)] = &[
+        ("sips", sips_png),
+        ("heif-convert", heif_convert_png),
+        ("magick", magick_png),
+        ("ffmpeg", ffmpeg_png),
+    ];
+    for (name, ext, bytes) in &files {
+        let heic = dir.join(format!("{name}.{ext}"));
+        std::fs::write(&heic, bytes).unwrap();
+        let f = HeifFile::parse(bytes).unwrap();
+        let rep = check(&f, MiafProfile::Miaf).unwrap();
+        assert!(rep.is_conformant(), "{name}: {:#?}", rep.violations);
+        if have_binary("heif-info") {
+            assert_eq!(heif_info_ok(&heic), Some(true), "{name}: heif-info refused");
+        }
+        let dec = decode_primary(&f, ItemDecoder::direct()).unwrap();
+        let want = to_rgb(&dec.frame, Some(&dec.nclx)).unwrap();
+        for (reader, render) in readers {
+            if !have_binary(reader) {
+                continue;
+            }
+            let out = dir.join(format!("{name}.{reader}.png"));
+            let _ = std::fs::remove_file(&out);
+            if render(&heic, &out).is_none() {
+                // heif-convert writes a collection's images as
+                // `<out>-1.png`, `<out>-2.png`, …: that is "opens".
+                let numbered = dir.join(format!("{name}.{reader}-1.png"));
+                assert!(
+                    name.starts_with("collection") && numbered.exists(),
+                    "{reader} refused our {name}"
+                );
+            }
+        }
+        if have_binary("magick") {
+            let ppm = dir.join(format!("{name}.ppm"));
+            let _ = std::fs::remove_file(&ppm);
+            if magick_ppm(&heic, &ppm).is_some() {
+                let (max, mean) = ppm_diff(&ppm, &want).unwrap();
+                // An overlay's canvas fill is an sRGB value: this crate
+                // composes in the item's 8-bit YCbCr (the fill converted
+                // through the output `colr`), the readers in RGB, so the
+                // fill and the pixels blended over it differ by the
+                // YCbCr quantisation of that colour (≤ 2–3 codes) — a
+                // domain difference, not a structural one; the layers
+                // themselves match exactly.
+                let (tol_max, tol_mean) = if name.starts_with("overlay") {
+                    (3.0, 0.6)
+                } else {
+                    (3.0, 0.3)
+                };
+                assert!(
+                    max <= tol_max && mean <= tol_mean,
+                    "magick rendered {name} at max {max:.1} mean {mean:.3} vs our decode (tol {tol_max}/{tol_mean})"
+                );
+            }
+        }
     }
 }

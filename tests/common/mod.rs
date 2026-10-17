@@ -208,3 +208,109 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
     }
     h
 }
+
+/// What Apple ImageIO reports for a file (`tests/common/imageio.swift`,
+/// compiled on demand with `swiftc` into the scratch directory): the
+/// image count, the first image's pixel size, its Exif-style
+/// orientation (1 = none; ImageIO maps `irot` / `imir` onto this and
+/// leaves the pixels un-rotated), and whether it decodes. `None` when
+/// the Swift toolchain or ImageIO is unavailable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageIoReport {
+    pub count: usize,
+    pub width: u32,
+    pub height: u32,
+    pub orientation: u8,
+    pub decodes: bool,
+}
+
+pub fn imageio_report(file: &Path) -> Option<ImageIoReport> {
+    use std::sync::OnceLock;
+    static PROBE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    let probe = PROBE.get_or_init(|| {
+        if !have_binary("swiftc") || !have_binary("sips") {
+            return None;
+        }
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/common/imageio.swift");
+        let out = scratch_dir("imageio-probe").join("imageio");
+        let ok = std::process::Command::new("swiftc")
+            .args(["-O", "-o"])
+            .arg(&out)
+            .arg(&src)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        ok.then_some(out)
+    });
+    let probe = probe.as_ref()?;
+    let out = std::process::Command::new(probe).arg(file).output().ok()?;
+    let line = String::from_utf8_lossy(&out.stdout);
+    let line = line.lines().next()?;
+    let field = |k: &str| -> Option<String> {
+        line.split_whitespace()
+            .find_map(|kv| kv.strip_prefix(k).and_then(|v| v.strip_prefix('=')))
+            .map(str::to_owned)
+    };
+    Some(ImageIoReport {
+        count: field("count")?.parse().ok()?,
+        width: field("width").and_then(|v| v.parse().ok()).unwrap_or(0),
+        height: field("height").and_then(|v| v.parse().ok()).unwrap_or(0),
+        orientation: field("orientation")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1),
+        decodes: field("image").map(|v| v != "none").unwrap_or(false),
+    })
+}
+
+/// The Exif orientation (1..=8) a `clap`-free `irot` / `imir` chain
+/// amounts to: the rotation first (`irot` angle × 90° anti-clockwise),
+/// then the mirror (`imir` axis 0 = top / bottom, 1 = left / right) —
+/// the §6.5.1 order the writer uses.
+pub fn exif_orientation_of(irot: u8, imir: Option<u8>) -> u8 {
+    // (rotation, mirror) → Exif: rotations alone are 1 / 8 / 3 / 6 for
+    // 0° / 90° CCW / 180° / 270° CCW; a vertical mirror (axis 0) after
+    // them gives 4 / 5 / 2 / 7, a horizontal one (axis 1) 2 / 7 / 4 / 5.
+    let r = irot & 3;
+    match imir {
+        None => [1, 8, 3, 6][r as usize],
+        Some(0) => [4, 5, 2, 7][r as usize],
+        Some(_) => [2, 7, 4, 5][r as usize],
+    }
+}
+
+/// Apply an Exif orientation to an 8/16-bit sample buffer (row-major,
+/// `channels` per pixel): the displayed picture. Returns the new size
+/// and samples.
+pub fn apply_exif_orientation(
+    width: u32,
+    height: u32,
+    channels: usize,
+    samples: &[u16],
+    orientation: u8,
+) -> (u32, u32, Vec<u16>) {
+    let (w, h) = (width as i64, height as i64);
+    let swaps = matches!(orientation, 5..=8);
+    let (ow, oh) = if swaps { (h, w) } else { (w, h) };
+    let mut out = vec![0u16; (ow * oh) as usize * channels];
+    for y in 0..oh {
+        for x in 0..ow {
+            // Source coordinates of displayed (x, y).
+            let (sx, sy) = match orientation {
+                2 => (w - 1 - x, y),
+                3 => (w - 1 - x, h - 1 - y),
+                4 => (x, h - 1 - y),
+                5 => (y, x),
+                6 => (y, h - 1 - x),
+                7 => (w - 1 - y, h - 1 - x),
+                8 => (w - 1 - y, x),
+                _ => (x, y),
+            };
+            let si = (sy * w + sx) as usize * channels;
+            let di = (y * ow + x) as usize * channels;
+            out[di..di + channels].copy_from_slice(&samples[si..si + channels]);
+        }
+    }
+    (ow as u32, oh as u32, out)
+}
