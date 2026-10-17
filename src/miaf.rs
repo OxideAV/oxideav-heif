@@ -29,7 +29,7 @@ pub enum MiafProfile {
     HevcAdvanced,
     /// `MiHE` — adds Main 4:4:4 (10) / Monochrome (10) (A.5).
     HevcExtended,
-    /// `MiAB` — AVC Basic (A.6); AVC items are not decodable here.
+    /// `MiAB` — AVC Basic (A.6): Progressive / Constrained High, level 5.2.
     AvcBasic,
     /// `MA1B` — AV1 Basic (AVIF §7.2).
     Av1Basic,
@@ -879,7 +879,50 @@ fn check_codec(
                 );
             }
         }
-        MiafProfile::Miaf | MiafProfile::AvcBasic => {}
+        MiafProfile::AvcBasic => {
+            if item_type != crate::meta::ITEM_TYPE_AVC1 {
+                return;
+            }
+            let Some(a) = props.avcc() else {
+                rep.push("HEIF E.2.3", Some(id), "avc1 item without avcC");
+                return;
+            };
+            // A.6.2: AVC Progressive High or Constrained High, Level 5.2
+            // or lower (the NOTE: 4:2:0, 8 bits). Both are the High
+            // profile (profile_idc 100) with constraint_set4_flag
+            // (frame_mbs_only); Constrained High adds constraint_set5
+            // (no B slices). `profile_compatibility` holds the
+            // constraint_set flags, bit 7 first.
+            let progressive = a.profile_compatibility & 0x08 != 0;
+            if a.profile_idc != 100 || !progressive {
+                rep.push(
+                    "A.6.2",
+                    Some(id),
+                    format!(
+                        "profile_idc {} with constraint flags {:#04x} is neither Progressive High nor Constrained High",
+                        a.profile_idc, a.profile_compatibility
+                    ),
+                );
+            }
+            if a.level_idc > 52 {
+                rep.push(
+                    "A.6.2",
+                    Some(id),
+                    format!("level_idc {} exceeds level 5.2", a.level_idc),
+                );
+            }
+            if a.chroma_format.is_some_and(|c| c != 1)
+                || a.bit_depth_luma_minus8.is_some_and(|d| d != 0)
+                || a.bit_depth_chroma_minus8.is_some_and(|d| d != 0)
+            {
+                rep.push(
+                    "A.6.2",
+                    Some(id),
+                    "the profile's pictures are 4:2:0 at 8 bits".to_string(),
+                );
+            }
+        }
+        MiafProfile::Miaf => {}
     }
 }
 

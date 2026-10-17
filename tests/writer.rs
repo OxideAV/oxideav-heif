@@ -626,3 +626,126 @@ fn region_groups_round_trip_and_are_checked() {
         .collect();
     assert_eq!(ids, vec![202]);
 }
+
+/// The brands claim only what the file satisfies: `miaf` when the §7 /
+/// §8 general requirements hold, the Annex A profile brands of the
+/// primary's coding family when their codec constraints hold (MIAF
+/// §7.3.2, A.3 – A.6, AVIF §7), and nothing of that on a file this
+/// crate's own checker rejects. Profile brands are cumulative (a MIAF
+/// HEVC Basic file is also an Advanced and an Extended one).
+#[test]
+fn brands_are_claimed_truthfully() {
+    use oxideav_heif::ftyp::{
+        BRAND_MA1A, BRAND_MA1B, BRAND_MIAB, BRAND_MIAF, BRAND_MIHA, BRAND_MIHB, BRAND_MIHE,
+    };
+    let brands = |bytes: &[u8]| -> Vec<String> {
+        HeifFile::parse(bytes)
+            .unwrap()
+            .file_type
+            .compatible_brands
+            .iter()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect()
+    };
+    let has = |bytes: &[u8], b: &[u8; 4]| HeifFile::parse(bytes).unwrap().file_type.has_brand(b);
+    let pic = picture(64, 48);
+    // HEVC 8-bit 4:2:0: every HEVC profile.
+    let hevc8 = encode_still(&pic, &EncodeOptions::default()).unwrap();
+    for b in [BRAND_MIAF, BRAND_MIHB, BRAND_MIHA, BRAND_MIHE] {
+        assert!(
+            has(&hevc8, &b),
+            "hevc 8-bit lacks {}",
+            String::from_utf8_lossy(&b)
+        );
+    }
+    assert!(!has(&hevc8, &BRAND_MA1B) && !has(&hevc8, &BRAND_MIAB));
+    // HEVC Main 10: Advanced + Extended, not Basic.
+    let hevc10 = encode_still(&pic, &EncodeOptions::default().with_hevc_depth(Some(10))).unwrap();
+    assert!(!has(&hevc10, &BRAND_MIHB));
+    assert!(has(&hevc10, &BRAND_MIHA) && has(&hevc10, &BRAND_MIHE) && has(&hevc10, &BRAND_MIAF));
+    // Lossless RGB rides an identity-matrix 4:4:4 item: Extended only.
+    let rgb_bytes: Vec<u8> = (0..16 * 16)
+        .flat_map(|i| [(i % 16 * 16) as u8, (i / 16 * 16) as u8, 200u8])
+        .collect();
+    let hevc444 = oxideav_heif::encode_rgb8(16, 16, &rgb_bytes, &lossless()).unwrap();
+    assert!(!has(&hevc444, &BRAND_MIHB) && !has(&hevc444, &BRAND_MIHA));
+    assert!(has(&hevc444, &BRAND_MIHE) && has(&hevc444, &BRAND_MIAF));
+    let mut rgb = HeifFrame::zeroed(
+        16,
+        16,
+        HeifPixelFormat::new(Chroma::Yuv444, 8, false).unwrap(),
+    )
+    .unwrap();
+    for y in 0..16 {
+        for x in 0..16 {
+            rgb.set_sample(0, x, y, (x * 16) as u16);
+            rgb.set_sample(1, x, y, (y * 16) as u16);
+            rgb.set_sample(2, x, y, 200);
+        }
+    }
+    // AV1 4:2:0 (seq_profile 0): Basic + Advanced; 4:4:4 (profile 1):
+    // Advanced only.
+    let av1 = encode_still(&pic, &EncodeOptions::default().with_codec(StillCodec::Av1)).unwrap();
+    assert!(has(&av1, &BRAND_MA1B) && has(&av1, &BRAND_MA1A) && has(&av1, &BRAND_MIAF));
+    let av1_444 =
+        encode_still(&rgb, &EncodeOptions::default().with_codec(StillCodec::Av1)).unwrap();
+    assert!(!has(&av1_444, &BRAND_MA1B) && has(&av1_444, &BRAND_MA1A));
+    // AVC: the profile brand only with a Progressive / Constrained High
+    // record (A.6.2); the record the registry encoder writes decides.
+    let avc = encode_still(&pic, &EncodeOptions::default().with_codec(StillCodec::Avc)).unwrap();
+    let f = HeifFile::parse(&avc).unwrap();
+    let rep = oxideav_heif::miaf::check(&f, oxideav_heif::miaf::MiafProfile::AvcBasic).unwrap();
+    assert_eq!(has(&avc, &BRAND_MIAB), rep.is_conformant());
+    assert!(has(&avc, &BRAND_MIAF));
+    // A hand-built file the checker rejects (the primary item is a
+    // thumbnail, §7.3.2 — the shape of conformance file C005) gets
+    // neither `miaf` nor a profile brand — but the caller's explicit
+    // brands are written as given.
+    let hvcc = HeifFile::parse(&hevc8)
+        .unwrap()
+        .meta()
+        .unwrap()
+        .properties_of(1)
+        .into_iter()
+        .map(|(_, raw, _)| Property::parse(raw).unwrap())
+        .find(|p| matches!(p, Property::HvcC(_)))
+        .unwrap();
+    let data = HeifFile::parse(&hevc8).unwrap().item_data_owned(1).unwrap();
+    let ispe = Property::Ispe(oxideav_heif::props::Ispe::new(64, 48));
+    let coded_props = vec![(hvcc.clone(), true), (ispe.clone(), false)];
+    let mut w = oxideav_heif::HeifWriter::new();
+    let master = w.add_coded_item(*b"hvc1", data.clone(), coded_props.clone());
+    let thumb = w.add_thumbnail(master, *b"hvc1", data.clone(), coded_props.clone());
+    w.set_primary(thumb);
+    let bad = w.write_to_vec().unwrap();
+    assert!(!has(&bad, &BRAND_MIAF) && !has(&bad, &BRAND_MIHB));
+    assert!(has(&bad, b"heic") && has(&bad, b"mif1"));
+    let forced = w
+        .clone()
+        .with_brands(*b"heic", vec![*b"mif1", *b"miaf", *b"MiHB"])
+        .write_to_vec()
+        .unwrap();
+    assert_eq!(brands(&forced), ["mif1", "miaf", "MiHB"]);
+    // The sequence writer: a conformant sequence keeps `miaf` and gains
+    // the cover's profile brands; one whose cover still fails the
+    // checks keeps the structural brands only.
+    let mut sw = oxideav_heif::writer::SequenceWriter::new(*b"hvc1", hvcc.clone(), 64, 48, 1000);
+    sw.push_sample(data.clone(), 100, true);
+    let mut cover = oxideav_heif::HeifWriter::new();
+    let cid = cover.add_coded_item(*b"hvc1", Vec::new(), coded_props.clone());
+    cover.set_primary(cid);
+    sw.still = Some(cover);
+    sw.cover_sample = Some(0);
+    let seq = sw.write_to_vec().unwrap();
+    assert!(has(&seq, &BRAND_MIAF) && has(&seq, b"msf1") && has(&seq, b"mif1"));
+    assert!(has(&seq, &BRAND_MIHB));
+    let mut bad_cover = oxideav_heif::HeifWriter::new();
+    let cid = bad_cover.add_coded_item(*b"hvc1", Vec::new(), coded_props.clone());
+    let thumb = bad_cover.add_thumbnail(cid, *b"hvc1", data.clone(), coded_props.clone());
+    bad_cover.set_primary(thumb);
+    sw.still = Some(bad_cover);
+    let seq_bad = sw.write_to_vec().unwrap();
+    assert!(!has(&seq_bad, &BRAND_MIAF) && !has(&seq_bad, &BRAND_MIHB));
+    assert!(has(&seq_bad, b"msf1") && has(&seq_bad, b"hevc"));
+    let _ = oxideav_heif::decode(&seq).unwrap();
+}

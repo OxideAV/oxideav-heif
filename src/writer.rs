@@ -45,6 +45,7 @@ use crate::meta::{
     reference, ITEM_TYPE_AV01, ITEM_TYPE_EXIF, ITEM_TYPE_GRID, ITEM_TYPE_HVC1, ITEM_TYPE_IDEN,
     ITEM_TYPE_IOVL, ITEM_TYPE_MIME, ITEM_TYPE_VVC1,
 };
+use crate::miaf::{check, MiafProfile};
 use crate::props::{write::property_box, AuxC, Property, AUX_URN_ALPHA, AUX_URN_DEPTH};
 
 #[doc(hidden)]
@@ -843,6 +844,119 @@ impl HeifWriter {
         (major, compat)
     }
 
+    /// The coding format every coded image the primary item's
+    /// derivation reaches is in (the primary itself when coded): the
+    /// family whose MIAF profile brands the file may claim (MIAF §7.3.2:
+    /// a listed profile needs a conforming image among the primary and
+    /// its alternates). `None` when the chain mixes codings, holds a
+    /// layered (`lhv1`) item (§8.3 single-layer) or reaches no coded
+    /// image.
+    fn primary_coding_family(&self) -> Option<FourCc> {
+        let primary = self.primary?;
+        // `dimg` closure of the primary (not the auxiliaries: an alpha
+        // plane is not the image the profile is about).
+        let mut chain = vec![primary];
+        let mut i = 0;
+        while i < chain.len() {
+            let cur = chain[i];
+            for (t, f, to) in &self.references {
+                if t == &reference::DIMG && *f == cur {
+                    for x in to {
+                        if !chain.contains(x) {
+                            chain.push(*x);
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        let mut family: Option<FourCc> = None;
+        for it in self.items.iter().filter(|i| chain.contains(&i.id)) {
+            if !matches!(it.body, ItemBody::Coded(_) | ItemBody::CodedExtents(_)) {
+                continue;
+            }
+            match family {
+                None => family = Some(it.item_type),
+                Some(f) if f == it.item_type => {}
+                Some(_) => return None,
+            }
+        }
+        family
+    }
+
+    /// The MIAF profiles (Annex A) a file whose primary coding family is
+    /// `family` could conform to, lowest first.
+    fn profile_candidates(family: FourCc) -> &'static [MiafProfile] {
+        match &family {
+            b"hvc1" | b"hev1" => &[
+                MiafProfile::HevcBasic,
+                MiafProfile::HevcAdvanced,
+                MiafProfile::HevcExtended,
+            ],
+            b"av01" => &[MiafProfile::Av1Basic, MiafProfile::Av1Advanced],
+            b"avc1" => &[MiafProfile::AvcBasic],
+            _ => &[],
+        }
+    }
+
+    /// The brands written: the caller's override as given (plus the
+    /// `tmap` rule), otherwise the auto-selected set with `miaf` kept
+    /// only when the file passes the §7 / §8 general requirements and
+    /// every Annex A profile brand (`MiHB` / `MiHA` / `MiHE`, `MA1B` /
+    /// `MA1A`, `MiAB`) the file satisfies for its primary's coding
+    /// family. `probe` builds a header-only file (ftyp + meta) for a
+    /// candidate `ftyp`; the MIAF checks never read coded data, so the
+    /// verdict on the probe is the verdict on the file.
+    fn final_brands(&self, probe: impl Fn(&[u8]) -> Vec<u8>) -> (FourCc, Vec<FourCc>) {
+        let (major, mut compat) = self.selected_brands();
+        if self.major_brand.is_some() && self.compatible_brands.is_some() {
+            return (major, compat);
+        }
+        let candidates = self
+            .primary_coding_family()
+            .map(Self::profile_candidates)
+            .unwrap_or(&[]);
+        let mut with_candidates = compat.clone();
+        with_candidates.extend(candidates.iter().map(|p| p.brand()));
+        let ftyp = crate::ftyp::FileType {
+            box_type: *b"ftyp",
+            major_brand: major,
+            minor_version: 0,
+            compatible_brands: with_candidates,
+        }
+        .to_box();
+        let bytes = probe(&ftyp);
+        let Ok(file) = crate::file::HeifFile::parse_borrowed(&bytes) else {
+            // A header this crate cannot re-read is not a MIAF file.
+            compat.retain(|b| b != &BRAND_MIAF);
+            return (major, compat);
+        };
+        let conforms = |p: MiafProfile| match check(&file, p) {
+            Ok(rep) => rep.is_conformant(),
+            Err(_) => false,
+        };
+        if !conforms(MiafProfile::Miaf) {
+            compat.retain(|b| b != &BRAND_MIAF);
+            return (major, compat);
+        }
+        // Keep `tmap` last, as the brand rule lists it.
+        let tmap = compat.iter().position(|b| b == &BRAND_TMAP);
+        let profiles: Vec<FourCc> = candidates
+            .iter()
+            .filter(|p| conforms(**p))
+            .map(|p| p.brand())
+            .collect();
+        match tmap {
+            Some(i) => {
+                let tail = compat.split_off(i);
+                compat.extend(profiles);
+                compat.extend(tail);
+            }
+            None => compat.extend(profiles),
+        }
+        (major, compat)
+    }
+
     /// Serialize the file.
     pub fn write_to_vec(&self) -> Result<Vec<u8>> {
         let mut out = Vec::with_capacity(self.payload_len() as usize + 4096);
@@ -1217,7 +1331,15 @@ impl HeifWriter {
             body.extend_from_slice(&idat_box);
             boxed(b"meta", &body)
         };
-        let (major, compat) = self.selected_brands();
+        // The brands are decided on a header-only probe of this very
+        // layout (the MIAF clauses read the `meta` tree and `idat`, never
+        // the coded bytes), so `miaf` and the profile brands are only
+        // claimed when the file satisfies them.
+        let (major, compat) = self.final_brands(|ftyp| {
+            let mut probe = ftyp.to_vec();
+            probe.extend_from_slice(&meta_with(&iloc_for(ftyp.len() as u64 + 8)));
+            probe
+        });
         let ftyp = crate::ftyp::FileType {
             box_type: *b"ftyp",
             major_brand: major,
@@ -1529,9 +1651,64 @@ impl SequenceWriter {
                 ));
             }
         }
-        let ts = self.timescale.max(1);
-        let total: u64 = self.samples.iter().map(|s| s.duration as u64).sum();
-        // ftyp
+        let (major, compat) = self.auto_brands();
+        if self.brands.is_some() {
+            return self.assemble(major, compat);
+        }
+        // Truthful `miaf`: the general requirements (§7 / §8) are checked
+        // on the assembled file; a file that fails them is written
+        // without the brand. The profile brands of the cover still's
+        // coding family (MIAF §7.3.2) follow the same rule.
+        let candidates: &[MiafProfile] = match &self.still {
+            Some(w) => w
+                .primary_coding_family()
+                .map(HeifWriter::profile_candidates)
+                .unwrap_or(&[]),
+            None => &[],
+        };
+        let mut with_candidates = compat.clone();
+        with_candidates.extend(candidates.iter().map(|p| p.brand()));
+        let bytes = self.assemble(major, with_candidates.clone())?;
+        let truthful = match crate::file::HeifFile::parse_borrowed(&bytes) {
+            Ok(file) => {
+                let conforms = |p: MiafProfile| match check(&file, p) {
+                    Ok(rep) => rep.is_conformant(),
+                    Err(_) => false,
+                };
+                if conforms(MiafProfile::Miaf) {
+                    let mut c = compat.clone();
+                    c.extend(
+                        candidates
+                            .iter()
+                            .filter(|p| conforms(**p))
+                            .map(|p| p.brand()),
+                    );
+                    c
+                } else {
+                    compat
+                        .iter()
+                        .filter(|b| *b != &BRAND_MIAF)
+                        .copied()
+                        .collect()
+                }
+            }
+            Err(_) => compat
+                .iter()
+                .filter(|b| *b != &BRAND_MIAF)
+                .copied()
+                .collect(),
+        };
+        if truthful == with_candidates {
+            return Ok(bytes);
+        }
+        self.assemble(major, truthful)
+    }
+
+    /// The brands before the truthfulness pass: the caller's override,
+    /// else `msf1` + the codec brand (`hevc` / `hevx` / `avis` / `vvis`
+    /// / `avcs`) + `iso8` + `miaf` (+ `mif1` with a cover still), the
+    /// codec brand major.
+    fn auto_brands(&self) -> (FourCc, Vec<FourCc>) {
         let codec_brand = match &self.entry_type {
             b"hvc1" | b"hev1" => match &self.config {
                 Property::HvcC(h) if h.bit_depth_luma() > 8 || h.chroma_format_idc != 1 => {
@@ -1546,7 +1723,7 @@ impl SequenceWriter {
             b"avc1" | b"avc3" => crate::ftyp::BRAND_AVCS,
             _ => BRAND_MSF1,
         };
-        let (major, compat) = match &self.brands {
+        match &self.brands {
             Some((m, c)) => (*m, c.clone()),
             None => {
                 let mut compat = vec![BRAND_MSF1, codec_brand, BRAND_ISO8, BRAND_MIAF];
@@ -1555,7 +1732,13 @@ impl SequenceWriter {
                 }
                 (codec_brand, compat)
             }
-        };
+        }
+    }
+
+    /// Serialize the file under the given brands.
+    fn assemble(&self, major: FourCc, compat: Vec<FourCc>) -> Result<Vec<u8>> {
+        let ts = self.timescale.max(1);
+        let total: u64 = self.samples.iter().map(|s| s.duration as u64).sum();
         let ftyp = crate::ftyp::FileType {
             box_type: *b"ftyp",
             major_brand: major,

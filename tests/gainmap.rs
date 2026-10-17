@@ -334,6 +334,19 @@ fn writer_authors_a_tmap_the_black_box_tool_tone_maps_identically() {
         let bytes = encode_still(&base.frame, &opts).unwrap();
         let f = HeifFile::parse(&bytes).unwrap();
         assert!(f.file_type.has_brand(b"tmap"));
+        // The brand rule lists `tmap` last; the profile brands of the
+        // base's codec precede it (the file passes their checks).
+        assert_eq!(f.file_type.compatible_brands.last(), Some(b"tmap"), "{ext}");
+        let profile = if codec == StillCodec::Av1 {
+            b"MA1A"
+        } else {
+            b"MiHE"
+        };
+        assert!(
+            f.file_type.has_brand(profile),
+            "{ext}: {:?}",
+            f.file_type.compatible_brands
+        );
         let rep = check(&f, MiafProfile::Miaf).unwrap();
         assert!(rep.is_conformant(), "{ext}: {:#?}", rep.violations);
         let back = decode_primary(&f, ItemDecoder::direct()).unwrap();

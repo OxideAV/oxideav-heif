@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Brands are claimed truthfully** (round 477, the writer to production): `HeifWriter` decides its auto-selected brands on a header-only probe of the very layout it is about to write (the MIAF clauses read the `meta` tree and `idat`, never the coded bytes) — `miaf` stays only when the file passes the §7 / §8 general requirements, and the Annex A profile brands of the primary item's coding family (MIAF §7.3.2: a listed profile needs a conforming image among the primary and its alternates) join when their codec constraints hold: `MiHB` / `MiHA` / `MiHE` (cumulative — an 8-bit 4:2:0 HEVC file claims all three, Main 10 the last two, a 4:4:4 / monochrome item `MiHE` alone), `MA1B` / `MA1A` (AV1 `seq_profile` 0 both, 1 the latter), `MiAB` (new A.6.2 check: Progressive / Constrained High at level ≤ 5.2, 4:2:0 8-bit — the registry AVC encoder's record signals neither constraint flag, so `avci` files carry `miaf` without `MiAB` today); `tmap` stays last. A file the checker rejects (a thumbnail as primary, C005's shape) carries the structural brands only; a caller's `with_brands` override is written as given. `SequenceWriter` runs the same pass on its assembled file (the cover still's profile brands, `miaf` dropped when the §7 / §8 checks fail). `tests/writer.rs::brands_are_claimed_truthfully`; every black-box reader opens the files with the profile brands (`tests/writer_interop.rs`).
+
 ## [0.0.12](https://github.com/OxideAV/oxideav-heif/compare/v0.0.11...v0.0.12) - 2026-10-17
 
 ### Other
