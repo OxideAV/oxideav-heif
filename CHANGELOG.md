@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.12](https://github.com/OxideAV/oxideav-heif/compare/v0.0.11...v0.0.12) - 2026-10-17
+
+### Other
+
+- withdraw the "avif" codec-id registration — one codec id has one owner (oxideav-avif's still encoder); the heif muxer keeps taking its avif still stream, the quality → qp mapping and the AV1 quality rule stay
+- the heif / avif codec capabilities flag lossy + lossless; a registry-only gate pins the avif id's capabilities (the heif id's 26 accepted layouts, options schema) and the quality bytes of both ids on 16x16 Yuv420P / Yuv444P / Rgb24 frames
+- the AV1 rule of the gateway `quality` pinned — an explicit quality < 100 without a mode codes mode=intra at that quality, 100 the lossless coding, absent today's 60; the 16x16 RGB gate through the avif and heif (codec=av1) encoders
+- the "heif" muxer accepts an "avif" still stream exactly like a "heif" one — the gateway's frame → avif encoder → heif muxer path writes the avif-branded packet through unchanged
+- gateway contract — an "avif" codec id (encoder default AV1, avif / avis brands; decoder accepts every HEIF-family file) next to "heif" (HEVC, heic); the framework `quality` governs HEVC / VVC / AVC through a documented qp mapping
+- CHANGELOG — the round's fuzz record (every target >= 10 min on its corpus, no finding; the daily Fuzz workflow green on the released producers)
+- HEIF metadata rides the framework path as core 0.1.40 blobs — ICC / Exif / XMP on the demuxer's stream parameters and on every decoded frame, embedded back by the encoder and the sequence muxer; both matrices gain a metadata dimension
+- AV1 items decode under the thread budget (av1 0.1.21's ExecutionContext) — 12 MP single-item AVIF 0.456 s → 0.102 s on 8 workers, byte-identical; the decode matrix runs its framework side under an 8-worker context
+- AVC and VVC items take every layout their encoders code — AVC 4:2:0 / 4:2:2 / 4:4:4 at 8 / 10 / 12 bits + lossless over h264 0.1.9's avcc surface, VVC any size / 4:0:0–4:4:4 / 10-bit / lossless over h266 0.0.10; matrix 553 → 724 cells with a black-box AVC leg
+- adopt h264 0.1.9 / h265 0.0.15 / h266 0.0.10 / av1 0.1.21 / core 0.1.40 — the idr_pic_id rotation workaround is gone (the registry encoder rotates per session), all-IDR avcs sequences proved in both decoders, the two daily-fuzz crash inputs seeded
+
 ### Added
 
 - **AVC items and sequences take every High-family layout** (round 476, oxideav-h264 0.1.9): `StillCodec::Avc` / the framework `codec=avc` code 4:2:0 / 4:2:2 / 4:4:4 sources at 8 / 10 / 12 bits as they are (the §A.2 minimum High-family profile; Baseline / Main CAVLC / CABAC on 8-bit 4:2:0 as before, byte-identical), `mode=pcm` is lossless (High 4:4:4 Predictive transform bypass; lossless RGB as an identity-matrix 4:4:4 item, like HEVC), packed RGB(A) converts at `chroma`, planar RGB under a lossy mode through the matrix, 16-bit sources to 10 (`depth=12` for 12). A 4:0:0 source (planar grey, packed grey + alpha) is coded 4:2:0 with neutral chroma — the registry encoder's grey line — so grey AVC items come back 4:2:0-labelled. The encoder runs `format=avcc`: its `AVCDecoderConfigurationRecord` (ISO/IEC 14496-15 §5.3.2.1, with the chroma-format / bit-depth trailer for the High-family profiles) is the item's `avcC` and its length-prefixed sample the `AVCItemData`; `avc_item_from_annex_b` / `avc_sample_from_annex_b` (the muxer's Annex B input) build the record with the codec crate's `avcc` module. `EncodeOptions::avc_coded_format`; declared framework option `cabac` (`HeifEncoderOptions::cabac` / `with_cabac`).
