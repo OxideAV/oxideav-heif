@@ -470,3 +470,78 @@ fn files_without_a_gain_map_carry_none() {
     assert!(img.gain_map.is_none());
     assert!(img.apply_gain_map(1.0).is_err());
 }
+
+/// A gain map under a transform chain: the map item carries the
+/// primary's `irot` / `imir` too (it is resampled onto the *oriented*
+/// base, ISO 21496-1 §6.2.2), so the tone-mapped reconstruction of the
+/// rotated file is the rotation of the un-rotated file's — under both
+/// transform carriers.
+#[test]
+fn gain_map_follows_the_primary_transforms() {
+    use oxideav_heif::compose::apply_irot;
+    use oxideav_heif::encode::{
+        encode_still, EncodeOptions, GainMapSpec, StillCodec, TransformCarrier,
+    };
+    use oxideav_heif::miaf::{check, MiafProfile};
+    use oxideav_heif::props::{Colr, Irot, Property};
+    let src = load("gm_rgb.avif");
+    let base = decode_primary(&src, ItemDecoder::direct()).unwrap();
+    let gm = base.gain_map.as_ref().unwrap();
+    let Some(Colr::Nclx {
+        matrix, full_range, ..
+    }) = gm.colr.clone()
+    else {
+        panic!("gain map colr");
+    };
+    let spec = GainMapSpec::new(
+        gm.frame.clone(),
+        gm.metadata.clone(),
+        gm.alternate_colr.clone().unwrap(),
+        matrix,
+        full_range,
+        None,
+        12,
+    );
+    let plain = EncodeOptions::default()
+        .with_codec(StillCodec::Av1)
+        .with_colr(base.nclx.clone())
+        .with_gain_map(Some(spec.clone()));
+    let flat = HeifFile::from_vec(encode_still(&base.frame, &plain).unwrap()).unwrap();
+    let flat_tmap = decode_primary(&flat, ItemDecoder::direct())
+        .unwrap()
+        .gain_map
+        .unwrap()
+        .tmap_item_id;
+    let flat_hdr = decode_item(&flat, flat_tmap, ItemDecoder::direct().tone_mapped()).unwrap();
+    let want = apply_irot(&flat_hdr.frame, &Irot::new(1)).unwrap();
+    for carrier in [TransformCarrier::CodedItem, TransformCarrier::Identity] {
+        let opts = plain
+            .clone()
+            .with_transforms(vec![Property::Irot(Irot::new(1))])
+            .with_transform_carrier(carrier);
+        let f = HeifFile::from_vec(encode_still(&base.frame, &opts).unwrap()).unwrap();
+        let rep = check(&f, MiafProfile::Miaf).unwrap();
+        assert!(rep.is_conformant(), "{carrier:?}: {:#?}", rep.violations);
+        let primary = decode_primary(&f, ItemDecoder::direct()).unwrap();
+        assert_eq!(
+            (primary.frame.width, primary.frame.height),
+            (base.frame.height, base.frame.width),
+            "{carrier:?}: rotated base"
+        );
+        let tmap = primary.gain_map.as_ref().unwrap().tmap_item_id;
+        let hdr = decode_item(&f, tmap, ItemDecoder::direct().tone_mapped()).unwrap();
+        assert_eq!(
+            hdr.frame, want,
+            "{carrier:?}: tone-mapped reconstruction rotated with the base"
+        );
+        // The map item carries the chain itself (the base's orientation).
+        let meta = f.meta().unwrap();
+        let map_id = primary.gain_map.as_ref().unwrap().gain_map_item_id;
+        assert!(
+            meta.properties_of(map_id)
+                .iter()
+                .any(|(_, raw, e)| raw.box_type == *b"irot" && *e),
+            "{carrier:?}: irot on the gain map item"
+        );
+    }
+}

@@ -127,6 +127,8 @@ mod tests {
                 "qp",
                 "grid",
                 "thumbnail",
+                "irot",
+                "imir",
                 "range",
                 "quality",
                 "speed",

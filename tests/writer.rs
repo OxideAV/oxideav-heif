@@ -749,3 +749,315 @@ fn brands_are_claimed_truthfully() {
     assert!(has(&seq_bad, b"msf1") && has(&seq_bad, b"hevc"));
     let _ = oxideav_heif::decode(&seq).unwrap();
 }
+
+/// Apply a transformative chain given as plain properties.
+fn transformed(f: &HeifFrame, chain: &[Property]) -> HeifFrame {
+    let entries: Vec<oxideav_heif::props::PropertyEntry> = chain
+        .iter()
+        .enumerate()
+        .map(|(i, p)| oxideav_heif::props::PropertyEntry::new(i as u16 + 1, true, p.clone()))
+        .collect();
+    oxideav_heif::compose::apply_transforms(f, entries.iter(), false).unwrap()
+}
+
+/// A picture with an alpha plane (4:2:0, 8-bit).
+fn picture_with_alpha(w: u32, h: u32) -> HeifFrame {
+    let base = picture(w, h);
+    let mut a =
+        HeifFrame::zeroed(w, h, HeifPixelFormat::new(Chroma::Mono, 8, false).unwrap()).unwrap();
+    for y in 0..h {
+        for x in 0..w {
+            a.set_sample(0, x, y, ((x * 255) / w.max(1)) as u16);
+        }
+    }
+    base.with_alpha_plane(&a).unwrap()
+}
+
+/// `TransformCarrier::Identity` writes the chain on an `iden` over the
+/// un-rotated coded picture (alpha on the input without transforms, the
+/// thumbnail with them): the file is MIAF-conformant, the `iden` is the
+/// primary, and it decodes — pixels and alpha — exactly like the
+/// default carrier's file, which decodes exactly like the transformed
+/// source.
+#[test]
+fn identity_carrier_round_trips_like_the_coded_carrier() {
+    use oxideav_heif::encode::TransformCarrier;
+    let src = picture_with_alpha(48, 32);
+    let chain = vec![Property::Irot(Irot::new(1)), Property::Imir(Imir::new(1))];
+    let base = lossless()
+        .with_transforms(chain.clone())
+        .with_thumbnail_max_dim(Some(16));
+    let coded = encode_still(&src, &base).unwrap();
+    let iden = encode_still(
+        &src,
+        &base
+            .clone()
+            .with_transform_carrier(TransformCarrier::Identity),
+    )
+    .unwrap();
+    let want = transformed(&src, &chain);
+    for (name, bytes) in [("coded", &coded), ("iden", &iden)] {
+        let f = HeifFile::parse(bytes).unwrap();
+        let rep = check(&f, MiafProfile::Miaf).unwrap();
+        assert!(rep.is_conformant(), "{name}: {:#?}", rep.violations);
+        let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+        assert_eq!(img.frame, want, "{name}: pixels + alpha after the chain");
+        let meta = f.meta().unwrap();
+        let primary = meta.primary_item().unwrap();
+        let primary_type = if name == "iden" { *b"iden" } else { *b"hvc1" };
+        assert_eq!(primary.item_type, primary_type);
+        // The thumbnail hangs off the primary and carries the chain.
+        let thumbs = meta.thumbnails_of(primary.id);
+        assert_eq!(thumbs.len(), 1, "{name}");
+        let tprops: Vec<oxideav_heif::boxes::FourCc> = meta
+            .properties_of(thumbs[0])
+            .iter()
+            .map(|(_, raw, _)| raw.box_type)
+            .collect();
+        assert!(
+            tprops.contains(b"irot") && tprops.contains(b"imir"),
+            "{name}: {tprops:?}"
+        );
+        if name == "iden" {
+            // The coded input and its alpha carry no transforms; the
+            // `iden` carries both, essential.
+            let input = meta.derivation_inputs(primary.id)[0];
+            for id in [input, meta.auxiliaries_of(input)[0]] {
+                let types: Vec<_> = meta
+                    .properties_of(id)
+                    .iter()
+                    .map(|(_, raw, _)| raw.box_type)
+                    .collect();
+                assert!(
+                    !types.contains(b"irot") && !types.contains(b"imir"),
+                    "{types:?}"
+                );
+            }
+            let on_iden: Vec<(oxideav_heif::boxes::FourCc, bool)> = meta
+                .properties_of(primary.id)
+                .iter()
+                .map(|(_, raw, e)| (raw.box_type, *e))
+                .collect();
+            assert!(on_iden.contains(&(*b"irot", true)) && on_iden.contains(&(*b"imir", true)));
+            assert!(on_iden.contains(&(*b"ispe", false)));
+        }
+        // Framework path: same pixels.
+        let frames = oxideav_heif::decode_all(bytes).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].image.to_frame().unwrap(),
+            want,
+            "{name}: contract decode"
+        );
+    }
+}
+
+/// `EncodeOptions::depth_map` writes a depth auxiliary (HEIF §7.5.3) the
+/// reader surfaces as `DecodedImage::depth`, exact under the lossless
+/// mode on HEVC and AV1, at its own size; the alpha auxiliary stays
+/// next to it.
+#[test]
+fn depth_map_round_trips_as_an_auxiliary() {
+    let src = picture_with_alpha(32, 32);
+    let mut depth = HeifFrame::zeroed(
+        16,
+        16,
+        HeifPixelFormat::new(Chroma::Mono, 8, false).unwrap(),
+    )
+    .unwrap();
+    for y in 0..16 {
+        for x in 0..16 {
+            depth.set_sample(0, x, y, ((x + y) * 8) as u16);
+        }
+    }
+    for codec in [StillCodec::Hevc, StillCodec::Av1] {
+        let opts = lossless()
+            .with_codec(codec)
+            .with_depth_map(Some(depth.clone()));
+        let bytes = encode_still(&src, &opts).unwrap();
+        let f = HeifFile::parse(&bytes).unwrap();
+        let rep = check(&f, MiafProfile::Miaf).unwrap();
+        assert!(rep.is_conformant(), "{codec:?}: {:#?}", rep.violations);
+        let meta = f.meta().unwrap();
+        let primary = meta.primary_item().unwrap().id;
+        let auxes = meta.auxiliaries_of(primary);
+        assert_eq!(auxes.len(), 2, "{codec:?}: alpha + depth");
+        let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+        assert_eq!(img.frame, src, "{codec:?}: picture + alpha");
+        let got = img
+            .depth
+            .as_ref()
+            .unwrap_or_else(|| panic!("{codec:?}: no depth"));
+        assert_eq!(
+            (got.width, got.height),
+            (16, 16),
+            "{codec:?}: depth geometry"
+        );
+        for y in 0..16 {
+            for x in 0..16 {
+                assert_eq!(
+                    got.sample(0, x, y),
+                    depth.sample(0, x, y),
+                    "{codec:?} ({x},{y})"
+                );
+            }
+        }
+        // The depth item: hidden, one channel, the codec's depth URN,
+        // its own parameter sets on HEVC (ImageIO refuses shared ones).
+        let depth_id = auxes
+            .iter()
+            .copied()
+            .find(|id| {
+                meta.properties_of(*id).iter().any(|(_, raw, _)| {
+                    raw.box_type == *b"auxC" && String::from_utf8_lossy(&raw.body).contains("depth")
+                        || raw.box_type == *b"auxC"
+                            && String::from_utf8_lossy(&raw.body).contains("auxid:2")
+                })
+            })
+            .expect("a depth auxC");
+        assert!(meta.item(depth_id).unwrap().is_hidden());
+        if codec == StillCodec::Hevc {
+            let mut configs: Vec<Vec<u8>> = Vec::new();
+            for id in [primary, auxes[0], auxes[1]] {
+                let c = meta
+                    .properties_of(id)
+                    .into_iter()
+                    .find(|(_, raw, _)| raw.box_type == *b"hvcC")
+                    .map(|(_, raw, _)| raw.body.clone())
+                    .unwrap();
+                assert!(!configs.contains(&c), "parameter sets shared between items");
+                configs.push(c);
+            }
+        }
+    }
+}
+
+/// `encode_overlay` writes an `iovl` over per-layer coded items (alpha
+/// auxiliaries where the layers have alpha), the canvas fill and the
+/// offsets; lossless, the primary decodes to exactly what the
+/// compositor produces from the source layers, is MIAF-conformant,
+/// carries the transforms on the `iovl` (or on an `iden` over it) and a
+/// thumbnail of the composed canvas when asked.
+#[test]
+fn overlay_round_trips_against_the_compositor() {
+    use oxideav_heif::compose::{composite_overlay, OverlayInput};
+    use oxideav_heif::derived::OverlayDescriptor;
+    use oxideav_heif::encode::{encode_overlay, OverlayLayer, OverlaySpec, TransformCarrier};
+    let a = picture(32, 24);
+    let b = picture_with_alpha(16, 16);
+    let spec = OverlaySpec::new(
+        48,
+        40,
+        [20000, 40000, 60000, 65535],
+        vec![
+            OverlayLayer::new(a.clone(), 4, 2),
+            OverlayLayer::new(b.clone(), 24, 20),
+        ],
+    );
+    let desc = OverlayDescriptor::new(spec.fill, 48, 40, vec![(4, 2), (24, 20)]);
+    let colr = EncodeOptions::default().colr;
+    let want = composite_overlay(
+        &desc,
+        &[OverlayInput::new(&a, false), OverlayInput::new(&b, false)],
+        Some(&colr),
+    )
+    .unwrap();
+    for (codec, carrier) in [
+        (StillCodec::Hevc, TransformCarrier::CodedItem),
+        (StillCodec::Av1, TransformCarrier::CodedItem),
+        (StillCodec::Hevc, TransformCarrier::Identity),
+    ] {
+        let chain = vec![Property::Irot(Irot::new(3))];
+        let opts = lossless()
+            .with_codec(codec)
+            .with_transforms(chain.clone())
+            .with_thumbnail_max_dim(Some(24))
+            .with_transform_carrier(carrier);
+        let bytes = encode_overlay(&spec, &opts).unwrap();
+        let f = HeifFile::parse(&bytes).unwrap();
+        let rep = check(&f, MiafProfile::Miaf).unwrap();
+        assert!(
+            rep.is_conformant(),
+            "{codec:?} {carrier:?}: {:#?}",
+            rep.violations
+        );
+        let meta = f.meta().unwrap();
+        let primary = meta.primary_item().unwrap();
+        let expect_type = if carrier == TransformCarrier::Identity {
+            *b"iden"
+        } else {
+            *b"iovl"
+        };
+        assert_eq!(primary.item_type, expect_type, "{codec:?} {carrier:?}");
+        let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+        let rotated = transformed(&want, &chain);
+        assert_eq!(
+            (img.frame.width, img.frame.height),
+            (40, 48),
+            "{codec:?} {carrier:?}"
+        );
+        assert_eq!(img.frame, rotated, "{codec:?} {carrier:?}: composite");
+        assert_eq!(
+            meta.thumbnails_of(primary.id).len(),
+            1,
+            "{codec:?} {carrier:?}: thumbnail"
+        );
+        // The layers: two coded items, the second with an alpha auxiliary.
+        let iovl = if carrier == TransformCarrier::Identity {
+            meta.derivation_inputs(primary.id)[0]
+        } else {
+            primary.id
+        };
+        let inputs = meta.derivation_inputs(iovl);
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(meta.auxiliaries_of(inputs[0]).len(), 0);
+        assert_eq!(meta.auxiliaries_of(inputs[1]).len(), 1);
+        // Contract path sees the same composite.
+        let frames = oxideav_heif::decode_all(&bytes).unwrap();
+        assert_eq!(
+            frames[0].image.to_frame().unwrap(),
+            rotated,
+            "{codec:?} {carrier:?}"
+        );
+    }
+    // Refusals: no layers; a gain map on the overlay path.
+    assert!(encode_overlay(&OverlaySpec::new(8, 8, [0; 4], vec![]), &lossless()).is_err());
+}
+
+/// The framework `irot` / `imir` options write the chain on the primary
+/// (essential), the decoded picture is the transformed source, and the
+/// bytes equal the contract encode with the same `transforms`.
+#[test]
+fn framework_irot_imir_options_write_the_chain() {
+    let mut ctx = RuntimeContext::new();
+    oxideav_h265::register(&mut ctx);
+    oxideav_heif::register(&mut ctx);
+    let src = picture(48, 32);
+    let (vf, _) = src.to_core().unwrap();
+    let mut params = CodecParameters::video(CodecId::new("heif"));
+    params.width = Some(48);
+    params.height = Some(32);
+    params.pixel_format = Some(PixelFormat::Yuv420P);
+    params.options = oxideav_core::CodecOptions::new()
+        .set("mode", "pcm")
+        .set("irot", "1")
+        .set("imir", "horizontal");
+    let mut enc = ctx.codecs.first_encoder(&params).unwrap();
+    enc.send_frame(&Frame::Video(vf)).unwrap();
+    enc.flush().unwrap();
+    let pkt = enc.receive_packet().unwrap();
+    let chain = vec![Property::Irot(Irot::new(1)), Property::Imir(Imir::new(1))];
+    let contract = encode_still(&src, &lossless().with_transforms(chain.clone())).unwrap();
+    assert_eq!(pkt.data, contract, "framework bytes = contract bytes");
+    let f = HeifFile::parse(&pkt.data).unwrap();
+    let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+    assert_eq!(img.frame, transformed(&src, &chain));
+    // Refusals: irot out of range, an unknown imir.
+    let bad = |k: &str, v: &str| {
+        let mut p = params.clone();
+        p.options = oxideav_core::CodecOptions::new().set(k, v);
+        ctx.codecs.first_encoder(&p).is_err()
+    };
+    assert!(bad("irot", "4"));
+    assert!(bad("imir", "diagonal"));
+}

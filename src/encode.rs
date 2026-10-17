@@ -56,6 +56,74 @@ pub enum StillCodec {
     Avc,
 }
 
+/// Where [`EncodeOptions::transforms`] are written.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TransformCarrier {
+    /// On the displayed items themselves (the coded primary or the
+    /// `grid` / `iovl`, its alpha and depth auxiliaries, the
+    /// thumbnails and the gain map), as essential properties — the
+    /// shape every third-party producer writes and every reader
+    /// honours.
+    #[default]
+    CodedItem,
+    /// On an `iden` derived item (HEIF §6.6.2.3) over the un-rotated
+    /// coded primary (or `grid` / `iovl`), which becomes the primary
+    /// item; the auxiliaries stay on the input without transforms (the
+    /// derivation displays its input with them and then transforms the
+    /// composite), the thumbnails and the gain map carry the transforms
+    /// themselves. The written `iden` round-trips through this crate
+    /// and the MIAF checks; see the README's interop table for the
+    /// third-party readers.
+    Identity,
+}
+
+/// One input picture of an [`OverlaySpec`].
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct OverlayLayer {
+    /// The picture (its alpha plane, when present, becomes the layer's
+    /// alpha auxiliary — §6.6.2.2.1 straight alpha).
+    pub frame: HeifFrame,
+    /// `horizontal_offset`: the layer's left edge on the canvas.
+    pub x: i32,
+    /// `vertical_offset`: the layer's top edge on the canvas.
+    pub y: i32,
+}
+impl OverlayLayer {
+    /// Every field as a positional argument, in declaration order.
+    pub fn new(frame: HeifFrame, x: i32, y: i32) -> Self {
+        Self { frame, x, y }
+    }
+}
+
+/// An `iovl` overlay (HEIF §6.6.2.2) to write: a canvas filled with
+/// `fill`, the `layers` composited bottom-most first at their offsets.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct OverlaySpec {
+    /// `output_width`.
+    pub width: u32,
+    /// `output_height`.
+    pub height: u32,
+    /// `canvas_fill_value`: R, G, B (sRGB, 16-bit) and A (0..=65535
+    /// opacity; a translucent fill yields an output alpha plane).
+    pub fill: [u16; 4],
+    /// The inputs, bottom-most first.
+    pub layers: Vec<OverlayLayer>,
+}
+impl OverlaySpec {
+    /// Every field as a positional argument, in declaration order.
+    pub fn new(width: u32, height: u32, fill: [u16; 4], layers: Vec<OverlayLayer>) -> Self {
+        Self {
+            width,
+            height,
+            fill,
+            layers,
+        }
+    }
+}
+
 /// Encoding options.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -86,8 +154,11 @@ pub struct EncodeOptions {
     pub exif: Option<Vec<u8>>,
     /// XMP packet to attach.
     pub xmp: Option<String>,
-    /// Transformative properties applied to the primary (in order),
-    /// written as an `iden` item over the coded image.
+    /// Transformative properties applied to the primary, in `ipma`
+    /// order (`clap` → `irot` → `imir` is the §6.5.1 chain readers
+    /// apply) — written where [`EncodeOptions::transform_carrier`]
+    /// says: as essential properties of every displayed item (the
+    /// default), or on an `iden` derived item over the coded picture.
     pub transforms: Vec<Property>,
     /// AV1: quality dial 0..=100 (100 = lossless) for lossy items;
     /// `None` codes lossless (the pre-0.0.3 behaviour).
@@ -152,6 +223,15 @@ pub struct EncodeOptions {
     /// coder is the one that matters. Unknown keys are refused by the
     /// encoder.
     pub avc_options: Vec<(String, String)>,
+    /// A depth map to carry as the primary's depth auxiliary item (HEIF
+    /// §7.5.3: `auxl` + `auxC` with the depth URN — the HEVC one on
+    /// HEVC items, the CICP one otherwise): coded like the alpha plane
+    /// (a monochrome picture, or monochrome-in-4:2:0 on HEVC / AVC) at
+    /// the primary's coded depth, any size (readers resize it to the
+    /// master). The frame's own alpha plane, if any, is ignored.
+    pub depth_map: Option<HeifFrame>,
+    /// Where `transforms` are written (see [`TransformCarrier`]).
+    pub transform_carrier: TransformCarrier,
 }
 impl EncodeOptions {
     /// Every field as a positional argument, in declaration order
@@ -182,6 +262,8 @@ impl EncodeOptions {
         chroma: Option<Chroma>,
         vvc_options: Vec<(String, String)>,
         avc_options: Vec<(String, String)>,
+        depth_map: Option<HeifFrame>,
+        transform_carrier: TransformCarrier,
     ) -> Self {
         Self {
             codec,
@@ -207,7 +289,21 @@ impl EncodeOptions {
             chroma,
             vvc_options,
             avc_options,
+            depth_map,
+            transform_carrier,
         }
+    }
+
+    /// Set `depth_map`.
+    pub fn with_depth_map(mut self, depth_map: Option<HeifFrame>) -> Self {
+        self.depth_map = depth_map;
+        self
+    }
+
+    /// Set `transform_carrier`.
+    pub fn with_transform_carrier(mut self, transform_carrier: TransformCarrier) -> Self {
+        self.transform_carrier = transform_carrier;
+        self
     }
 
     /// Set `vvc_options`.
@@ -494,6 +590,8 @@ impl Default for EncodeOptions {
             chroma: None,
             vvc_options: Vec::new(),
             avc_options: Vec::new(),
+            depth_map: None,
+            transform_carrier: TransformCarrier::CodedItem,
         }
     }
 }
@@ -1704,12 +1802,173 @@ fn alignment(opts: &EncodeOptions) -> u32 {
     }
 }
 
-/// The transformative chain of `opts` as essential property entries,
-/// attached to every displayed item (master, alpha auxiliary,
-/// thumbnails) so third-party readers that only honour properties on
-/// the item they decode still render the intended orientation.
+/// The transformative chain of `opts` as essential property entries —
+/// what the thumbnails and the gain map always carry (they are coded
+/// pictures of the oriented output's companions), and what every
+/// displayed item carries under [`TransformCarrier::CodedItem`], so
+/// third-party readers that only honour properties on the item they
+/// decode still render the intended orientation.
 fn transform_props(opts: &EncodeOptions) -> Vec<(Property, bool)> {
     opts.transforms.iter().map(|t| (t.clone(), true)).collect()
+}
+
+/// The transforms of the primary's own items (coded picture / `grid` /
+/// `iovl`, alpha and depth auxiliaries): the chain under
+/// [`TransformCarrier::CodedItem`], nothing under
+/// [`TransformCarrier::Identity`] (the `iden` carries it).
+fn item_transform_props(opts: &EncodeOptions) -> Vec<(Property, bool)> {
+    match opts.transform_carrier {
+        TransformCarrier::Identity => Vec::new(),
+        _ => transform_props(opts),
+    }
+}
+
+/// The descriptive properties of a derived item over a picture in
+/// layout `cfmt`: the `colr` set of `opts` (`nclx`, the ICC profile)
+/// and a `pixi` — what a `grid`, `iovl` or `iden` carries so it stands
+/// on its own (a `tmap` base needs a `colr`, HEIF Amd 1 §6.6.2.4.1).
+fn derived_props(cfmt: HeifPixelFormat, opts: &EncodeOptions) -> Vec<(Property, bool)> {
+    let mut props = vec![(
+        Property::Colr(nclx_for_icc(&opts.colr, opts.icc_profile.is_some())),
+        false,
+    )];
+    if let Some(icc) = &opts.icc_profile {
+        props.push((
+            Property::Colr(Colr::Icc {
+                restricted: false,
+                profile: icc.clone(),
+            }),
+            false,
+        ));
+    }
+    props.push((
+        Property::Pixi(Pixi {
+            bits_per_channel: vec![cfmt.bit_depth; cfmt.chroma.colour_planes()],
+        }),
+        false,
+    ));
+    props
+}
+
+/// Under [`TransformCarrier::Identity`] with a non-empty chain: an
+/// `iden` derived item over `input` (a `width × height` picture in
+/// layout `cfmt`) carrying the descriptive set and the chain, the new
+/// primary; otherwise `input` itself.
+fn identity_over(
+    w: &mut HeifWriter,
+    input: u32,
+    width: u32,
+    height: u32,
+    cfmt: HeifPixelFormat,
+    opts: &EncodeOptions,
+) -> u32 {
+    if opts.transform_carrier != TransformCarrier::Identity || opts.transforms.is_empty() {
+        return input;
+    }
+    let mut props = vec![(Property::Ispe(Ispe { width, height }), false)];
+    props.extend(derived_props(cfmt, opts));
+    props.extend(transform_props(opts));
+    // The input is an intermediate, not an alternative: hidden (§6.4.2).
+    w.set_hidden(input, true);
+    w.add_identity(input, props)
+}
+
+/// Codec options that give the depth auxiliary's HEVC parameter sets
+/// their own ids (VPS / SPS / PPS 3; the alpha uses 1, the gain map 2).
+const DEPTH_HEVC_OPTIONS: &[(&str, &str)] = &[("vpsid", "3"), ("spsid", "3"), ("ppsid", "3")];
+
+/// Code `plane` (a monochrome picture at the source depth) as an
+/// auxiliary of `master` — the alpha plane (`urn` an alpha URN,
+/// `premultiplied` adds the `prem` reference) or a depth map (a depth
+/// URN): monochrome for AV1 / VVC, monochrome-in-4:2:0 for HEVC / AVC
+/// (the layout every producer writes and every reader opens), at
+/// `depth` bits, padded to the codec alignment with a `clap`, a
+/// single-channel `pixi`, no colour information (the plane is not a
+/// colour), an essential `auxC`, the item's transforms per the carrier,
+/// hidden. Returns the auxiliary's id.
+#[allow(clippy::too_many_arguments)]
+fn add_auxiliary_plane(
+    w: &mut HeifWriter,
+    master: u32,
+    plane: HeifFrame,
+    depth: u8,
+    urn: &str,
+    hevc_extra: &[(&str, &str)],
+    premultiplied: bool,
+    opts: &EncodeOptions,
+) -> Result<u32> {
+    let plane = plane.without_alpha();
+    let native_mono = matches!(opts.codec, StillCodec::Av1 | StillCodec::Vvc);
+    let a_src = if native_mono {
+        mono_at_depth(plane, depth)?
+    } else {
+        to_yuv420(&plane, depth)?
+    };
+    let vis = (a_src.width, a_src.height);
+    let extra: &[(&str, &str)] = if opts.codec == StillCodec::Hevc {
+        hevc_extra
+    } else {
+        &[]
+    };
+    let padded = pad_owned(a_src, alignment(opts))?;
+    // No colour description: full range, every code point unspecified.
+    let aux_colr = Colr::Nclx {
+        primaries: 2,
+        transfer: 2,
+        matrix: 2,
+        full_range: true,
+    };
+    let pic = encode_picture_for(padded, opts, &aux_colr, extra)?;
+    let mut props: Vec<(Property, bool)> = coded_props(&pic, &opts.colr, None)
+        .into_iter()
+        .filter(|(p, _)| !matches!(p, Property::Colr(_)))
+        .map(|(p, e)| match p {
+            // One channel: the plane (the neutral chroma of a 4:2:0
+            // coding carries nothing).
+            Property::Pixi(_) => (
+                Property::Pixi(Pixi {
+                    bits_per_channel: vec![pic.layout.bit_depth],
+                }),
+                e,
+            ),
+            other => (other, e),
+        })
+        .collect();
+    props.push((
+        Property::AuxC(crate::props::AuxC {
+            aux_type: urn.into(),
+            aux_subtype: Vec::new(),
+        }),
+        true,
+    ));
+    props.extend(clap_for(&pic, vis));
+    props.extend(item_transform_props(opts));
+    let is_depth = urn == crate::props::AUX_URN_DEPTH || urn == crate::props::AUX_URN_DEPTH_HEVC;
+    Ok(if is_depth {
+        w.add_depth(master, pic.item_type, pic.data, props)
+    } else {
+        w.add_alpha(master, pic.item_type, pic.data, props, premultiplied)
+    })
+}
+
+/// The alpha URN of `opts.codec`'s items: HEVC alpha items use the
+/// codec-specific URN (HEIF §7.5.3.2 / Annex B.2.3.2), the form both
+/// HEVC producers write and the one Apple ImageIO opens; the others the
+/// codec-independent CICP URN (§7.5.3.1; E.2.4: the HEVC URNs may be
+/// used with AVC, the CICP one is what every reader keys on).
+fn alpha_urn(opts: &EncodeOptions) -> &'static str {
+    match opts.codec {
+        StillCodec::Hevc => crate::props::AUX_URN_ALPHA_HEVC,
+        StillCodec::Av1 | StillCodec::Vvc | StillCodec::Avc => crate::props::AUX_URN_ALPHA,
+    }
+}
+
+/// The depth URN of `opts.codec`'s items (the same split as the alpha).
+fn depth_urn(opts: &EncodeOptions) -> &'static str {
+    match opts.codec {
+        StillCodec::Hevc => crate::props::AUX_URN_DEPTH_HEVC,
+        StillCodec::Av1 | StillCodec::Vvc | StillCodec::Avc => crate::props::AUX_URN_DEPTH,
+    }
 }
 
 /// The `nclx` to write next to `colr` when an ICC profile is present:
@@ -1821,7 +2080,7 @@ fn add_picture_item(
     let mut props = coded_props(&pic, &opts.colr, opts.icc_profile.as_deref());
     props.extend(extra);
     props.extend(clap_for(&pic, vis));
-    props.extend(transform_props(opts));
+    props.extend(item_transform_props(opts));
     Ok(w.add_coded_item(pic.item_type, pic.data, props))
 }
 
@@ -2312,7 +2571,7 @@ fn encode_still_planes(
                     false,
                 ));
             }
-            gprops.extend(transform_props(opts));
+            gprops.extend(item_transform_props(opts));
             (w.add_grid(desc, &tiles, gprops)?, thumb)
         }
         _ => {
@@ -2321,142 +2580,242 @@ fn encode_still_planes(
         }
     };
     // Alpha auxiliary: the alpha plane as a picture — monochrome for
-    // AV1, monochrome-in-4:2:0 for HEVC (the layout every HEVC
-    // producer writes and every reader opens).
+    // AV1 / VVC, monochrome-in-4:2:0 for HEVC / AVC (the layout every
+    // HEVC producer writes and every reader opens).
     if let Some(alpha) = alpha {
-        let a_src = if native_av1 {
-            mono_at_depth(alpha, cfmt.bit_depth)?
-        } else {
-            to_yuv420(&alpha, cfmt.bit_depth)?
-        };
-        let vis = (a_src.width, a_src.height);
-        let extra: &[(&str, &str)] = if opts.codec == StillCodec::Hevc {
-            ALPHA_HEVC_OPTIONS
-        } else {
-            &[]
-        };
-        let padded = pad_owned(a_src, alignment(opts))?;
-        // The alpha is an opacity: full range, no colour description.
-        let alpha_colr = Colr::Nclx {
-            primaries: 2,
-            transfer: 2,
-            matrix: 2,
-            full_range: true,
-        };
-        let pic = encode_picture_for(padded, opts, &alpha_colr, extra)?;
-        // Alpha items carry no colour information (the plane is an
-        // opacity, not a colour — the shape every third-party producer
-        // writes), a single-channel `pixi` and an essential `auxC`.
-        let mut props: Vec<(Property, bool)> = coded_props(&pic, &opts.colr, None)
-            .into_iter()
-            .filter(|(p, _)| !matches!(p, Property::Colr(_)))
-            .map(|(p, e)| match p {
-                // One channel: the opacity plane (the neutral chroma of
-                // the 4:2:0 coding carries nothing).
-                Property::Pixi(_) => (
-                    Property::Pixi(Pixi {
-                        bits_per_channel: vec![pic.layout.bit_depth],
-                    }),
-                    e,
-                ),
-                other => (other, e),
-            })
-            .collect();
-        // HEVC alpha items use the codec-specific URN (HEIF §7.5.3.2 /
-        // Annex B.2.3.2), the form both HEVC producers write and the
-        // one Apple ImageIO opens; AV1 items use the codec-independent
-        // CICP URN (§7.5.3.1).
-        let urn = match opts.codec {
-            StillCodec::Hevc => crate::props::AUX_URN_ALPHA_HEVC,
-            // E.2.4: the HEVC URNs may be used with AVC; the CICP alpha
-            // URN is the one every reader keys on.
-            StillCodec::Av1 | StillCodec::Vvc | StillCodec::Avc => crate::props::AUX_URN_ALPHA,
-        };
-        props.push((
-            Property::AuxC(crate::props::AuxC {
-                aux_type: urn.into(),
-                aux_subtype: Vec::new(),
-            }),
-            true,
-        ));
-        props.extend(clap_for(&pic, vis));
-        props.extend(transform_props(opts));
-        w.add_alpha(master, pic.item_type, pic.data, props, false);
+        add_auxiliary_plane(
+            w,
+            master,
+            alpha,
+            cfmt.bit_depth,
+            alpha_urn(opts),
+            ALPHA_HEVC_OPTIONS,
+            false,
+            opts,
+        )?;
     }
+    // Depth auxiliary (HEIF §7.5.3), coded like the alpha plane with its
+    // own parameter-set ids.
+    if let Some(depth) = &opts.depth_map {
+        depth.validate()?;
+        add_auxiliary_plane(
+            w,
+            master,
+            depth.clone(),
+            cfmt.bit_depth,
+            depth_urn(opts),
+            DEPTH_HEVC_OPTIONS,
+            false,
+            opts,
+        )?;
+    }
+    // The primary: the picture itself, or an `iden` carrying the
+    // transforms over it.
+    let primary = identity_over(w, master, cw, ch, cfmt, opts);
     // Thumbnail (cut from the coding picture before it was coded).
     if let Some(small) = thumb {
-        add_thumbnail_item(w, master, small, opts)?;
+        add_thumbnail_item(w, primary, small, opts)?;
     }
     // Metadata.
     if let Some(exif) = &opts.exif {
-        w.add_exif(master, exif);
+        w.add_exif(primary, exif);
     }
     if let Some(xmp) = &opts.xmp {
-        w.add_xmp(master, xmp);
+        w.add_xmp(primary, xmp);
     }
     // Gain map → hidden coded item + tmap derived item (HEIF Amd 1
     // §6.6.2.4); the base stays the primary and an altr [tmap, base]
     // group gives tone-map readers the alternate.
     if let Some(gm) = &opts.gain_map {
-        gm.frame.validate()?;
-        let g_src = if native_av1 {
-            // The map keeps its own depth up to 12 bits.
-            to_depth(&gm.frame.without_alpha(), gm.frame.format.bit_depth.min(12))?
+        add_gain_map(w, primary, cfmt, native_av1, gm, opts)?;
+    }
+    Ok(primary)
+}
+
+/// The gain map of `gm` as a hidden coded item and a `tmap` derived item
+/// over `base` (HEIF Amd 1 §6.6.2.4), with the `altr` [tmap, base]
+/// fallback. The map carries the primary's transforms (it is resampled
+/// onto the base's *oriented* output, ISO 21496-1 §6.2.2, so it must be
+/// oriented the same way).
+fn add_gain_map(
+    w: &mut HeifWriter,
+    base: u32,
+    cfmt: HeifPixelFormat,
+    native_av1: bool,
+    gm: &GainMapSpec,
+    opts: &EncodeOptions,
+) -> Result<()> {
+    gm.frame.validate()?;
+    let g_src = if native_av1 {
+        // The map keeps its own depth up to 12 bits.
+        to_depth(&gm.frame.without_alpha(), gm.frame.format.bit_depth.min(12))?
+    } else {
+        to_yuv420(&gm.frame, cfmt.bit_depth)?
+    };
+    let vis = (g_src.width, g_src.height);
+    let padded = pad_owned(g_src, alignment(opts))?;
+    let gain_colr = Colr::Nclx {
+        primaries: 2,
+        transfer: 2,
+        matrix: if gm.frame.format.chroma == Chroma::Mono {
+            2
         } else {
-            to_yuv420(&gm.frame, cfmt.bit_depth)?
-        };
-        let vis = (g_src.width, g_src.height);
-        let padded = pad_owned(g_src, alignment(opts))?;
-        let gain_colr = Colr::Nclx {
-            primaries: 2,
-            transfer: 2,
-            matrix: if gm.frame.format.chroma == Chroma::Mono {
-                2
-            } else {
-                gm.gain_map_matrix
-            },
-            full_range: gm.gain_map_full_range,
-        };
-        let extra: &[(&str, &str)] = if opts.codec == StillCodec::Hevc {
-            GAIN_MAP_HEVC_OPTIONS
-        } else {
-            &[]
-        };
-        let pic = encode_picture_for(padded, opts, &gain_colr, extra)?;
-        let mut props = coded_props(&pic, &gain_colr, None);
-        if gm.frame.format.chroma == Chroma::Mono && pic.layout.chroma != Chroma::Mono {
-            // The map rides the luma plane: one channel of information.
-            for (p, _) in props.iter_mut() {
-                if let Property::Pixi(_) = p {
-                    *p = Property::Pixi(Pixi {
-                        bits_per_channel: vec![pic.layout.bit_depth],
-                    });
-                }
+            gm.gain_map_matrix
+        },
+        full_range: gm.gain_map_full_range,
+    };
+    let extra: &[(&str, &str)] = if opts.codec == StillCodec::Hevc {
+        GAIN_MAP_HEVC_OPTIONS
+    } else {
+        &[]
+    };
+    let pic = encode_picture_for(padded, opts, &gain_colr, extra)?;
+    let mut props = coded_props(&pic, &gain_colr, None);
+    if gm.frame.format.chroma == Chroma::Mono && pic.layout.chroma != Chroma::Mono {
+        // The map rides the luma plane: one channel of information.
+        for (p, _) in props.iter_mut() {
+            if let Property::Pixi(_) = p {
+                *p = Property::Pixi(Pixi {
+                    bits_per_channel: vec![pic.layout.bit_depth],
+                });
             }
         }
-        props.extend(clap_for(&pic, vis));
-        let gain_id = w.add_coded_item(pic.item_type, pic.data, props);
-        let mut tprops = vec![(
-            Property::Pixi(Pixi {
-                bits_per_channel: vec![
-                    gm.alternate_bit_depth.clamp(8, 16);
-                    cfmt.chroma.colour_planes()
-                ],
-            }),
-            false,
-        )];
-        if let Some(c) = gm.alternate_clli {
-            tprops.push((Property::Clli(c), false));
-        }
-        w.add_tone_map(
-            master,
-            gain_id,
-            &gm.metadata,
-            Property::Colr(gm.alternate_colr.clone()),
-            tprops,
-        )?;
     }
-    Ok(master)
+    props.extend(clap_for(&pic, vis));
+    props.extend(transform_props(opts));
+    let gain_id = w.add_coded_item(pic.item_type, pic.data, props);
+    let mut tprops = vec![(
+        Property::Pixi(Pixi {
+            bits_per_channel: vec![
+                gm.alternate_bit_depth.clamp(8, 16);
+                cfmt.chroma.colour_planes()
+            ],
+        }),
+        false,
+    )];
+    if let Some(c) = gm.alternate_clli {
+        tprops.push((Property::Clli(c), false));
+    }
+    w.add_tone_map(
+        base,
+        gain_id,
+        &gm.metadata,
+        Property::Colr(gm.alternate_colr.clone()),
+        tprops,
+    )?;
+    Ok(())
+}
+
+/// Encode an `iovl` overlay (HEIF §6.6.2.2) as a complete file: every
+/// layer a coded item (with its alpha auxiliary when the picture has
+/// one) in the first layer's coding layout (MIAF §7.3.11.3: the inputs
+/// share bit depth and colour information — `opts.colr` describes them
+/// all), the `iovl` over them at the layers' offsets with the canvas
+/// fill, the overlay the primary (or an `iden` over it under
+/// [`TransformCarrier::Identity`]); `opts.transforms`, `thumbnail_max_dim`
+/// (a thumbnail of the composed canvas), `exif` / `xmp` / `icc_profile`
+/// apply to the overlay. `grid_tile`, `gain_map` and `depth_map` are
+/// refused here (the layers are not tiled, the overlay has no gain map
+/// or depth auxiliary on this path).
+pub fn encode_overlay(spec: &OverlaySpec, opts: &EncodeOptions) -> Result<Vec<u8>> {
+    let mut w = HeifWriter::new();
+    let id = encode_overlay_into(&mut w, spec, opts)?;
+    w.set_primary(id);
+    w.write_to_vec()
+}
+
+/// [`encode_overlay`] into an existing writer; returns the primary's id
+/// (the caller sets the primary).
+pub fn encode_overlay_into(
+    w: &mut HeifWriter,
+    spec: &OverlaySpec,
+    opts: &EncodeOptions,
+) -> Result<u32> {
+    if spec.layers.is_empty() {
+        return Err(HeifError::invalid("overlay: no layers"));
+    }
+    if spec.width == 0 || spec.height == 0 {
+        return Err(HeifError::invalid("overlay: zero canvas size"));
+    }
+    if opts.gain_map.is_some() || opts.depth_map.is_some() || opts.grid_tile.is_some_and(|t| t > 0)
+    {
+        return Err(HeifError::unsupported(
+            "overlay: gain_map / depth_map / grid_tile do not apply to an iovl primary",
+        ));
+    }
+    if (spec.width as u64) * (spec.height as u64) > crate::derived::MAX_CANVAS_PIXELS {
+        return Err(HeifError::exhausted(
+            "overlay: canvas exceeds MAX_CANVAS_PIXELS",
+        ));
+    }
+    // Every layer in the first's coding layout.
+    let first = &spec.layers[0].frame;
+    first.validate()?;
+    let coded = coded_layout(first.format, opts)?;
+    let mut ids = Vec::with_capacity(spec.layers.len());
+    let mut composed: Vec<HeifFrame> = Vec::new();
+    let want_thumb = opts.thumbnail_max_dim.is_some();
+    // The layers are inputs of the overlay: the primary's transforms
+    // apply to the composed canvas, never to a layer.
+    let layer_opts = EncodeOptions {
+        transforms: Vec::new(),
+        ..opts.clone()
+    };
+    for layer in &spec.layers {
+        layer.frame.validate()?;
+        let colour = to_layout(&layer.frame, coded.chroma, coded.bit_depth)?;
+        let alpha = layer.frame.alpha_as_frame();
+        if want_thumb {
+            composed.push(match &alpha {
+                Some(a) => colour.with_alpha_plane(a)?,
+                None => colour.clone(),
+            });
+        }
+        let id = add_picture_item(w, colour, &layer_opts, Vec::new())?;
+        // A layer is an intermediate of the overlay, not an alternative.
+        w.set_hidden(id, true);
+        if let Some(a) = alpha {
+            add_auxiliary_plane(
+                w,
+                id,
+                a,
+                coded.bit_depth,
+                alpha_urn(opts),
+                ALPHA_HEVC_OPTIONS,
+                false,
+                &layer_opts,
+            )?;
+        }
+        ids.push(id);
+    }
+    let desc = crate::derived::OverlayDescriptor {
+        canvas_fill: spec.fill,
+        output_width: spec.width,
+        output_height: spec.height,
+        offsets: spec.layers.iter().map(|l| (l.x, l.y)).collect(),
+    };
+    let mut oprops = derived_props(coded, opts);
+    oprops.extend(item_transform_props(opts));
+    let overlay = w.add_overlay(desc.clone(), &ids, oprops)?;
+    let primary = identity_over(w, overlay, spec.width, spec.height, coded, opts);
+    if want_thumb {
+        // The thumbnail pictures the composed canvas (colour only).
+        let inputs: Vec<crate::compose::OverlayInput<'_>> = composed
+            .iter()
+            .map(|f| crate::compose::OverlayInput::new(f, false))
+            .collect();
+        let canvas = crate::compose::composite_overlay(&desc, &inputs, Some(&opts.colr))?;
+        if let Some(small) = thumbnail_source(&canvas.without_alpha(), opts)? {
+            add_thumbnail_item(w, primary, small, opts)?;
+        }
+    }
+    if let Some(exif) = &opts.exif {
+        w.add_exif(primary, exif);
+    }
+    if let Some(xmp) = &opts.xmp {
+        w.add_xmp(primary, xmp);
+    }
+    Ok(primary)
 }
 
 /// A monochrome plane at `depth` bits (the coded depth of the item it
@@ -3058,6 +3417,13 @@ pub struct HeifEncoderOptions {
     pub grid: String,
     /// `thumbnail`: largest thumbnail dimension (0 = none).
     pub thumbnail: u32,
+    /// `irot`: quarter turns anti-clockwise (0..=3) written as the
+    /// primary's `irot` (HEIF §6.5.10); 0 = none.
+    pub irot: u32,
+    /// `imir`: `none`, `vertical` (top / bottom exchanged, axis 0) or
+    /// `horizontal` (left / right exchanged, axis 1) — the primary's
+    /// `imir` (§6.5.12), applied after `irot`.
+    pub imir: String,
     /// `range`: `full` or `limited` sample range of the written `nclx`.
     pub range: String,
     /// `quality` (AV1, `mode=intra`): 0..=100, 100 = lossless.
@@ -3108,6 +3474,8 @@ impl HeifEncoderOptions {
         qp: u32,
         grid: String,
         thumbnail: u32,
+        irot: u32,
+        imir: String,
         range: String,
         quality: u32,
         speed: String,
@@ -3125,6 +3493,8 @@ impl HeifEncoderOptions {
             qp,
             grid,
             thumbnail,
+            irot,
+            imir,
             range,
             quality,
             speed,
@@ -3171,6 +3541,18 @@ impl HeifEncoderOptions {
     /// Set `thumbnail`.
     pub fn with_thumbnail(mut self, thumbnail: u32) -> Self {
         self.thumbnail = thumbnail;
+        self
+    }
+
+    /// Set `irot`.
+    pub fn with_irot(mut self, irot: u32) -> Self {
+        self.irot = irot;
+        self
+    }
+
+    /// Set `imir`.
+    pub fn with_imir(mut self, imir: String) -> Self {
+        self.imir = imir;
         self
     }
 
@@ -3250,6 +3632,8 @@ impl Default for HeifEncoderOptions {
             qp: DEFAULT_QP as u32,
             grid: "auto".into(),
             thumbnail: 0,
+            irot: 0,
+            imir: String::new(),
             range: "full".into(),
             quality: 60,
             speed: "fast".into(),
@@ -3301,6 +3685,18 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             kind: oxideav_core::OptionKind::U32,
             default: oxideav_core::OptionValue::U32(0),
             help: "Add a thumbnail whose largest dimension is this many pixels (0 = none)",
+        },
+        oxideav_core::OptionField {
+            name: "irot",
+            kind: oxideav_core::OptionKind::U32,
+            default: oxideav_core::OptionValue::U32(0),
+            help: "Rotate the written picture by this many quarter turns anti-clockwise (0..=3; an essential irot on the primary)",
+        },
+        oxideav_core::OptionField {
+            name: "imir",
+            kind: oxideav_core::OptionKind::Enum(&["none", "vertical", "horizontal"]),
+            default: oxideav_core::OptionValue::String(String::new()),
+            help: "Mirror the written picture after the rotation: vertical (top / bottom exchanged) or horizontal (left / right exchanged); an essential imir on the primary",
         },
         oxideav_core::OptionField {
             name: "range",
@@ -3383,6 +3779,8 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             }
             "grid" => self.grid = value.as_str()?.to_string(),
             "thumbnail" => self.thumbnail = value.as_u32()?,
+            "irot" => self.irot = value.as_u32()?,
+            "imir" => self.imir = value.as_str()?.to_string(),
             "range" => self.range = value.as_str()?.to_string(),
             "quality" => {
                 self.quality = value.as_u32()?;
@@ -3458,12 +3856,33 @@ impl HeifEncoderOptions {
                 CoreError::invalid(format!("heif: threads '{n}' (auto or a worker count)"))
             })?),
         };
+        let mut transforms = Vec::new();
+        if self.irot > 3 {
+            return Err(CoreError::invalid(format!(
+                "heif: irot {} (0..=3 quarter turns)",
+                self.irot
+            )));
+        }
+        if self.irot > 0 {
+            transforms.push(Property::Irot(crate::props::Irot::new(self.irot as u8)));
+        }
+        match self.imir.as_str() {
+            "" | "none" => {}
+            "vertical" => transforms.push(Property::Imir(crate::props::Imir::new(0))),
+            "horizontal" => transforms.push(Property::Imir(crate::props::Imir::new(1))),
+            other => {
+                return Err(CoreError::invalid(format!(
+                    "heif: imir '{other}' (none / vertical / horizontal)"
+                )))
+            }
+        }
         let mut opts = EncodeOptions {
             codec,
             hevc_mode: mode.clone(),
             qp,
             grid_tile,
             thumbnail_max_dim: (self.thumbnail > 0).then_some(self.thumbnail),
+            transforms,
             // AV1: `mode=pcm` is lossless, `mode=intra` codes at `quality`.
             av1_quality: (mode != "pcm").then_some(self.quality.min(100) as u8),
             av1_speed: self.speed.clone(),
