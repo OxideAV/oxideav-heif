@@ -1061,3 +1061,170 @@ fn framework_irot_imir_options_write_the_chain() {
     assert!(bad("irot", "4"));
     assert!(bad("imir", "diagonal"));
 }
+
+/// A `clap` in `transforms` on a picture the codec pads: the padding
+/// crop and the caller's crop fold into ONE exact `clap` on the coded
+/// item (and its alpha), the thumbnail is cut from the cropped picture
+/// and carries the orientation only, the depth map and the gain map
+/// carry the orientation only — every item passes the MIAF §7.3.6.7
+/// order check and the primary decodes to the cropped, rotated source.
+/// Chains out of that order are typed refusals (fuzz-found: two `clap`s
+/// on one item).
+#[test]
+fn clap_folds_with_the_padding_and_stays_off_the_companions() {
+    use oxideav_heif::props::{Clap, CropRect};
+    let src = picture_with_alpha(46, 46);
+    let crop = CropRect {
+        x: 5,
+        y: 3,
+        width: 30,
+        height: 20,
+    };
+    let chain = vec![
+        Property::Clap(Clap::for_rect(46, 46, crop)),
+        Property::Irot(Irot::new(1)),
+    ];
+    let mut depth =
+        HeifFrame::zeroed(8, 8, HeifPixelFormat::new(Chroma::Mono, 8, false).unwrap()).unwrap();
+    for y in 0..8 {
+        for x in 0..8 {
+            depth.set_sample(0, x, y, (x * 32) as u16);
+        }
+    }
+    let want = {
+        let cropped = oxideav_heif::compose::crop(&src, 5, 3, 30, 20).unwrap();
+        oxideav_heif::compose::apply_irot(&cropped, &Irot::new(1)).unwrap()
+    };
+    for codec in [StillCodec::Hevc, StillCodec::Av1] {
+        let opts = lossless()
+            .with_codec(codec)
+            .with_transforms(chain.clone())
+            .with_thumbnail_max_dim(Some(10))
+            .with_depth_map(Some(depth.clone()));
+        let bytes = encode_still(&src, &opts).unwrap();
+        let f = HeifFile::parse(&bytes).unwrap();
+        let rep = check(&f, MiafProfile::Miaf).unwrap();
+        assert!(rep.is_conformant(), "{codec:?}: {:#?}", rep.violations);
+        let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+        assert_eq!(
+            img.frame, want,
+            "{codec:?}: cropped + rotated, alpha included"
+        );
+        let meta = f.meta().unwrap();
+        let primary = meta.primary_item().unwrap().id;
+        let types = |id: u32| -> Vec<oxideav_heif::boxes::FourCc> {
+            meta.properties_of(id)
+                .iter()
+                .map(|(_, raw, _)| raw.box_type)
+                .filter(|t| matches!(t, b"clap" | b"irot" | b"imir"))
+                .collect()
+        };
+        // One clap on the primary and on its alpha; orientation only on
+        // the thumbnail and the depth map.
+        assert_eq!(
+            types(primary),
+            vec![*b"clap", *b"irot"],
+            "{codec:?}: primary"
+        );
+        let auxes = meta.auxiliaries_of(primary);
+        assert_eq!(auxes.len(), 2);
+        for a in &auxes {
+            let is_depth = meta.properties_of(*a).iter().any(|(_, raw, _)| {
+                raw.box_type == *b"auxC" && String::from_utf8_lossy(&raw.body).contains("depth")
+                    || raw.box_type == *b"auxC"
+                        && String::from_utf8_lossy(&raw.body).contains("auxid:2")
+            });
+            let t = types(*a);
+            if is_depth {
+                // Orientation only — plus the map's own padding crop
+                // when the codec pads it (HEVC: 8 → 16), never the
+                // primary's.
+                assert!(
+                    t == vec![*b"irot"] || t == vec![*b"clap", *b"irot"],
+                    "{codec:?}: depth map {t:?}"
+                );
+            } else if codec == StillCodec::Hevc {
+                // HEVC pads 46 → 48: the folded clap, then irot.
+                assert_eq!(t, vec![*b"clap", *b"irot"], "{codec:?}: alpha");
+            }
+        }
+        let thumb = meta.thumbnails_of(primary)[0];
+        let t = types(thumb);
+        assert!(
+            t.last() == Some(b"irot") && !t.contains(b"clap") || t == vec![*b"clap", *b"irot"],
+            "{codec:?}: thumbnail {t:?}"
+        );
+        // The thumbnail pictures the cropped region: 30×20 → 10×7 (its
+        // own padding clap when the codec needs one).
+        let timg = oxideav_heif::decode::decode_item(&f, thumb, ItemDecoder::direct()).unwrap();
+        assert_eq!(
+            (timg.frame.width, timg.frame.height),
+            (7, 10),
+            "{codec:?}: thumbnail geometry (rotated)"
+        );
+        // Depth survives at its own size.
+        assert_eq!(
+            img.depth.as_ref().map(|d| (d.width, d.height)),
+            Some((8, 8))
+        );
+    }
+    // Refusals: the order and the multiplicity.
+    for bad in [
+        vec![
+            Property::Irot(Irot::new(1)),
+            Property::Clap(Clap::for_rect(46, 46, crop)),
+        ],
+        vec![Property::Irot(Irot::new(1)), Property::Irot(Irot::new(2))],
+        vec![Property::Imir(Imir::new(0)), Property::Irot(Irot::new(1))],
+    ] {
+        assert!(encode_still(&src, &lossless().with_transforms(bad)).is_err());
+    }
+}
+
+/// An overlay whose 4:2:0 layers mix odd and even sizes (fuzz-found): an
+/// odd-sized layer comes out of its padding `clap` promoted to 4:4:4
+/// (MIAF §7.3.6.7), an even-sized one stays 4:2:0, and the compositor
+/// must take the mixed samplings (promoting the composite) rather than
+/// refuse a MIAF-conformant file. Lossless, the composite equals the
+/// compositor's own result on the source layers.
+#[test]
+fn overlay_composes_layers_of_mixed_chroma_after_their_transforms() {
+    use oxideav_heif::compose::{composite_overlay, OverlayInput};
+    use oxideav_heif::derived::OverlayDescriptor;
+    use oxideav_heif::encode::{encode_overlay, OverlayLayer, OverlaySpec};
+    let odd = picture_with_alpha(3, 15);
+    let odd2 = picture_with_alpha(7, 15);
+    let even = picture_with_alpha(14, 12);
+    let spec = OverlaySpec::new(
+        20,
+        18,
+        [1000, 2000, 3000, 65535],
+        vec![
+            OverlayLayer::new(odd.clone(), 0, 0),
+            OverlayLayer::new(odd2.clone(), 4, 1),
+            OverlayLayer::new(even.clone(), 6, 6),
+        ],
+    );
+    let bytes = encode_overlay(&spec, &lossless()).unwrap();
+    let f = HeifFile::parse(&bytes).unwrap();
+    let rep = check(&f, MiafProfile::Miaf).unwrap();
+    assert!(rep.is_conformant(), "{:#?}", rep.violations);
+    let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+    let desc = OverlayDescriptor::new(spec.fill, 20, 18, vec![(0, 0), (4, 1), (6, 6)]);
+    let want = composite_overlay(
+        &desc,
+        &[
+            OverlayInput::new(&odd, false),
+            OverlayInput::new(&odd2, false),
+            OverlayInput::new(&even, false),
+        ],
+        Some(&EncodeOptions::default().colr),
+    )
+    .unwrap();
+    assert_eq!(img.frame, want);
+    // The contract path and the framework path agree.
+    assert_eq!(
+        oxideav_heif::decode(&bytes).unwrap().to_frame().unwrap(),
+        want
+    );
+}

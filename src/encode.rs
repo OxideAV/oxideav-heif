@@ -1823,6 +1823,144 @@ fn item_transform_props(opts: &EncodeOptions) -> Vec<(Property, bool)> {
     }
 }
 
+/// `opts.transforms` must be the MIAF §7.3.6.7 chain — at most one
+/// `clap` (first), then at most one `irot`, then at most one `imir` —
+/// so the crop is in the primary's own coordinates (it is folded into
+/// the padding crop of a coded item and cut off a thumbnail) and every
+/// written item passes the order check.
+fn validate_transforms(opts: &EncodeOptions) -> Result<()> {
+    let mut last = 0u8;
+    for t in &opts.transforms {
+        let rank = match t {
+            Property::Clap(_) => 1,
+            Property::Irot(_) => 2,
+            Property::Imir(_) => 3,
+            other => {
+                return Err(HeifError::unsupported(format!(
+                    "transforms: '{}' is not a transformative property this encoder writes (clap / irot / imir)",
+                    crate::boxes::fourcc_str(&other.box_type())
+                )))
+            }
+        };
+        if rank <= last {
+            return Err(HeifError::invalid(
+                "transforms: MIAF §7.3.6.7 order is clap → irot → imir, each at most once",
+            ));
+        }
+        last = rank;
+    }
+    Ok(())
+}
+
+/// The caller's `clap`, when the chain has one.
+fn user_clap(opts: &EncodeOptions) -> Option<&Clap> {
+    opts.transforms.iter().find_map(|t| match t {
+        Property::Clap(c) => Some(c),
+        _ => None,
+    })
+}
+
+/// The orientation part of the chain (`irot` / `imir`, essential): what
+/// companions of another geometry — thumbnails, the depth map, the
+/// gain map — carry; a crop is the primary's alone.
+fn orientation_props(opts: &EncodeOptions) -> Vec<(Property, bool)> {
+    opts.transforms
+        .iter()
+        .filter(|t| !matches!(t, Property::Clap(_)))
+        .map(|t| (t.clone(), true))
+        .collect()
+}
+
+/// One `clap` for a coded picture of `pic.coded_*` whose visible
+/// picture is `vis`: the padding crop (origin kept, the codec
+/// alignment rows / columns dropped) folded with the caller's crop
+/// `user` (given in the visible picture's coordinates, relative to its
+/// centre): the clean aperture is the caller's, its offsets move by
+/// half the padding, exactly (ISO/IEC 14496-12 §12.1.4.1 rationals).
+fn clap_composed(
+    pic: &CodedPicture,
+    vis: (u32, u32),
+    user: Option<&Clap>,
+) -> Option<(Property, bool)> {
+    let (pw, ph) = (
+        (pic.coded_width - vis.0) as i64,
+        (pic.coded_height - vis.1) as i64,
+    );
+    match user {
+        None => clap_for(pic, vis),
+        Some(u) => {
+            let fold = |n: i32, d: u32, pad: i64| -> (i32, u32) {
+                let d = d.max(1) as i64;
+                let (mut n2, mut d2) = (2 * n as i64 - pad * d, 2 * d);
+                let g = gcd(n2.unsigned_abs(), d2 as u64).max(1) as i64;
+                n2 /= g;
+                d2 /= g;
+                (
+                    n2.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                    d2.min(u32::MAX as i64) as u32,
+                )
+            };
+            let (hn, hd) = fold(u.horiz_off_n, u.horiz_off_d, pw);
+            let (vn, vd) = fold(u.vert_off_n, u.vert_off_d, ph);
+            Some((
+                Property::Clap(Clap::new(
+                    u.width_n, u.width_d, u.height_n, u.height_d, hn, hd, vn, vd,
+                )),
+                true,
+            ))
+        }
+    }
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a
+}
+
+/// The transformative chain of a coded item with the primary's
+/// geometry (the master picture, its alpha plane): the single folded
+/// `clap`, then the orientation — under [`TransformCarrier::CodedItem`];
+/// the padding crop alone under [`TransformCarrier::Identity`] (the
+/// `iden` carries the caller's chain over the visible picture).
+fn coded_item_chain(
+    pic: &CodedPicture,
+    vis: (u32, u32),
+    opts: &EncodeOptions,
+) -> Vec<(Property, bool)> {
+    match opts.transform_carrier {
+        TransformCarrier::Identity => clap_for(pic, vis).into_iter().collect(),
+        _ => {
+            let mut v: Vec<(Property, bool)> = clap_composed(pic, vis, user_clap(opts))
+                .into_iter()
+                .collect();
+            v.extend(orientation_props(opts));
+            v
+        }
+    }
+}
+
+/// The chain of a companion coded picture of its own geometry: its
+/// padding crop, then the orientation (always for thumbnails and the
+/// gain map — they picture the oriented output; for the depth map only
+/// under [`TransformCarrier::CodedItem`], the `iden` orienting it
+/// otherwise).
+fn companion_chain(
+    pic: &CodedPicture,
+    vis: (u32, u32),
+    opts: &EncodeOptions,
+    oriented: bool,
+) -> Vec<(Property, bool)> {
+    let mut v: Vec<(Property, bool)> = clap_for(pic, vis).into_iter().collect();
+    if oriented {
+        v.extend(orientation_props(opts));
+    }
+    v
+}
+
 /// The descriptive properties of a derived item over a picture in
 /// layout `cfmt`: the `colr` set of `opts` (`nclx`, the ICC profile)
 /// and a `pixi` — what a `grid`, `iovl` or `iden` carries so it stands
@@ -1941,9 +2079,19 @@ fn add_auxiliary_plane(
         }),
         true,
     ));
-    props.extend(clap_for(&pic, vis));
-    props.extend(item_transform_props(opts));
     let is_depth = urn == crate::props::AUX_URN_DEPTH || urn == crate::props::AUX_URN_DEPTH_HEVC;
+    if is_depth {
+        // The map has its own geometry: the crop is the primary's.
+        props.extend(companion_chain(
+            &pic,
+            vis,
+            opts,
+            opts.transform_carrier != TransformCarrier::Identity,
+        ));
+    } else {
+        // The alpha plane has the master's geometry: the same chain.
+        props.extend(coded_item_chain(&pic, vis, opts));
+    }
     Ok(if is_depth {
         w.add_depth(master, pic.item_type, pic.data, props)
     } else {
@@ -2079,8 +2227,7 @@ fn add_picture_item(
     let pic = encode_picture(padded, opts)?;
     let mut props = coded_props(&pic, &opts.colr, opts.icc_profile.as_deref());
     props.extend(extra);
-    props.extend(clap_for(&pic, vis));
-    props.extend(item_transform_props(opts));
+    props.extend(coded_item_chain(&pic, vis, opts));
     Ok(w.add_coded_item(pic.item_type, pic.data, props))
 }
 
@@ -2537,6 +2684,7 @@ fn encode_still_planes(
     alpha: Option<HeifFrame>,
     opts: &EncodeOptions,
 ) -> Result<u32> {
+    validate_transforms(opts)?;
     let native_av1 = native_av1(&colour, opts);
     let (cw, ch, cfmt) = (colour.width, colour.height, colour.format);
     let (master, thumb) = match opts.effective_grid_tile(cw, ch) {
@@ -2634,9 +2782,10 @@ fn encode_still_planes(
 
 /// The gain map of `gm` as a hidden coded item and a `tmap` derived item
 /// over `base` (HEIF Amd 1 §6.6.2.4), with the `altr` [tmap, base]
-/// fallback. The map carries the primary's transforms (it is resampled
-/// onto the base's *oriented* output, ISO 21496-1 §6.2.2, so it must be
-/// oriented the same way).
+/// fallback. The map carries the primary's orientation (`irot` /
+/// `imir`: it is resampled onto the base's *oriented* output, ISO
+/// 21496-1 §6.2.2, so it must be oriented the same way); a `clap` of the
+/// primary is not copied — the map covers the displayed region.
 fn add_gain_map(
     w: &mut HeifWriter,
     base: u32,
@@ -2681,8 +2830,7 @@ fn add_gain_map(
             }
         }
     }
-    props.extend(clap_for(&pic, vis));
-    props.extend(transform_props(opts));
+    props.extend(companion_chain(&pic, vis, opts, true));
     let gain_id = w.add_coded_item(pic.item_type, pic.data, props);
     let mut tprops = vec![(
         Property::Pixi(Pixi {
@@ -2731,6 +2879,7 @@ pub fn encode_overlay_into(
     spec: &OverlaySpec,
     opts: &EncodeOptions,
 ) -> Result<u32> {
+    validate_transforms(opts)?;
     if spec.layers.is_empty() {
         return Err(HeifError::invalid("overlay: no layers"));
     }
@@ -2837,6 +2986,16 @@ fn thumbnail_source(colour: &HeifFrame, opts: &EncodeOptions) -> Result<Option<H
         return Ok(None);
     };
     let max_dim = max_dim.max(1);
+    // The thumbnail pictures the displayed region: the caller's crop is
+    // cut off here and not written on the (differently sized) item.
+    let cropped;
+    let colour = match user_clap(opts) {
+        Some(c) => {
+            cropped = crate::compose::apply_clap(colour, c)?;
+            &cropped
+        }
+        None => colour,
+    };
     if colour.width.max(colour.height) <= max_dim {
         return Ok(None);
     }
@@ -2857,8 +3016,7 @@ fn add_thumbnail_item(
     let padded = pad_owned(small, alignment(opts))?;
     let pic = encode_picture(padded, opts)?;
     let mut props = coded_props(&pic, &opts.colr, None);
-    props.extend(clap_for(&pic, vis));
-    props.extend(transform_props(opts));
+    props.extend(companion_chain(&pic, vis, opts, true));
     w.add_thumbnail(master, pic.item_type, pic.data, props);
     Ok(())
 }

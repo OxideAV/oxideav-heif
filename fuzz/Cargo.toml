@@ -39,6 +39,14 @@ cargo-fuzz = true
 #  * `heif_framework` — the framework path: registry probe, the `"heif"`
 #                      demuxer (streams, packets, seeks), the `"heif"`
 #                      decoder under tight decoder options, the muxer.
+#  * `heif_writer`    — the writer → reader path: a corpus file re-muxed
+#                      through `HeifWriter::from_files` (same picture,
+#                      colour, metadata; truthful brands), or bytes
+#                      driving the high-level encoder (geometry, layout,
+#                      codec, transforms on the items or an `iden`, grid,
+#                      thumbnail, alpha, depth, metadata, `iovl`) whose
+#                      file re-parses, passes the MIAF checks, decodes
+#                      and re-muxes to itself.
 #
 # `heif_decode` needs the default `registry` feature (the codec crates
 # have their own harnesses; here they are reached only through valid
@@ -111,5 +119,11 @@ doc = false
 [[bin]]
 name = "heif_framework"
 path = "fuzz_targets/heif_framework.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "heif_writer"
+path = "fuzz_targets/heif_writer.rs"
 test = false
 doc = false

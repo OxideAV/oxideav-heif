@@ -45,10 +45,6 @@ fn ensure_444(f: &HeifFrame, x_odd: bool, y_odd: bool) -> Result<std::borrow::Co
     }
 }
 
-fn same_layout(a: &HeifFrame, b: &HeifFrame) -> bool {
-    a.format.chroma == b.format.chroma && a.format.bit_depth == b.format.bit_depth
-}
-
 /// Copy the `w × h` block of `src` at `(sx, sy)` into `dst` at `(dx, dy)`
 /// (luma coordinates; every plane copied at its own resolution). The
 /// caller guarantees the chroma alignment.
@@ -659,14 +655,21 @@ pub fn composite_overlay(
         .first()
         .ok_or_else(|| HeifError::invalid("iovl: no inputs"))?
         .frame;
+    // MIAF §7.3.11.3: the inputs share a bit depth. Their chroma
+    // sampling may differ once each item's own transforms ran (an
+    // odd-sized 4:2:0 input comes out of its `clap` promoted to 4:4:4,
+    // an even-sized one does not): mixed samplings compose in 4:4:4.
     for (i, inp) in inputs.iter().enumerate() {
-        if !same_layout(inp.frame, first) {
+        if inp.frame.format.bit_depth != first.format.bit_depth {
             return Err(HeifError::unsupported(format!(
-                "iovl: input {i} layout {:?} differs from input 0 {:?}",
-                inp.frame.format, first.format
+                "iovl: input {i} bit depth {} differs from input 0's {}",
+                inp.frame.format.bit_depth, first.format.bit_depth
             )));
         }
     }
+    let mixed_chroma = inputs
+        .iter()
+        .any(|i| i.frame.format.chroma != first.format.chroma);
     let depth = first.format.bit_depth;
     let max = ((1u32 << depth) - 1) as u64;
     let fill_alpha = (desc.canvas_fill[3] as u64 * max + 32767) / 65535;
@@ -680,6 +683,7 @@ pub fn composite_overlay(
     let any_alpha =
         first.format.chroma != Chroma::Mono && inputs.iter().any(|i| i.frame.format.has_alpha);
     let promote = any_alpha
+        || mixed_chroma
         || needs_444(
             first.format.chroma,
             desc.offsets.iter().any(|(h, _)| h.rem_euclid(2) == 1) || desc.output_width % 2 == 1,
