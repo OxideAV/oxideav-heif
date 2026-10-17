@@ -132,5 +132,9 @@ fn every_corpus_primary_remuxes_to_the_same_image() {
         refused.len(),
         refused
     );
-    assert!(remuxed >= 60, "only {remuxed} files re-muxed");
+    // Every decodable input re-muxes (nothing is refused), and the
+    // vendored set alone (57 files on CI, without the docs corpus)
+    // clears the floor.
+    assert!(refused.is_empty(), "refused: {refused:?}");
+    assert!(remuxed >= 50, "only {remuxed} files re-muxed");
 }
