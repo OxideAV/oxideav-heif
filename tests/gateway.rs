@@ -1,12 +1,12 @@
-//! The gateway contract of the registry encoders (round 476): the
-//! `"avif"` codec id writes AV1 into an `avif`-branded file where
-//! `"heif"` writes HEVC into a `heic` one, and the gateway's advisory
-//! `quality` steers every codec.
+//! The gateway contract of the registry encoder (round 476): the
+//! gateway's advisory `quality` steers every codec of the `"heif"`
+//! encoder, and the `"heif"` muxer writes a foreign `avif` encoder's
+//! still stream through like its own (`.avif` encoding goes through
+//! oxideav-avif's `avif` encoder on this muxer).
 #![cfg(feature = "registry")]
 
-use oxideav_core::{CodecId, CodecOptions, CodecParameters, Decoder, Frame, RuntimeContext};
+use oxideav_core::{CodecId, CodecOptions, CodecParameters, Frame, RuntimeContext};
 use oxideav_heif::image::{Chroma, HeifFrame, HeifPixelFormat};
-use oxideav_heif::HeifFile;
 
 fn context() -> RuntimeContext {
     let mut ctx = RuntimeContext::new();
@@ -60,25 +60,6 @@ fn encode(ctx: &RuntimeContext, id: &str, src: &HeifFrame, opts: &[(&str, &str)]
     enc.receive_packet().unwrap().data
 }
 
-fn decode_through(ctx: &RuntimeContext, id: &str, bytes: &[u8]) -> HeifFrame {
-    let f = HeifFile::parse(bytes).unwrap();
-    let info = oxideav_heif::info(bytes).unwrap();
-    let mut params = CodecParameters::video(CodecId::new(id));
-    params.width = Some(info.width);
-    params.height = Some(info.height);
-    let mut dec: Box<dyn Decoder> = ctx.codecs.first_decoder(&params).unwrap();
-    assert_eq!(dec.codec_id().as_str(), id);
-    let pkt = oxideav_core::Packet::new(0, oxideav_core::TimeBase::new(1, 1), bytes.to_vec())
-        .with_pts(0)
-        .with_keyframe(true);
-    dec.send_packet(&pkt).unwrap();
-    let Frame::Video(_) = dec.receive_frame().unwrap() else {
-        panic!("video frame")
-    };
-    drop(f);
-    oxideav_heif::decode(bytes).unwrap().to_frame().unwrap()
-}
-
 fn has_fourcc(bytes: &[u8], t: &[u8; 4]) -> bool {
     bytes.windows(4).any(|w| w == t)
 }
@@ -95,62 +76,57 @@ fn psnr_y(a: &HeifFrame, b: &HeifFrame) -> f64 {
     10.0 * (255.0f64 * 255.0 / mse.max(1e-9)).log10()
 }
 
-/// `"avif"` → AV1 in an `avif`-branded file; `"heif"` → HEVC in a
-/// `heic` one; each id's decoder opens both.
+/// The gateway's write path through the muxer: a `"heif"` encoder
+/// packet (a `heic` / `heix` file with `hvc1`) and a foreign `avif`
+/// encoder's packet — one `avif`-branded file, built here with the
+/// contract API the way oxideav-avif's encoder emits it, on a stream
+/// whose codec id is `avif` — both pass through the `"heif"` muxer
+/// unchanged.
 #[test]
-fn avif_codec_id_writes_av1_into_an_avif_branded_file() {
+fn still_muxer_passes_heif_and_avif_still_streams_through() {
     let ctx = context();
     let src = picture(64, 48);
-    let avif = encode(&ctx, "avif", &src, &[]);
-    assert_eq!(&avif[4..8], b"ftyp");
-    assert_eq!(&avif[8..12], b"avif", "avif major brand");
-    assert!(has_fourcc(&avif, b"av01") && !has_fourcc(&avif, b"hvc1"));
-    let heic = encode(&ctx, "heif", &src, &[]);
-    assert_eq!(&heic[8..12], b"heic", "heic major brand");
-    assert!(has_fourcc(&heic, b"hvc1") && !has_fourcc(&heic, b"av01"));
-    // The "heif" id is unchanged: codec=hevc by default, codec=av1 on
-    // request yields the avif encoder's bytes.
-    assert_eq!(encode(&ctx, "heif", &src, &[("codec", "av1")]), avif);
-    assert_eq!(encode(&ctx, "avif", &src, &[("codec", "hevc")]), heic);
-    for (id, bytes) in [
-        ("avif", &avif),
-        ("heif", &heic),
-        ("avif", &heic),
-        ("heif", &avif),
+    let (vf, pf) = src.to_core().unwrap();
+    // The heif encoder's packet.
+    let mut params = CodecParameters::video(CodecId::new("heif"));
+    params.width = Some(src.width);
+    params.height = Some(src.height);
+    params.pixel_format = Some(pf);
+    let mut enc = ctx.codecs.first_encoder(&params).unwrap();
+    enc.send_frame(&Frame::Video(vf)).unwrap();
+    enc.flush().unwrap();
+    let heif_pkt = enc.receive_packet().unwrap();
+    let heif_params = enc.output_params().clone();
+    // A foreign avif encoder's packet: one avif-branded file.
+    let avif_bytes = oxideav_heif::encode_still(
+        &src,
+        &oxideav_heif::encode::EncodeOptions::default()
+            .with_codec(oxideav_heif::encode::StillCodec::Av1),
+    )
+    .unwrap();
+    let avif_pkt = oxideav_core::Packet::new(0, oxideav_core::TimeBase::new(1, 1), avif_bytes)
+        .with_pts(0)
+        .with_keyframe(true);
+    let mut avif_params = CodecParameters::video(CodecId::new("avif"));
+    avif_params.width = Some(src.width);
+    avif_params.height = Some(src.height);
+    avif_params.pixel_format = Some(pf);
+    for (id, params, pkt, brands, item) in [
+        (
+            "heif",
+            heif_params,
+            heif_pkt,
+            &[b"heic", b"heix"][..],
+            b"hvc1",
+        ),
+        ("avif", avif_params, avif_pkt, &[b"avif"][..], b"av01"),
     ] {
-        let got = decode_through(&ctx, id, bytes);
-        assert_eq!((got.width, got.height), (64, 48), "{id}");
-        assert!(psnr_y(&src, &got) > 30.0, "{id}");
-    }
-}
-
-/// The gateway's full write path: frame → `"avif"` encoder → `"heif"`
-/// muxer writes the encoder's packet through unchanged — an
-/// `avif`-branded file carrying `av01`; the `"heif"` encoder's goes
-/// through as a `heic` / `heix` file.
-#[test]
-fn still_muxer_passes_the_avif_and_heif_encoders_through() {
-    let ctx = context();
-    let src = picture(64, 48);
-    for (id, brands, item) in [
-        ("avif", &[b"avif"][..], b"av01"),
-        ("heif", &[b"heic", b"heix"][..], b"hvc1"),
-    ] {
-        let (vf, pf) = src.to_core().unwrap();
-        let mut params = CodecParameters::video(CodecId::new(id));
-        params.width = Some(src.width);
-        params.height = Some(src.height);
-        params.pixel_format = Some(pf);
-        let mut enc = ctx.codecs.first_encoder(&params).unwrap();
-        enc.send_frame(&Frame::Video(vf)).unwrap();
-        enc.flush().unwrap();
-        let pkt = enc.receive_packet().unwrap();
         let stream = oxideav_core::StreamInfo {
             index: 0,
             time_base: oxideav_core::TimeBase::new(1, 1),
             duration: Some(1),
             start_time: Some(0),
-            params: enc.output_params().clone(),
+            params,
         };
         let path = std::env::temp_dir().join(format!(
             "oxideav-heif-gateway-{id}-{}.bin",
@@ -259,8 +235,8 @@ fn quality_governs_every_codec() {
 
 /// The AV1 rule of the gateway `quality` (round 476): an explicit
 /// `quality` < 100 with no explicit `mode` codes `mode=intra` at that
-/// quality — a 16x16 RGB picture through the `avif` encoder and through
-/// `heif` + `codec=av1` shrinks and loses PSNR from 100 to 90 to 50;
+/// quality — a 16x16 RGB picture through `heif` + `codec=av1` shrinks
+/// and loses PSNR from 100 to 90 to 50;
 /// `quality` 100 is the lossless coding (`mode=pcm`'s bytes); absent,
 /// today's default (quality 60).
 #[test]
@@ -311,7 +287,8 @@ fn av1_quality_selects_a_lossy_intra_coding() {
             .sum();
         10.0 * (255.0f64 * 255.0 / (se / a.len() as f64).max(1e-9)).log10()
     };
-    for (id, base) in [("avif", &[][..]), ("heif", &[("codec", "av1")][..])] {
+    {
+        let (id, base) = ("heif", &[("codec", "av1")][..]);
         let mut sizes = Vec::new();
         let mut psnrs = Vec::new();
         for q in ["100", "90", "50"] {
@@ -357,39 +334,28 @@ fn av1_quality_selects_a_lossy_intra_coding() {
     }
 }
 
-/// Through `oxideav_core`'s registry alone (no gateway): the `avif`
-/// implementation carries the `heif` one's capabilities (the 26
-/// accepted layouts, lossy + lossless), and `params.options` `quality`
-/// drives both ids' AV1 bytes on a 16x16 `Yuv420P` / `Yuv444P` /
-/// `Rgb24` frame — 100 (lossless, the largest) > none (quality 60) >
-/// 50; an `Rgb24` frame at quality 50 comes back as lossy YCbCr, at 100
-/// as the lossless identity `Gbrp8` item.
+/// Through `oxideav_core`'s registry alone (no gateway): the `heif`
+/// implementation declares its 26 accepted layouts, lossy + lossless,
+/// and `params.options` `quality` with `codec=av1` drives the AV1
+/// bytes on a 16x16 `Yuv420P` / `Yuv444P` / `Rgb24` frame — 100
+/// (lossless, the largest) > none (quality 60) > 50; an `Rgb24` frame
+/// at quality 50 comes back as lossy YCbCr, at 100 as the lossless
+/// identity `Gbrp8` item.
 #[test]
-fn registry_avif_capabilities_and_quality_bytes() {
+fn registry_heif_capabilities_and_av1_quality_bytes() {
     let ctx = context();
-    let caps_of = |id: &str| {
-        let impls = ctx.codecs.implementations(&CodecId::new(id));
-        assert_eq!(impls.len(), 1, "{id}: one implementation");
-        impls[0].caps.clone()
-    };
-    let (heif, avif) = (caps_of("heif"), caps_of("avif"));
+    let impls = ctx.codecs.implementations(&CodecId::new("heif"));
+    assert_eq!(impls.len(), 1, "heif: one implementation");
+    let heif = impls[0].caps.clone();
     assert_eq!(
         heif.accepted_pixel_formats.len(),
         26,
         "heif accepted layouts"
     );
-    assert_eq!(
-        avif.accepted_pixel_formats, heif.accepted_pixel_formats,
-        "avif accepts what heif accepts"
-    );
-    assert!(heif.lossy && heif.lossless && avif.lossy && avif.lossless);
-    assert_eq!(
-        ctx.codecs
-            .encoder_options_schema(&CodecId::new("avif"))
-            .map(|s| s.len()),
-        ctx.codecs
-            .encoder_options_schema(&CodecId::new("heif"))
-            .map(|s| s.len())
+    assert!(heif.lossy && heif.lossless);
+    assert!(
+        !ctx.codecs.has_encoder(&CodecId::new("avif")),
+        "avif is oxideav-avif's id"
     );
     for pf in [
         oxideav_core::PixelFormat::Yuv420P,
@@ -412,7 +378,8 @@ fn registry_avif_capabilities_and_quality_bytes() {
                 })
                 .collect(),
         };
-        for (id, base) in [("avif", &[][..]), ("heif", &[("codec", "av1")][..])] {
+        {
+            let (id, base) = ("heif", &[("codec", "av1")][..]);
             let encode = |q: Option<&str>| -> (Vec<u8>, oxideav_heif::PixelFormat) {
                 let mut params = CodecParameters::video(CodecId::new(id));
                 params.width = Some(16);

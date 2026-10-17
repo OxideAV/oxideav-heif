@@ -340,11 +340,13 @@ refused before anything is coded; a layout the codec cannot take is
 
 ## Options
 
-Gateway contract (r476): the same codec is registered as `"heif"`
-(encoder default `codec=hevc`, a `heic` file) and `"avif"` (default
-`codec=av1`, an `avif` / `avis`-branded file), so a gateway picking
-the encoder by the requested extension gets the right coding; both
-decoders open every HEIF-family file. The framework `quality`
+Gateway contract (r476): this crate registers the `heif` codec id
+only (encoder default `codec=hevc`, a `heic` file; `codec=av1` writes
+an `avif`-branded file) — the `avif` codec id belongs to oxideav-avif's
+own still encoder, whose packets the `"heif"` muxer writes through
+exactly like a `heif` still stream's, so a gateway writes `.avif`
+through that encoder on this muxer and `.heic` through the `heif`
+encoder; both decode here. The framework `quality`
 (0..=100) steers every codec: AV1 codes `mode=intra` at it (an
 explicit `quality` < 100 without a `mode` is lossy; 100 is the
 lossless coding, the same bytes as `mode=pcm`; absent = 60), and on

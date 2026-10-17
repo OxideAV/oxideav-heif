@@ -3089,9 +3089,6 @@ pub struct HeifEncoderOptions {
     /// 8-bit 4:2:0, the High-family profiles otherwise) instead of
     /// CAVLC. Other codecs ignore it.
     pub cabac: bool,
-    /// `codec` was given (an absent `codec` follows the codec id the
-    /// encoder was made under: `"avif"` → AV1, else HEVC).
-    codec_given: bool,
     /// `qp` was given (an absent `qp` follows `quality` when that was
     /// given, else [`DEFAULT_QP`]).
     qp_given: bool,
@@ -3139,7 +3136,6 @@ impl HeifEncoderOptions {
             filters,
             chroma,
             cabac: false,
-            codec_given: false,
             qp_given: false,
             quality_given: false,
             mode_given: false,
@@ -3149,7 +3145,6 @@ impl HeifEncoderOptions {
     /// Set `codec`.
     pub fn with_codec(mut self, codec: String) -> Self {
         self.codec = codec;
-        self.codec_given = true;
         self
     }
 
@@ -3266,7 +3261,6 @@ impl Default for HeifEncoderOptions {
             filters: "on".into(),
             chroma: "420".into(),
             cabac: false,
-            codec_given: false,
             qp_given: false,
             quality_given: false,
             mode_given: false,
@@ -3378,10 +3372,7 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
 
     fn apply(&mut self, key: &str, value: &oxideav_core::OptionValue) -> CoreResult<()> {
         match key {
-            "codec" => {
-                self.codec = value.as_str()?.to_string();
-                self.codec_given = true;
-            }
+            "codec" => self.codec = value.as_str()?.to_string(),
             "mode" => {
                 self.mode = value.as_str()?.to_string();
                 self.mode_given = true;
@@ -3425,22 +3416,13 @@ pub fn qp_of_quality(quality: u32) -> u8 {
 }
 
 impl HeifEncoderOptions {
-    /// The `EncodeOptions` these settings describe for the `"heif"`
-    /// codec id ([`Self::to_encode_options_for`]).
-    pub fn to_encode_options(&self) -> CoreResult<EncodeOptions> {
-        self.to_encode_options_for(crate::demux::CODEC_ID)
-    }
-
-    /// The `EncodeOptions` these settings describe for an encoder made
-    /// under `codec_id` (round 476): an absent `codec` is AV1 under
-    /// `"avif"` (the gateway's `.avif` route) and HEVC otherwise; an
+    /// The `EncodeOptions` these settings describe (round 476): an
     /// absent `qp` on HEVC / VVC / AVC follows a given `quality`
     /// ([`qp_of_quality`]; `quality` 100 without a `mode` is the
     /// lossless `pcm`), else [`DEFAULT_QP`] — so bytes with neither
-    /// given are unchanged.
-    pub fn to_encode_options_for(&self, codec_id: &str) -> CoreResult<EncodeOptions> {
+    /// given are unchanged; AV1 codes `mode=intra` at `quality`.
+    pub fn to_encode_options(&self) -> CoreResult<EncodeOptions> {
         let codec = match self.codec.as_str() {
-            _ if !self.codec_given && codec_id == crate::demux::CODEC_ID_AVIF => StillCodec::Av1,
             "hevc" | "h265" => StillCodec::Hevc,
             "av1" => StillCodec::Av1,
             "vvc" | "h266" => StillCodec::Vvc,
@@ -3552,7 +3534,7 @@ impl HeifEncoder {
     /// `thumbnail`, `range`, `threads`, …); unknown keys are refused.
     pub fn new(params: &CodecParameters) -> CoreResult<Self> {
         let typed = oxideav_core::parse_options::<HeifEncoderOptions>(&params.options)?;
-        let opts = typed.to_encode_options_for(params.codec_id.as_str())?;
+        let opts = typed.to_encode_options()?;
         Ok(Self {
             params: params.clone(),
             explicit_threads: opts.threads.is_some(),

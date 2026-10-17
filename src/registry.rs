@@ -16,7 +16,7 @@
 
 use oxideav_core::{CodecCapabilities, CodecId, CodecInfo, RuntimeContext};
 
-use crate::demux::{make_decoder, open, probe, CODEC_ID, CODEC_ID_AVIF, CONTAINER_NAME};
+use crate::demux::{make_decoder, open, probe, CODEC_ID, CONTAINER_NAME};
 use crate::encode::make_encoder;
 use crate::mux::open_muxer;
 
@@ -56,20 +56,18 @@ pub fn register_codecs(reg: &mut oxideav_core::CodecRegistry) {
         .with_lossy(true)
         .with_lossless(true)
         .with_pixel_formats(crate::encode::ENCODER_PIXEL_FORMATS.to_vec());
-    // The same codec under two ids (round 476): `"heif"` (encoder
-    // default HEVC, `heic`) and `"avif"` (encoder default AV1, `avif`
-    // / `avis` brands) — a gateway that resolves the codec by the
-    // requested extension writes the right coding into each.
-    for id in [CODEC_ID, CODEC_ID_AVIF] {
-        reg.register(
-            CodecInfo::new(CodecId::new(id))
-                .capabilities(caps.clone())
-                .decoder(make_decoder)
-                .encoder(make_encoder)
-                .encoder_options::<crate::encode::HeifEncoderOptions>()
-                .decoder_options::<crate::demux::HeifDecoderOptions>(),
-        );
-    }
+    // One codec id, `"heif"`: the `avif` id belongs to oxideav-avif (its
+    // own still encoder); `.avif` files are written by that encoder
+    // through this crate's muxer, which takes its still stream like a
+    // `heif` one (`mux`).
+    reg.register(
+        CodecInfo::new(CodecId::new(CODEC_ID))
+            .capabilities(caps)
+            .decoder(make_decoder)
+            .encoder(make_encoder)
+            .encoder_options::<crate::encode::HeifEncoderOptions>()
+            .decoder_options::<crate::demux::HeifDecoderOptions>(),
+    );
 }
 
 oxideav_core::register!("heif", register);
@@ -112,11 +110,9 @@ mod tests {
         assert!(ctx.containers.demuxer_names().any(|n| n == CONTAINER_NAME));
         assert!(ctx.containers.muxer_names().any(|n| n == CONTAINER_NAME));
         assert!(ctx.codecs.has_decoder(&CodecId::new(CODEC_ID)));
-        assert!(ctx.codecs.has_decoder(&CodecId::new(CODEC_ID_AVIF)));
-        assert!(ctx
-            .codecs
-            .encoder_options_schema(&CodecId::new(CODEC_ID_AVIF))
-            .is_some());
+        // The `avif` codec id is oxideav-avif's, never registered here.
+        assert!(!ctx.codecs.has_decoder(&CodecId::new("avif")));
+        assert!(!ctx.codecs.has_encoder(&CodecId::new("avif")));
         // The encoder declares its option schema.
         let schema = ctx
             .codecs
