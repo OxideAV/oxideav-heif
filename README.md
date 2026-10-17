@@ -340,6 +340,17 @@ refused before anything is coded; a layout the codec cannot take is
 
 ## Options
 
+Gateway contract (r476): the same codec is registered as `"heif"`
+(encoder default `codec=hevc`, a `heic` file) and `"avif"` (default
+`codec=av1`, an `avif` / `avis`-branded file), so a gateway picking
+the encoder by the requested extension gets the right coding; both
+decoders open every HEIF-family file. The framework `quality`
+(0..=100) steers every codec: AV1's own scale, and on HEVC / VVC / AVC
+— when `qp` is not given — `qp = round((100 − quality) × 51 / 100)`
+(90 → 5, 50 → 26, 0 → 51), with `quality` 100 the lossless `pcm` mode
+unless `mode` is given; an explicit `qp` wins; neither given keeps
+today's defaults (qp 18, AV1 quality 60).
+
 `DecodeOptions` (`Default` + `with_*`): `max_width` / `max_height`
 (`Some(2²⁰)`), `max_pixels` (`Some(2³⁰)`), `max_bytes` (`Some(4 GiB)`;
 `None` = unlimited) — checked against the header before any decode or

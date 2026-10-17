@@ -56,6 +56,12 @@ use crate::sequence::{parse_movie, sample_bytes, Movie, Track};
 pub const CONTAINER_NAME: &str = "heif";
 /// Codec id of the still-image decoder.
 pub const CODEC_ID: &str = "heif";
+/// The second id the same codec is registered under (round 476): the
+/// `"avif"` decoder accepts what `"heif"` accepts; the `"avif"` encoder
+/// defaults to `codec=av1` (an `avif`-branded file — `avis` for
+/// sequences) where `"heif"` defaults to HEVC, so a gateway resolving
+/// the codec by the requested extension writes AV1 into `.avif`.
+pub const CODEC_ID_AVIF: &str = "avif";
 /// Maximum file size the demuxer reads into memory.
 pub const MAX_FILE_BYTES: u64 = 1 << 32;
 

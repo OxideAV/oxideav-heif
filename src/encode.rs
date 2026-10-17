@@ -3089,6 +3089,16 @@ pub struct HeifEncoderOptions {
     /// 8-bit 4:2:0, the High-family profiles otherwise) instead of
     /// CAVLC. Other codecs ignore it.
     pub cabac: bool,
+    /// `codec` was given (an absent `codec` follows the codec id the
+    /// encoder was made under: `"avif"` → AV1, else HEVC).
+    codec_given: bool,
+    /// `qp` was given (an absent `qp` follows `quality` when that was
+    /// given, else [`DEFAULT_QP`]).
+    qp_given: bool,
+    /// `quality` was given.
+    quality_given: bool,
+    /// `mode` was given (`quality=100` without a `mode` is lossless).
+    mode_given: bool,
 }
 impl HeifEncoderOptions {
     /// Every field as a positional argument, in declaration order
@@ -3129,24 +3139,31 @@ impl HeifEncoderOptions {
             filters,
             chroma,
             cabac: false,
+            codec_given: false,
+            qp_given: false,
+            quality_given: false,
+            mode_given: false,
         }
     }
 
     /// Set `codec`.
     pub fn with_codec(mut self, codec: String) -> Self {
         self.codec = codec;
+        self.codec_given = true;
         self
     }
 
     /// Set `mode`.
     pub fn with_mode(mut self, mode: String) -> Self {
         self.mode = mode;
+        self.mode_given = true;
         self
     }
 
     /// Set `qp`.
     pub fn with_qp(mut self, qp: u32) -> Self {
         self.qp = qp;
+        self.qp_given = true;
         self
     }
 
@@ -3171,6 +3188,7 @@ impl HeifEncoderOptions {
     /// Set `quality`.
     pub fn with_quality(mut self, quality: u32) -> Self {
         self.quality = quality;
+        self.quality_given = true;
         self
     }
 
@@ -3248,6 +3266,10 @@ impl Default for HeifEncoderOptions {
             filters: "on".into(),
             chroma: "420".into(),
             cabac: false,
+            codec_given: false,
+            qp_given: false,
+            quality_given: false,
+            mode_given: false,
         }
     }
 }
@@ -3296,7 +3318,7 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             name: "quality",
             kind: oxideav_core::OptionKind::U32,
             default: oxideav_core::OptionValue::U32(60),
-            help: "AV1 quality 0..=100 for mode=intra (100 = lossless; mode=pcm is lossless too)",
+            help: "Quality 0..=100 for mode=intra: AV1's own scale (100 = lossless); on HEVC / VVC / AVC, when qp is not given, qp = round((100 - quality) * 51 / 100) and 100 is lossless (mode=pcm) unless mode is given; neither given = qp 18 / AV1 quality 60",
         },
         oxideav_core::OptionField {
             name: "speed",
@@ -3356,13 +3378,25 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
 
     fn apply(&mut self, key: &str, value: &oxideav_core::OptionValue) -> CoreResult<()> {
         match key {
-            "codec" => self.codec = value.as_str()?.to_string(),
-            "mode" => self.mode = value.as_str()?.to_string(),
-            "qp" => self.qp = value.as_u32()?,
+            "codec" => {
+                self.codec = value.as_str()?.to_string();
+                self.codec_given = true;
+            }
+            "mode" => {
+                self.mode = value.as_str()?.to_string();
+                self.mode_given = true;
+            }
+            "qp" => {
+                self.qp = value.as_u32()?;
+                self.qp_given = true;
+            }
             "grid" => self.grid = value.as_str()?.to_string(),
             "thumbnail" => self.thumbnail = value.as_u32()?,
             "range" => self.range = value.as_str()?.to_string(),
-            "quality" => self.quality = value.as_u32()?,
+            "quality" => {
+                self.quality = value.as_u32()?;
+                self.quality_given = true;
+            }
             "speed" => self.speed = value.as_str()?.to_string(),
             "rd" => self.rd = value.as_u32()?,
             "tiles" => self.tiles = value.as_str()?.to_string(),
@@ -3382,9 +3416,52 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
     }
 }
 
+/// The HEVC / VVC / AVC quantiser a gateway `quality` (0..=100) maps
+/// to when `qp` is not given (round 476): `round((100 − quality) × 51
+/// / 100)` — monotone, 0 → 51, 50 → 26, 90 → 5, 99 → 1; `quality` 100
+/// is the lossless mode instead ([`HeifEncoderOptions::to_encode_options`]).
+pub fn qp_of_quality(quality: u32) -> u8 {
+    (((100 - quality.min(100)) * 51 + 50) / 100) as u8
+}
+
 impl HeifEncoderOptions {
-    /// The `EncodeOptions` these settings describe.
+    /// The `EncodeOptions` these settings describe for the `"heif"`
+    /// codec id ([`Self::to_encode_options_for`]).
     pub fn to_encode_options(&self) -> CoreResult<EncodeOptions> {
+        self.to_encode_options_for(crate::demux::CODEC_ID)
+    }
+
+    /// The `EncodeOptions` these settings describe for an encoder made
+    /// under `codec_id` (round 476): an absent `codec` is AV1 under
+    /// `"avif"` (the gateway's `.avif` route) and HEVC otherwise; an
+    /// absent `qp` on HEVC / VVC / AVC follows a given `quality`
+    /// ([`qp_of_quality`]; `quality` 100 without a `mode` is the
+    /// lossless `pcm`), else [`DEFAULT_QP`] — so bytes with neither
+    /// given are unchanged.
+    pub fn to_encode_options_for(&self, codec_id: &str) -> CoreResult<EncodeOptions> {
+        let codec = match self.codec.as_str() {
+            _ if !self.codec_given && codec_id == crate::demux::CODEC_ID_AVIF => StillCodec::Av1,
+            "hevc" | "h265" => StillCodec::Hevc,
+            "av1" => StillCodec::Av1,
+            "vvc" | "h266" => StillCodec::Vvc,
+            "avc" | "h264" => StillCodec::Avc,
+            other => {
+                return Err(CoreError::invalid(format!(
+                    "heif: unknown codec option '{other}'"
+                )))
+            }
+        };
+        let quality_steers = codec != StillCodec::Av1 && !self.qp_given && self.quality_given;
+        let mode = if quality_steers && !self.mode_given && self.quality >= 100 {
+            "pcm".to_string()
+        } else {
+            self.mode.clone()
+        };
+        let qp = if quality_steers {
+            qp_of_quality(self.quality)
+        } else {
+            u8::try_from(self.qp.min(51)).unwrap_or(51)
+        };
         let grid_tile = match self.grid.trim() {
             "" | "auto" => None,
             "none" | "0" => Some(0),
@@ -3400,23 +3477,13 @@ impl HeifEncoderOptions {
             })?),
         };
         let mut opts = EncodeOptions {
-            codec: match self.codec.as_str() {
-                "hevc" | "h265" => StillCodec::Hevc,
-                "av1" => StillCodec::Av1,
-                "vvc" | "h266" => StillCodec::Vvc,
-                "avc" | "h264" => StillCodec::Avc,
-                other => {
-                    return Err(CoreError::invalid(format!(
-                        "heif: unknown codec option '{other}'"
-                    )))
-                }
-            },
-            hevc_mode: self.mode.clone(),
-            qp: u8::try_from(self.qp.min(51)).unwrap_or(51),
+            codec,
+            hevc_mode: mode.clone(),
+            qp,
             grid_tile,
             thumbnail_max_dim: (self.thumbnail > 0).then_some(self.thumbnail),
             // AV1: `mode=pcm` is lossless, `mode=intra` codes at `quality`.
-            av1_quality: (self.mode != "pcm").then_some(self.quality.min(100) as u8),
+            av1_quality: (mode != "pcm").then_some(self.quality.min(100) as u8),
             av1_speed: self.speed.clone(),
             hevc_rd: (self.rd <= 2).then_some(self.rd),
             hevc_tiles: (!self.tiles.is_empty()).then_some(self.tiles.clone()),
@@ -3485,7 +3552,7 @@ impl HeifEncoder {
     /// `thumbnail`, `range`, `threads`, …); unknown keys are refused.
     pub fn new(params: &CodecParameters) -> CoreResult<Self> {
         let typed = oxideav_core::parse_options::<HeifEncoderOptions>(&params.options)?;
-        let opts = typed.to_encode_options()?;
+        let opts = typed.to_encode_options_for(params.codec_id.as_str())?;
         Ok(Self {
             params: params.clone(),
             explicit_threads: opts.threads.is_some(),
