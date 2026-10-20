@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! heifenc out.heic [--size WxH] [--codec hevc|av1|vvc] [--mode pcm|intra]
-//!         [--qp N] [--grid TILE] [--thumb MAXDIM] [--alpha] [--gray]
+//!         [--qp N] [--grid TILE] [--tiling grid|tili] [--thumb MAXDIM] [--alpha] [--gray]
 //!         [--irot ANGLE] [--imir AXIS] [--clap] [--exif] [--xmp] [--icc]
 //!         [--framework] [--png reference.png]
 //! ```
@@ -55,6 +55,12 @@ fn main() {
             "--mode" => opts.hevc_mode = next(&mut i),
             "--qp" => opts.qp = next(&mut i).parse().unwrap(),
             "--grid" => opts.grid_tile = Some(next(&mut i).parse().unwrap()),
+            "--tiling" => {
+                opts.tile_carrier = match next(&mut i).as_str() {
+                    "tili" => oxideav_heif::encode::TileCarrier::Tiled,
+                    _ => oxideav_heif::encode::TileCarrier::Grid,
+                }
+            }
             "--thumb" => opts.thumbnail_max_dim = Some(next(&mut i).parse().unwrap()),
             "--alpha" => alpha = true,
             "--gray" => gray = true,
@@ -186,6 +192,9 @@ fn encode_via_framework(src: &HeifFrame, opts: &EncodeOptions) -> Vec<u8> {
         .set("qp", opts.qp.to_string());
     if let Some(g) = opts.grid_tile {
         o = o.set("grid", g.to_string());
+    }
+    if opts.tile_carrier == oxideav_heif::encode::TileCarrier::Tiled {
+        o = o.set("tiling", "tili");
     }
     if let Some(t) = opts.thumbnail_max_dim {
         o = o.set("thumbnail", t.to_string());

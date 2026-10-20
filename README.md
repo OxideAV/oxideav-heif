@@ -379,7 +379,12 @@ tool knobs: `tiles`, `wpp`, `dep_quant`, `sdh`, `palette`, `mtt_bt`,
 `threads`, `chroma`, `depth_map` (a depth auxiliary, §7.5.3),
 `transform_carrier` (`CodedItem`: the chain as essential properties on
 every displayed item, the default; `Identity`: on an `iden` derived
-item over the un-rotated picture). `encode_overlay` /
+item over the un-rotated picture), `tile_carrier` (`Grid`: a `grid`
+derived item over hidden coded tiles, the default; `Tiled`: one Amd 2
+§6.11 `tili` item — the same tiles behind a `deti` offset table, one
+`tilC` with the shared decoder configuration; applies whenever
+`grid_tile`'s rule tiles the picture, the automatic grid above 4 MP
+included). `encode_overlay` /
 `encode_overlay_into` take an `OverlaySpec` (canvas size and
 `canvas_fill_value`, `OverlayLayer`s with offsets) and write an `iovl`
 over hidden per-layer coded items (alpha auxiliaries where the layers
@@ -388,8 +393,9 @@ have alpha), with the same options applying to the overlay.
 without re-encoding (derivations, auxiliaries, thumbnails, metadata
 items and `altr` alternates come along); the `"heif"` muxer merges a
 still stream's packets (a burst) into one collection through it. The
-framework encoder declares `irot` (quarter turns) and `imir`
-(`vertical` / `horizontal`) next to its other options.
+framework encoder declares `irot` (quarter turns), `imir`
+(`vertical` / `horizontal`) and `tiling` (`grid` / `tili`) next to its
+other options.
 
 ## Metadata and colour
 
@@ -467,7 +473,7 @@ and real-world producers, and the production defaults.
 | Entity groups | `altr` (display order), `ster` / `stem` (stereo, monoscopic fallback), `pymd` (pyramids), `rgpa` (region partitions), `brst` / `eqiv` surfaced; Amd 2:2026 §11.3.5 `unrg` (union of regions) / `corg` (compound region: main + the regions it logically includes) with `Meta::region_items_of` / `region_groups_of` (the `rgan` items with a `cdsc` to an image and the groups over them), writer helpers, `check` rules (`"HEIF-A2 11.3.5.x"`) |
 | MIAF | `MiafProfile` + `check`: §7 general requirements, §8 shared constraints, Annex A HEVC / AV1 codec limits, HEIF Annex L (`"HEIF L.2.3.1"` essential `vvcC`, `"HEIF L.2.4.3"` `vvs1` + `vvnC`, `"HEIF L.4.1.1"` the `vvic` essential-property set on the brand-carrying item), the HEIF Amd 1 `tmap` / `cfen` shalls (`"HEIF-A1 …"`), MIAF Amd 1:2025 §7.3.11.5 (`tmap` in an `altr` with a master image, `"MIAF-A1 …"`), Amd 2 `pixi` / `mif3` / `tili` rules (`"HEIF-A2 …"`) — typed `MiafViolation`s with clause numbers, should-level rules as `advisories`; MIAF Amd 1 Annex A practices: `Meta::display_order` (`altr` collapse), `Track::loop_behaviour` (`elst` `RepeatEdits`) |
 | Image sequences | `moov` / `trak` / `stbl` (`stts` `ctts` `stsc` `stsz` `stz2` `stco` `co64` `stss` `sbgp` `csgp` `sgpd` `tref` `elst`), top-level `prft` / `ssix`, visual sample entries (`hvcC` `av1C` `avcC` `lhvC` `vvcC` `ccst` `auxi` `colr` `clap` `pasp` `clli` `mdcv` `cclv` `amve`; QuickTime zero terminators tolerated), `elst` `RepeatEdits` + `tkhd` duration, §7.2.1 matrix → rotation / mirror; framework `Demuxer` with pts / dts / sync / seek |
-| Writer | `HeifWriter` (coded / grid / overlay / identity / `tmap` / `cfen` / `tili` / `cexg` items, thumbnails, alpha / depth, Exif / XMP (raw bodies, any encoding) / arbitrary `cdsc` items, item names, entity groups with flags and payloads (`pymd` pyramids, `stem` stereo with fallback), de-duplicated `ipco`, MIAF `mdat` order, `deti` data references, truthful brand selection — `miaf` only when the §7 / §8 checks pass on the header about to be written, the Annex A profile brands `MiHB` / `MiHA` / `MiHE` / `MA1B` / `MA1A` / `MiAB` only when the primary's coding family satisfies them (r477); `import_item` / `from_files` re-mux items and whole primaries between files byte for byte — every corpus file re-muxes to the same image (`tests/remux.rs`)); high-level `encode_still` (grid / thumbnail / alpha / depth / gain map / Exif / XMP / ICC / transforms on the items or on an `iden`), `encode_overlay` (`iovl` over hidden layers with alpha, thumbnail of the composite); `SequenceWriter` (`msf1` / `hevc` / `avis` / `vvis`, brand override, `pict` track + `ccst`, HDR sample-entry boxes, `stco` / `co64` per §8.7.5, `stss` when not every sample is a sync sample, looping via `elst`, alpha track, cover-image `meta` that can alias a track sample, the same truthful `miaf` / profile pass on the assembled file; opens in every black-box reader on this machine) |
+| Writer | `HeifWriter` (coded / grid / overlay / identity / `tmap` / `cfen` / `tili` / `cexg` items, thumbnails, alpha / depth, Exif / XMP (raw bodies, any encoding) / arbitrary `cdsc` items, item names, entity groups with flags and payloads (`pymd` pyramids, `stem` stereo with fallback), de-duplicated `ipco`, MIAF `mdat` order, `deti` data references, truthful brand selection — `miaf` only when the §7 / §8 checks pass on the header about to be written, the Annex A profile brands `MiHB` / `MiHA` / `MiHE` / `MA1B` / `MA1A` / `MiAB` only when the primary's coding family satisfies them (r477); `import_item` / `from_files` re-mux items and whole primaries between files byte for byte, `tili` items with their offset table and tile properties (r478) — every corpus file re-muxes to the same image (`tests/remux.rs`)); high-level `encode_still` (grid or `tili` tiling (`TileCarrier`, r478) / thumbnail / alpha / depth / gain map / Exif / XMP / ICC / transforms on the items or on an `iden`), `encode_overlay` (`iovl` over hidden layers with alpha, thumbnail of the composite); `SequenceWriter` (`msf1` / `hevc` / `avis` / `vvis`, brand override, `pict` track + `ccst`, HDR sample-entry boxes, `stco` / `co64` per §8.7.5, `stss` when not every sample is a sync sample, looping via `elst`, alpha track, cover-image `meta` that can alias a track sample, the same truthful `miaf` / profile pass on the assembled file; opens in every black-box reader on this machine) |
 | Gain maps | ISO 21496-1 + HEIF Amd 1:2025 §6.6.2.4 (the published text; "fully applied" = weight ±1.0): `ToneMapImage` body (`version` 0 + C.2 `GainMapMetadata`), `dimg` = [base, gain map] (count 2 enforced), the three `colr` placements and the `tmap` brand (§10.2.6) checked; `DecodedImage::gain_map` (decoded gain-map item + metadata + alternate `colr`), `apply_gain_map(h_target)` → linear RGB in the application space (Formulas 1–3, §6.2.2 resampling, Annex B primaries conversion, single↔multi-channel rules, limited-range clip); `ItemDecoder::tone_mapped()` → the reconstruction in the `tmap` item's `colr` at its `pixi` depth (alpha carried over); writer authors `tmap` items (`HeifWriter::add_tone_map`, `EncodeOptions::gain_map`) with the hidden map, the brand and the `altr` [tmap, base] fallback; matches a black-box tone-mapper within 1 code at every headroom (2 on the half-size map, 7 after a BT.2020→709 conversion of the 16-bit PQ reconstruction), and the tool tone-maps our authored file identically to its own |
 | Colour | `HeifImage::to_rgb8` / `to_rgba8` and `rgb::to_rgb` (16-bit): YCbCr → RGB(A) with the item `colr` matrix / range (H.273), identity (GBR), monochrome, alpha carried; the renderer step over the composed frame. Framework: the effective `nclx` rides as the core `ColorSignal` on streams and frames; identity-matrix 4:4:4 items are planar RGB (`Gbrp*` / `Gbrap*`) end to end |
 | Encoder (`registry`) | `encode_still` / `encode_still_owned` / `encode_still_into`: HEVC (lossless `pcm` or CABAC `intra` at a QP; 4:2:0 at 8 / 10 / 12 bits — deeper sources code Main 10 (`hevc_depth`), in-loop filters on by default (`hevc_filters`), VUI range + colour description, Main Still Picture, `rd` / `tiles` / `ctb` and the wavefront), AV1 stills (lossless or quality 0..=100, `speed`, native 8/10/12-bit 4:0:0–4:4:4, a size-derived tile layout, `av1C` from the codec configuration) or VVC items (oxideav-h266's IDR encoder at `qp` or lossless `pcm`, 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8 / 10 bits, any size — the encoder pads to 8 and crops with the SPS conformance window, an odd edge via `clap` (`VVC_ALIGNMENT` = 2), `vvcC` from the VPS / SPS / PPS with the PTL from the VPS, `vvc_options` tool knobs; no VUI — colour rides `colr` only) items, padding + `clap`, grid tiling (automatic 512-px tiles above 4 MP, MIAF 64-px floor; tiles coded in parallel under `threads`, bytes identical to serial), thumbnails, alpha (per-codec `auxC` URN, single-channel `pixi`, own parameter-set ids; AV1 alpha as a monochrome still), Exif / XMP / ICC, transforms as essential properties on the coded item; `"heif"` framework `Encoder` (frame in — planar YCbCr / grey / planar RGB (`Gbrp*`, coded identity-matrix 4:4:4 by AV1) or packed RGB / RGBA / BGR(A) / 16-bit / grey+alpha converted straight into the coding layout — file out; `set_execution_context` or the `threads` option; declared options `codec` (`hevc` / `av1` / `vvc` / `avc`) / `mode` / `qp` / `grid` / `thumbnail` / `range` / `quality` / `speed` / `rd` / `tiles` / `ctb` / `threads` / `depth` / `filters` / `chroma`); the `"heif"` muxer passes its whole-file packets through, so `oxideav convert in.png out.heic` writes a HEIC (see Production defaults) |
@@ -623,7 +629,23 @@ padded last row / column and an empty tile, `cexg` items with one
 extent per tile and `cfen` items (Y + Cb + Cr at full or half
 resolution, R + G + B under an identity matrix) round-trip through the
 writer and the reader (serial and parallel) to the expected
-composition; no third-party producer of these exists here.
+composition; no third-party producer of these exists here. The
+high-level encoder writes `tili` under `EncodeOptions::tile_carrier =
+TileCarrier::Tiled` (framework `tiling=tili`): the tiles of the grid
+rule (explicit `grid_tile` or the automatic 512-px grid above 4 MP)
+coded as before — in parallel under the budget, bytes identical — and
+packed behind a `deti` offset table with one `tilC` (`tile_item_type`
++ the shared `hvcC` / `av1C` / `avcC` / `vvcC` and the tile `ispe`
+through `tipa`), the item carrying `ispe` (the true size) / `pixi` /
+`colr` / ICC and the transforms; alpha, depth, thumbnail, Exif / XMP
+and the gain map attach to it as to a grid. The picture decodes to
+exactly the grid carrier's output on both paths, passes the MIAF /
+Amd 2 checks, and `import_item` re-muxes a `tili` byte for byte
+(tiles, offset table, `deti` entry, tile properties). No black-box
+reader on this machine implements the 2026 item type: they refuse
+the primary (an unknown item type is dropped from their item list, so
+the `pitm` dangles) and ffmpeg renders the thumbnail instead (see the
+writer-direction table); the carrier stays opt-in.
 
 **Packed `cfen`** (`is_packed_flag = 1`, Amd 1 §6.6.2.5.2 with the Amd
 2:2026 §6.6.2.5.3 region derivation): one coded item's luma plane
@@ -759,7 +781,7 @@ in r474 (no regressions).
 | sequence | exact · track yuv420p | no producer (no such option) | no producer (no such option) | no producer (no such option) | exact · track yuv420p |
 | gain map | no producer (no such option) | no producer (no such option) | no producer (no such option) | no producer (no such option) | no producer (no such option) |
 
-#### Writer direction (this crate → readers; render vs our decode, 8-bit units; refreshed r477)
+#### Writer direction (this crate → readers; render vs our decode, 8-bit units; refreshed r478)
 
 | Written shape | sips | heif-convert | magick | ffmpeg | heif-info |
 |---|---|---|---|---|---|
@@ -795,6 +817,8 @@ in r474 (no regressions).
 | hevc overlay (2 layers, alpha) | Δ max 3 mean 0.48 | Δ max 3 mean 0.41 | Δ max 3 mean 0.41 | Δ max 201 mean 47.22 (renders 88×72; overlap compared) | opens |
 | av1 overlay (2 layers, alpha) | Δ max 3 mean 0.48 | Δ max 3 mean 0.41 | Δ max 3 mean 0.41 | Δ max 201 mean 47.22 (renders 88×72; overlap compared) | opens |
 | hevc grid 64 + thumbnail | Δ max 2 mean 0.62 | exact | exact | exact | opens |
+| hevc tili 64 + thumbnail (r478) | REFUSED (Try 'sips --help' for help using this tool) | REFUSED (Could not read HEIF/AVIF file: Invalid input: Non-existing item ID referenced: ') | REFUSED (magick: Invalid input: Non-existing item ID referenced: 'pitm' box references an) | Δ max 231 mean 98.32 (renders 48×36: the thumbnail, not the tiled item) | REFUSED (Could not read HEIF/AVIF file: Invalid input: Non-existing item ID referenced: ') |
+| av1 tili 64 (r478) | REFUSED (Try 'sips --help' for help using this tool) | REFUSED (Could not read HEIF/AVIF file: Invalid input: Non-existing item ID referenced: ') | REFUSED (magick: Invalid input: Non-existing item ID referenced: 'pitm' box references an) | REFUSED (Error opening output files: Invalid argument) | REFUSED (Could not read HEIF/AVIF file: Invalid input: Non-existing item ID referenced: ') |
 | hevc collection (3 pictures, per-item Exif) | Δ max 2 mean 0.61 | opens | opens | exact | opens |
 
 #### Round trip at the production defaults (PNG → file → PNG; PSNR vs the source, 8-bit RGB)

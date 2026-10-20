@@ -9,11 +9,15 @@ mod common;
 
 use std::io::Cursor;
 
-use oxideav_core::{ExecutionContext, Frame, RuntimeContext};
+use oxideav_core::{
+    CodecId, CodecOptions, CodecParameters, Encoder, ExecutionContext, Frame, RuntimeContext,
+};
 use oxideav_heif::compose::{crop, GridCanvas};
 use oxideav_heif::decode::{decode_primary, ItemDecoder};
 use oxideav_heif::derived::GridDescriptor;
-use oxideav_heif::encode::{encode_hevc_picture, pad_frame};
+use oxideav_heif::encode::{
+    encode_hevc_picture, encode_still, pad_frame, EncodeOptions, StillCodec, TileCarrier,
+};
 use oxideav_heif::image::Chroma;
 use oxideav_heif::miaf::{check, MiafProfile};
 use oxideav_heif::props::{Colr, Pixi, Property};
@@ -776,4 +780,195 @@ fn packed_colour_format_enhancement_refusals() {
     assert!(w
         .add_colour_format_enhancement_inputs(&[(1, packed(9, 1, 0, 0, &[3; 9]))], vec![])
         .is_err());
+}
+
+/// A picture with an alpha plane for the high-level encoder.
+fn picture_with_alpha(w: u32, h: u32) -> HeifFrame {
+    let colour = picture(w, h);
+    let mut alpha =
+        HeifFrame::zeroed(w, h, HeifPixelFormat::new(Chroma::Mono, 8, false).unwrap()).unwrap();
+    for y in 0..h {
+        for x in 0..w {
+            alpha.set_sample(0, x, y, ((x * 2 + y) % 256) as u16);
+        }
+    }
+    colour.with_alpha_plane(&alpha).unwrap()
+}
+
+fn tiled_opts(codec: StillCodec, tile: u32) -> EncodeOptions {
+    let mut o = EncodeOptions::default();
+    o.codec = codec;
+    o.hevc_mode = "pcm".into();
+    o.av1_quality = None;
+    o.grid_tile = Some(tile);
+    o.tile_carrier = TileCarrier::Tiled;
+    o.thumbnail_max_dim = Some(64);
+    o.exif = Some(b"MM\0*\0\0\0\x08\0\0".to_vec());
+    o.xmp = Some("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>".into());
+    o.icc_profile = Some(vec![0u8; 128]);
+    o
+}
+
+/// The high-level encoder writes the tiled picture as one `tili` item
+/// under [`TileCarrier::Tiled`]: the same tiles as the `grid` carrier
+/// (bytes identical under any thread budget), one `tilC` with the
+/// shared `hvcC` and tile `ispe`, the item's `ispe` / `pixi` / `colr` /
+/// ICC, alpha, thumbnail and metadata on the tiled item; the picture
+/// decodes exactly (serial and parallel), equals the grid carrier's
+/// decode, passes the MIAF checks, re-muxes through `import_item`, and
+/// the framework `tiling=tili` option selects it.
+#[test]
+fn encoder_writes_a_tiled_item_equal_to_its_grid() {
+    let src = picture_with_alpha(300, 200);
+    let opts = tiled_opts(StillCodec::Hevc, 128);
+    let bytes = encode_still(&src, &opts).unwrap();
+    let parallel = encode_still(&src, &opts.clone().with_threads(Some(3))).unwrap();
+    assert_eq!(bytes, parallel, "the budget does not change a byte");
+    let f = HeifFile::parse(&bytes).unwrap();
+    let meta = f.meta().unwrap();
+    let primary = f.primary_item().unwrap();
+    assert_eq!(primary.item_type, *b"tili");
+    let props = oxideav_heif::props::ItemProperties::resolve(meta, primary.id).unwrap();
+    let tilc = props.tilc().unwrap();
+    assert_eq!((tilc.tile_width, tilc.tile_height), (128, 128));
+    assert_eq!(tilc.tile_grid(300, 200), Some((3, 2)));
+    let (ty, assoc) = tilc.in_file_tiles.as_ref().unwrap();
+    assert_eq!(ty, b"hvc1");
+    assert_eq!(assoc.len(), 2, "hvcC + tile ispe");
+    assert!(assoc[0].0 && !assoc[1].0);
+    assert_eq!(&meta.properties[assoc[0].1 as usize - 1].box_type, b"hvcC");
+    assert_eq!(&meta.properties[assoc[1].1 as usize - 1].box_type, b"ispe");
+    assert_eq!(props.ispe().map(|i| (i.width, i.height)), Some((300, 200)));
+    assert_eq!(
+        props.pixi().map(|p| p.bits_per_channel.clone()),
+        Some(vec![8, 8, 8])
+    );
+    assert_eq!(props.colrs().len(), 2, "nclx + ICC");
+    assert_eq!(meta.thumbnails_of(primary.id).len(), 1);
+    assert_eq!(meta.auxiliaries_of(primary.id).len(), 1, "alpha");
+    assert_eq!(meta.metadata_of(primary.id).len(), 2, "Exif + XMP");
+    // One deti, one tili: the tiles are not items.
+    assert_eq!(meta.data_references.len(), 1);
+    assert_eq!(
+        meta.items
+            .iter()
+            .filter(|i| i.item_type == *b"hvc1")
+            .count(),
+        2,
+        "alpha + thumbnail"
+    );
+    let rep = check(&f, MiafProfile::Miaf).unwrap();
+    assert!(rep.is_conformant(), "{:#?}", rep.violations);
+    // Exact under every budget; identical to the grid carrier.
+    let grid = encode_still(&src, &opts.clone().with_tile_carrier(TileCarrier::Grid)).unwrap();
+    let want = decode_primary(&HeifFile::parse(&grid).unwrap(), ItemDecoder::direct()).unwrap();
+    assert_eq!(want.frame, src);
+    for threads in [1, 4] {
+        let dec =
+            ItemDecoder::direct().with_execution_context(&ExecutionContext::with_threads(threads));
+        let img = decode_primary(&f, dec).unwrap();
+        assert_eq!(img.frame, src, "{threads} threads");
+        assert_eq!(img.icc_profile, opts.icc_profile, "{threads} threads");
+    }
+    let api = oxideav_heif::decode(&bytes).unwrap();
+    assert_eq!(api.metadata.exif, opts.exif);
+    assert_eq!(
+        api.metadata.xmp.as_deref(),
+        opts.xmp.as_deref().map(str::as_bytes)
+    );
+    // Re-mux: the tiled item travels byte for byte (tiles, offset table,
+    // deti entry, tile properties) with its alpha, thumbnail, metadata.
+    let mut w = HeifWriter::new();
+    let id = w.import_item(&f, primary.id).unwrap();
+    w.set_primary(id);
+    let remux = w.write_to_vec().unwrap();
+    let g = HeifFile::parse(&remux).unwrap();
+    let gm = g.meta().unwrap();
+    assert_eq!(g.primary_item().unwrap().item_type, *b"tili");
+    assert_eq!(g.item_data(id).unwrap(), f.item_data(primary.id).unwrap());
+    assert_eq!(gm.data_references, meta.data_references);
+    assert_eq!(gm.metadata_of(id).len(), 2);
+    assert_eq!(
+        decode_primary(&g, ItemDecoder::direct()).unwrap().frame,
+        src
+    );
+    assert!(check(&g, MiafProfile::Miaf).unwrap().is_conformant());
+    // Framework: `tiling=tili` writes the tiled item, the default a grid,
+    // anything else is a typed refusal; the frame decodes the same.
+    let (vf, pf) = src.to_core().unwrap();
+    let make = |tiling: &str| {
+        let mut params = CodecParameters::video(CodecId::new("heif"));
+        params.width = Some(300);
+        params.height = Some(200);
+        params.pixel_format = Some(pf);
+        params.options = CodecOptions::new()
+            .set("grid", "128")
+            .set("mode", "pcm")
+            .set("tiling", tiling);
+        oxideav_heif::encode::make_encoder(&params)
+    };
+    let run = |enc: &mut Box<dyn Encoder>| {
+        enc.send_frame(&Frame::Video(vf.clone())).unwrap();
+        enc.flush().unwrap();
+        enc.receive_packet().unwrap().data.to_vec()
+    };
+    let tili = run(&mut make("tili").unwrap());
+    let ft = HeifFile::parse(&tili).unwrap();
+    assert_eq!(ft.primary_item().unwrap().item_type, *b"tili");
+    let grid = run(&mut make("grid").unwrap());
+    assert_eq!(
+        HeifFile::parse(&grid)
+            .unwrap()
+            .primary_item()
+            .unwrap()
+            .item_type,
+        *b"grid"
+    );
+    assert_eq!(
+        decode_primary(&ft, ItemDecoder::direct()).unwrap().frame,
+        decode_primary(&HeifFile::parse(&grid).unwrap(), ItemDecoder::direct())
+            .unwrap()
+            .frame
+    );
+    assert!(make("mosaic").is_err());
+}
+
+/// AV1 tiles under the tiled carrier: `av01` tiles sharing one `av1C`,
+/// exact under lossless coding, the automatic tiling above 4 MP never
+/// changes the carrier rule (an explicit small tile forces it here).
+#[test]
+fn av1_tiled_item_round_trips() {
+    let src = picture(260, 140);
+    let opts = tiled_opts(StillCodec::Av1, 128);
+    let bytes = encode_still(&src, &opts).unwrap();
+    let f = HeifFile::parse(&bytes).unwrap();
+    let meta = f.meta().unwrap();
+    let primary = f.primary_item().unwrap();
+    assert_eq!(primary.item_type, *b"tili");
+    let props = oxideav_heif::props::ItemProperties::resolve(meta, primary.id).unwrap();
+    let tilc = props.tilc().unwrap();
+    assert_eq!(tilc.tile_grid(260, 140), Some((3, 2)));
+    let (ty, assoc) = tilc.in_file_tiles.as_ref().unwrap();
+    assert_eq!(ty, b"av01");
+    assert_eq!(&meta.properties[assoc[0].1 as usize - 1].box_type, b"av1C");
+    assert!(check(&f, MiafProfile::Miaf).unwrap().is_conformant());
+    for threads in [1, 3] {
+        let dec =
+            ItemDecoder::direct().with_execution_context(&ExecutionContext::with_threads(threads));
+        assert_eq!(
+            decode_primary(&f, dec).unwrap().frame,
+            src,
+            "{threads} threads"
+        );
+    }
+    // The grid carrier on the same options stays a grid.
+    let grid = encode_still(&src, &opts.with_tile_carrier(TileCarrier::Grid)).unwrap();
+    assert_eq!(
+        HeifFile::parse(&grid)
+            .unwrap()
+            .primary_item()
+            .unwrap()
+            .item_type,
+        *b"grid"
+    );
 }

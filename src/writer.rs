@@ -813,8 +813,10 @@ impl HeifWriter {
     /// item keeps its extents — `cexg`), properties re-typed through
     /// [`Property::parse`] (unknown boxes verbatim), the hidden flags
     /// and item names kept; ids are re-assigned. Returns the new id of
-    /// `id`. A protected item (`ipro`) or a `tili` tiled item is a
-    /// typed refusal. The caller chooses the primary.
+    /// `id`. A `tili` tiled item comes along with its tile data, `deti`
+    /// entry and tile properties (in-file tiles; external tiles are a
+    /// typed refusal), a protected item (`ipro`) is one too. The caller
+    /// chooses the primary.
     pub fn import_item<D: AsRef<[u8]>>(&mut self, file: &HeifFile<D>, id: u32) -> Result<u32> {
         use std::collections::BTreeMap;
         let meta = file.meta()?;
@@ -832,13 +834,63 @@ impl HeifWriter {
                     "import: item {src} is protected (ipro)"
                 )));
             }
-            if info.is_tiled_image() {
-                return Err(HeifError::unsupported(format!(
-                    "import: item {src} is a tili tiled item"
-                )));
-            }
             let dimg = meta.references_from(src, &reference::DIMG);
             let body = match info.item_type {
+                // A tiled item (Amd 2 §6.11): its data (tiles + offset
+                // table, offsets relative to that data) verbatim, the
+                // `deti` entry as written, the tiles' properties
+                // resolved from the tilC's associations — the writer
+                // re-interns them and rewrites the indices.
+                _ if info.is_tiled_image() => {
+                    let loc = meta.location(src).ok_or_else(|| {
+                        HeifError::invalid(format!("import: tili item {src} has no iloc entry"))
+                    })?;
+                    let dref = match loc.data_reference_index {
+                        0 => None,
+                        n => meta.data_references.get(n as usize - 1),
+                    }
+                    .filter(|d| &d.entry_type == b"deti")
+                    .ok_or_else(|| {
+                        HeifError::invalid(format!(
+                            "import: tili item {src}: data_reference_index {} does not name a deti entry",
+                            loc.data_reference_index
+                        ))
+                    })?;
+                    let tilc = meta
+                        .properties_of(src)
+                        .into_iter()
+                        .find_map(|(_, raw, _)| match Property::parse(raw) {
+                            Ok(Property::TilC(t)) => Some(t),
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            HeifError::invalid(format!("import: tili item {src} without a tilC"))
+                        })?;
+                    let Some((tile_item_type, assoc)) = tilc.in_file_tiles else {
+                        return Err(HeifError::unsupported(format!(
+                            "import: tili item {src}: tiles stored in external files"
+                        )));
+                    };
+                    let tile_properties = assoc
+                        .iter()
+                        .filter(|(_, idx)| *idx != 0)
+                        .map(|(essential, idx)| {
+                            let raw = meta.properties.get(*idx as usize - 1).ok_or_else(|| {
+                                HeifError::invalid(format!(
+                                    "import: tili item {src}: tipa names property {idx} of {}",
+                                    meta.properties.len()
+                                ))
+                            })?;
+                            Ok((Property::parse(raw)?, *essential))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    ItemBody::Tiled {
+                        data: file.item_data_owned(src)?,
+                        deti: (dref.flags, dref.payload.clone()),
+                        tile_item_type,
+                        tile_properties,
+                    }
+                }
                 ITEM_TYPE_GRID => ItemBody::Grid(GridDescriptor::parse(&file.item_data(src)?)?),
                 ITEM_TYPE_IOVL => {
                     ItemBody::Overlay(OverlayDescriptor::parse(&file.item_data(src)?, dimg.len())?)

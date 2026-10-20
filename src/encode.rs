@@ -124,6 +124,30 @@ impl OverlaySpec {
     }
 }
 
+/// How the tiles of a tiled picture ([`EncodeOptions::grid_tile`]) are
+/// declared.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TileCarrier {
+    /// A `grid` derived item (HEIF §6.6.2.1) over hidden coded tile
+    /// items, every tile an item with its own properties — the shape
+    /// every third-party producer writes and every reader opens. The
+    /// default.
+    #[default]
+    Grid,
+    /// A `tili` tiled image item (HEIF Amd 2:2026 §6.11): one item
+    /// whose tiles are packed back to back in its data and addressed
+    /// through a `deti` data reference's offset table, one `tilC`
+    /// naming the tiles' coding format and their shared properties
+    /// (`tipa`). One declaration however many tiles (the offset table
+    /// lives with the tile data); the tiles must code to one decoder
+    /// configuration, which this encoder guarantees by coding every
+    /// tile at the full tile size. Readers of the 2025 text and older
+    /// open the file but not the picture (see the README's interop
+    /// table).
+    Tiled,
+}
+
 /// Encoding options.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -232,6 +256,12 @@ pub struct EncodeOptions {
     pub depth_map: Option<HeifFrame>,
     /// Where `transforms` are written (see [`TransformCarrier`]).
     pub transform_carrier: TransformCarrier,
+    /// How a tiled picture's tiles are declared: a `grid` over hidden
+    /// coded items (the default) or one `tili` tiled image item. Takes
+    /// effect whenever [`EncodeOptions::grid_tile`]'s rule tiles the
+    /// picture (explicitly, or the automatic grid above
+    /// [`GRID_AUTO_MIN_PIXELS`]).
+    pub tile_carrier: TileCarrier,
 }
 impl EncodeOptions {
     /// Every field as a positional argument, in declaration order
@@ -291,7 +321,14 @@ impl EncodeOptions {
             avc_options,
             depth_map,
             transform_carrier,
+            tile_carrier: TileCarrier::Grid,
         }
+    }
+
+    /// Set `tile_carrier`.
+    pub fn with_tile_carrier(mut self, tile_carrier: TileCarrier) -> Self {
+        self.tile_carrier = tile_carrier;
+        self
     }
 
     /// Set `depth_map`.
@@ -592,6 +629,7 @@ impl Default for EncodeOptions {
             avc_options: Vec::new(),
             depth_map: None,
             transform_carrier: TransformCarrier::CodedItem,
+            tile_carrier: TileCarrier::Grid,
         }
     }
 }
@@ -2570,6 +2608,33 @@ fn encode_grid_tiles(
     rows: u32,
     opts: &EncodeOptions,
 ) -> Result<Vec<u32>> {
+    let mut ids = Vec::with_capacity((rows * cols) as usize);
+    encode_tiles_with(w, colour, tile, cols, rows, opts, |w, pic| {
+        let props = coded_props(&pic, &opts.colr, None);
+        let id = w.add_coded_item(pic.item_type, pic.data, props);
+        w.set_hidden(id, true);
+        ids.push(id);
+        Ok(())
+    })?;
+    Ok(ids)
+}
+
+/// Code the tiles of a `cols × rows` tiling over `colour` (every tile
+/// `tile × tile`, the ones beyond the picture's edges edge-replicated)
+/// on `opts.workers()` threads and hand each to `sink` in row-major
+/// order as it completes — the bytes are those of the serial encode
+/// whatever the budget. The sink receives the writer so it can queue
+/// the tile straight away (the grid carrier) or collect it (the
+/// tiled-item carrier).
+fn encode_tiles_with(
+    w: &mut HeifWriter,
+    colour: &HeifFrame,
+    tile: u32,
+    cols: u32,
+    rows: u32,
+    opts: &EncodeOptions,
+    mut sink: impl FnMut(&mut HeifWriter, CodedPicture) -> Result<()>,
+) -> Result<()> {
     let n = (rows * cols) as usize;
     let tile_at = |i: usize| -> Result<HeifFrame> {
         let (r, c) = ((i as u32) / cols, (i as u32) % cols);
@@ -2580,19 +2645,12 @@ fn encode_grid_tiles(
         threads: None,
         ..opts.clone()
     };
-    let mut ids = Vec::with_capacity(n);
-    let mut add = |w: &mut HeifWriter, pic: CodedPicture| {
-        let props = coded_props(&pic, &opts.colr, None);
-        let id = w.add_coded_item(pic.item_type, pic.data, props);
-        w.set_hidden(id, true);
-        ids.push(id);
-    };
     let workers = oxideav_core::ExecutionContext::with_threads(opts.workers()).effective_workers(n);
     if workers <= 1 {
         for i in 0..n {
-            add(w, encode_picture(tile_at(i)?, &tile_opts)?);
+            sink(w, encode_picture(tile_at(i)?, &tile_opts)?)?;
         }
-        return Ok(ids);
+        return Ok(());
     }
     // Work-stealing over a shared counter; finished tiles come back
     // over a channel and are reordered on the main thread, which hands
@@ -2627,14 +2685,80 @@ fn encode_grid_tiles(
                 .map_err(|_| HeifError::invalid("grid: a tile worker stopped early"))?;
             pending.insert(i, coded?);
             while let Some(pic) = pending.remove(&expect) {
-                add(w, pic);
+                sink(w, pic)?;
                 expect += 1;
             }
         }
         Ok(())
     });
-    result?;
-    Ok(ids)
+    result
+}
+
+/// Code `colour` as one `tili` tiled image item (HEIF Amd 2:2026
+/// §6.11) of `cols × rows` tiles of `tile` pixels: the tiles coded like
+/// a grid's (in parallel under the budget, bytes identical), packed
+/// back to back behind a `deti` offset table, the `tilC` naming the
+/// coding format with the shared decoder configuration and the tile
+/// `ispe` as the tiles' properties (`tipa`), the item carrying `ispe`
+/// (the true size, the padding cropped per §6.11.2), `pixi`, `colr`
+/// and `props`. Every tile is coded at the full tile size, so one
+/// configuration describes them all; a codec that still varied it
+/// between tiles would be a typed refusal.
+#[allow(clippy::too_many_arguments)]
+fn encode_tiled_item(
+    w: &mut HeifWriter,
+    colour: &HeifFrame,
+    tile: u32,
+    cols: u32,
+    rows: u32,
+    opts: &EncodeOptions,
+    props: Vec<(Property, bool)>,
+) -> Result<u32> {
+    let n = (rows * cols) as usize;
+    let mut tiles: Vec<Option<Vec<u8>>> = Vec::with_capacity(n);
+    let mut first: Option<([u8; 4], Property, HeifPixelFormat)> = None;
+    encode_tiles_with(w, colour, tile, cols, rows, opts, |_, pic| {
+        match &first {
+            None => first = Some((pic.item_type, pic.config.clone(), pic.layout)),
+            Some((t, c, _)) if *t != pic.item_type || *c != pic.config => {
+                return Err(HeifError::invalid(format!(
+                    "tili: tile {} codes a different configuration from tile 0; the tiles of a tiled item share one tilC",
+                    tiles.len()
+                )));
+            }
+            Some(_) => {}
+        }
+        tiles.push(Some(pic.data));
+        Ok(())
+    })?;
+    let (item_type, config, layout) = first.ok_or_else(|| HeifError::invalid("tili: no tiles"))?;
+    let tile_props = vec![
+        (config, true),
+        (
+            Property::Ispe(Ispe {
+                width: tile,
+                height: tile,
+            }),
+            false,
+        ),
+    ];
+    let mut item_props = vec![(
+        Property::Pixi(Pixi {
+            bits_per_channel: vec![layout.bit_depth; layout.chroma.colour_planes()],
+        }),
+        false,
+    )];
+    item_props.extend(props);
+    w.add_tiled_item(
+        colour.width,
+        colour.height,
+        tile,
+        tile,
+        item_type,
+        tiles,
+        tile_props,
+        item_props,
+    )
 }
 
 /// Encode `frame` (any planar layout; converted to the codec's coding
@@ -2698,14 +2822,6 @@ fn encode_still_planes(
                 return Err(HeifError::invalid("grid: more than 256 rows or columns"));
             }
             let thumb = thumbnail_source(&colour, opts)?;
-            let tiles = encode_grid_tiles(w, &colour, tile, cols, rows, opts)?;
-            drop(colour);
-            let desc = GridDescriptor {
-                rows: rows as u16,
-                columns: cols as u16,
-                output_width: cw,
-                output_height: ch,
-            };
             let mut gprops = vec![(
                 Property::Colr(nclx_for_icc(&opts.colr, opts.icc_profile.is_some())),
                 false,
@@ -2720,7 +2836,23 @@ fn encode_still_planes(
                 ));
             }
             gprops.extend(item_transform_props(opts));
-            (w.add_grid(desc, &tiles, gprops)?, thumb)
+            let master = match opts.tile_carrier {
+                TileCarrier::Tiled => {
+                    encode_tiled_item(w, &colour, tile, cols, rows, opts, gprops)?
+                }
+                _ => {
+                    let tiles = encode_grid_tiles(w, &colour, tile, cols, rows, opts)?;
+                    let desc = GridDescriptor {
+                        rows: rows as u16,
+                        columns: cols as u16,
+                        output_width: cw,
+                        output_height: ch,
+                    };
+                    w.add_grid(desc, &tiles, gprops)?
+                }
+            };
+            drop(colour);
+            (master, thumb)
         }
         _ => {
             let thumb = thumbnail_source(&colour, opts)?;
@@ -3613,6 +3745,10 @@ pub struct HeifEncoderOptions {
     /// 8-bit 4:2:0, the High-family profiles otherwise) instead of
     /// CAVLC. Other codecs ignore it.
     pub cabac: bool,
+    /// `tiling` (round 478): the carrier of a tiled picture's tiles —
+    /// `grid` (a `grid` derived item over hidden coded items, the
+    /// default) or `tili` (one Amd 2 §6.11 tiled image item).
+    pub tiling: String,
     /// `qp` was given (an absent `qp` follows `quality` when that was
     /// given, else [`DEFAULT_QP`]).
     qp_given: bool,
@@ -3664,6 +3800,7 @@ impl HeifEncoderOptions {
             filters,
             chroma,
             cabac: false,
+            tiling: "grid".into(),
             qp_given: false,
             quality_given: false,
             mode_given: false,
@@ -3780,6 +3917,12 @@ impl HeifEncoderOptions {
         self.cabac = cabac;
         self
     }
+
+    /// Builder-style setter for `tiling`.
+    pub fn with_tiling(mut self, tiling: String) -> Self {
+        self.tiling = tiling;
+        self
+    }
 }
 
 impl Default for HeifEncoderOptions {
@@ -3803,6 +3946,7 @@ impl Default for HeifEncoderOptions {
             filters: "on".into(),
             chroma: "420".into(),
             cabac: false,
+            tiling: "grid".into(),
             qp_given: false,
             quality_given: false,
             mode_given: false,
@@ -3922,6 +4066,12 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             default: oxideav_core::OptionValue::Bool(false),
             help: "AVC entropy coding: CABAC instead of CAVLC (other codecs ignore it)",
         },
+        oxideav_core::OptionField {
+            name: "tiling",
+            kind: oxideav_core::OptionKind::Enum(&["grid", "tili"]),
+            default: oxideav_core::OptionValue::String(String::new()),
+            help: "Carrier of the tiles when grid tiles the picture: grid (a grid derived item over hidden coded items; default) or tili (one Amd 2 tiled image item with a deti offset table)",
+        },
     ];
 
     fn apply(&mut self, key: &str, value: &oxideav_core::OptionValue) -> CoreResult<()> {
@@ -3953,6 +4103,7 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             "filters" => self.filters = value.as_str()?.to_string(),
             "chroma" => self.chroma = value.as_str()?.to_string(),
             "cabac" => self.cabac = value.as_bool()?,
+            "tiling" => self.tiling = value.as_str()?.to_string(),
             other => {
                 return Err(CoreError::invalid(format!(
                     "heif: unknown option '{other}'"
@@ -4006,6 +4157,15 @@ impl HeifEncoderOptions {
             n => Some(n.parse::<u32>().map_err(|_| {
                 CoreError::invalid(format!("heif: grid '{n}' (auto, none or a tile size)"))
             })?),
+        };
+        let tile_carrier = match self.tiling.trim() {
+            "" | "grid" => TileCarrier::Grid,
+            "tili" => TileCarrier::Tiled,
+            other => {
+                return Err(CoreError::invalid(format!(
+                    "heif: tiling '{other}' (grid or tili)"
+                )))
+            }
         };
         let threads = match self.threads.trim() {
             "" => None,
@@ -4072,6 +4232,7 @@ impl HeifEncoderOptions {
             } else {
                 Vec::new()
             },
+            tile_carrier,
             ..EncodeOptions::default()
         };
         if let Colr::Nclx { full_range, .. } = &mut opts.colr {

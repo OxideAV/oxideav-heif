@@ -45,7 +45,7 @@ use common::{apply_exif_orientation, have_binary, imageio_report, scratch_dir};
 use oxideav_heif::decode::{decode_primary, ItemDecoder};
 use oxideav_heif::encode::{
     encode_overlay, encode_still, EncodeOptions, OverlayLayer, OverlaySpec, StillCodec,
-    TransformCarrier,
+    TileCarrier, TransformCarrier,
 };
 use oxideav_heif::image::{Chroma, HeifFrame, HeifPixelFormat};
 use oxideav_heif::props::{Clap, CropRect, Imir, Irot, Property};
@@ -1145,6 +1145,34 @@ fn writer_shapes() -> Vec<(String, &'static str, Vec<u8>)> {
         )
         .unwrap(),
     ));
+    // Amd 2 §6.11 tiled items (round 478): the same picture and tiling
+    // as the grid row, the tiles declared through one `tilC` + `deti`.
+    out.push((
+        "hevc tili 64 + thumbnail".into(),
+        "heic",
+        encode_still(
+            &frame_from_source(200, 150, 3, 8),
+            &EncodeOptions::default()
+                .with_hevc_mode("intra".into())
+                .with_qp(22)
+                .with_grid_tile(Some(64))
+                .with_tile_carrier(TileCarrier::Tiled)
+                .with_thumbnail_max_dim(Some(48)),
+        )
+        .unwrap(),
+    ));
+    out.push((
+        "av1 tili 64".into(),
+        "avif",
+        encode_still(
+            &frame_from_source(200, 150, 3, 8),
+            &EncodeOptions::default()
+                .with_codec(StillCodec::Av1)
+                .with_grid_tile(Some(64))
+                .with_tile_carrier(TileCarrier::Tiled),
+        )
+        .unwrap(),
+    ));
     let files: Vec<Vec<u8>> = (0..3u32)
         .map(|i| {
             let mut f = frame_from_source(96, 80, 3, 8);
@@ -1695,18 +1723,24 @@ fn conformance_matrix_both_directions() {
         // still open the file, and any renderer that does decode (Apple
         // ImageIO on AVC) is reported.
         let no_third_party_decoder = name.starts_with("avc ") || name.starts_with("vvc ");
+        // `tili` is an Amd 2:2026 item type no reader on this machine
+        // implements (they refuse the primary item or render the
+        // thumbnail instead): those rows are measurements too, and
+        // `heif-info` refusing the item type is reported, not gated.
+        let unimplemented_item = name.contains(" tili ");
         for (r, c) in row {
             if let RCell::Refused(_) = c {
                 assert!(
                     (*r == Reader::Ffmpeg && size_refused)
-                        || (no_third_party_decoder && *r != Reader::HeifInfo),
+                        || (no_third_party_decoder && *r != Reader::HeifInfo)
+                        || unimplemented_item,
                     "{name}: {} {}",
                     r.name(),
                     c.md()
                 );
             }
         }
-        if no_third_party_decoder {
+        if no_third_party_decoder || unimplemented_item {
             continue;
         }
         // Consensus: at least one rendering reader agrees with our
