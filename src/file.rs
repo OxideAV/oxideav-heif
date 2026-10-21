@@ -316,6 +316,15 @@ impl<D: AsRef<[u8]>> HeifFile<D> {
                     loc.item_id
                 )));
             }
+            // Extents that overlap (a hostile table naming one span
+            // hundreds of times) would concatenate to many times the
+            // input — an item cannot hold more bytes than its source.
+            if total > source_len as u64 {
+                return Err(HeifError::exhausted(format!(
+                    "item {}: its extents cover {total} bytes, more than the {source_len}-byte source holds",
+                    loc.item_id
+                )));
+            }
             out.push((start as usize, end as usize));
         }
         Ok(out)
@@ -397,6 +406,12 @@ impl<D: AsRef<[u8]>> HeifFile<D> {
                     if total > MAX_ITEM_BYTES {
                         return Err(HeifError::exhausted(format!(
                             "item {item_id} exceeds {MAX_ITEM_BYTES} bytes"
+                        )));
+                    }
+                    if total > self.bytes().len() as u64 {
+                        return Err(HeifError::exhausted(format!(
+                            "item {item_id}: its extents cover {total} bytes, more than the {}-byte file holds",
+                            self.bytes().len()
                         )));
                     }
                     out.extend_from_slice(&src[start as usize..end as usize]);
@@ -580,6 +595,35 @@ mod tests {
         );
         let f = HeifFile::parse(&file).unwrap();
         assert_eq!(f.item_data(1).unwrap().as_ref(), b"cdef");
+    }
+
+    /// Overlapping extents (one span named many times) would
+    /// concatenate to many times the input: an item is refused once its
+    /// extents cover more bytes than its source holds (a fuzz finding,
+    /// `fuzz/corpus/heif_parse/minimal.overlapping-extents-oom`).
+    #[test]
+    fn extents_are_bounded_by_the_source_size() {
+        // The same layout twice: the first pass finds where the mdat
+        // payload lands, the second points the extents at it.
+        let probe = |o: u32| {
+            build(
+                &[
+                    hdlr(),
+                    iinf(&[infe(1, b"hvc1"), infe(2, b"hvc1")]),
+                    iloc(&[
+                        (1, 0, vec![(0, o, 2), (0, o + 2, 2)]),
+                        (2, 0, vec![(0, o, 600); 1000]),
+                    ]),
+                ],
+                &[b'a'; 600],
+            )
+        };
+        let (_, off) = probe(0);
+        let (file, _) = probe(off as u32);
+        let f = HeifFile::parse(&file).unwrap();
+        assert_eq!(f.item_data(1).unwrap().as_ref(), b"aaaa");
+        assert!(matches!(f.item_data(2), Err(HeifError::LimitExceeded(_))));
+        assert!(f.item_extents(2).is_err());
     }
 
     #[test]
