@@ -32,7 +32,7 @@ use crate::file::HeifFile;
 use crate::image::{Chroma, HeifFrame, HeifPixelFormat, Plane};
 use crate::layout::entry_layout;
 use crate::props::Colr;
-use crate::sequence::{parse_movie, sample_bytes, Movie, SampleEntry, Track};
+use crate::sequence::{parse_movie, sample_bytes, MetadataTrackKind, Movie, SampleEntry, Track};
 use crate::writer::HeifWriter;
 
 // ---------------------------------------------------------------------
@@ -369,20 +369,51 @@ fn decode_track<D: AsRef<[u8]>>(
         .cloned()
         .unwrap_or(Colr::MIAF_DEFAULT);
     let color = ColorInfo::from_colr(&colr);
+    // The sequence-level metadata (HEIF §8.3: the track's MetaBox) on
+    // every frame, refined per frame by the time-parallel samples of
+    // the Exif / XMP metadata tracks describing this track.
+    let (seq_exif, seq_xmp) = track.sequence_metadata(file);
     let metadata = Metadata::new(
         entry.colr.iter().find_map(|c| match c {
             Colr::Icc { profile, .. } => Some(profile.clone()),
             _ => None,
         }),
-        None,
-        None,
+        seq_exif,
+        seq_xmp,
         None,
     );
+    let metadata_tracks: Vec<(&Track, MetadataTrackKind)> = movie
+        .metadata_tracks_of(track.track_id)
+        .into_iter()
+        .filter_map(|m| m.metadata_kind().map(|k| (m, k)))
+        .collect();
+    let mut pts_sorted: Vec<u64> = track.samples.iter().map(|s| s.pts()).collect();
+    pts_sorted.sort_unstable();
     let timescale = track.timescale.max(1) as u64;
     let mut frames = Vec::with_capacity(pictures.len());
     for (i, mut pic) in pictures.into_iter().enumerate() {
         if let Some(alpha) = alpha.as_ref().and_then(|a| a.get(i)) {
             pic = attach_alpha(&pic, alpha)?;
+        }
+        let mut metadata = metadata.clone();
+        if let Some(pts) = pts_sorted.get(i) {
+            for (m, kind) in &metadata_tracks {
+                let Some(bytes) = m
+                    .sample_index_at(*pts, track.timescale)
+                    .and_then(|j| m.samples.get(j))
+                    .and_then(|s| sample_bytes(file, s).ok())
+                else {
+                    continue;
+                };
+                match kind {
+                    MetadataTrackKind::Exif => {
+                        if let Ok(payload) = crate::meta::exif_payload(bytes) {
+                            metadata.exif = Some(payload);
+                        }
+                    }
+                    _ => metadata.xmp = Some(bytes.to_vec()),
+                }
+            }
         }
         if let Some(clap) = &entry.clap {
             pic = apply_clap(&pic, clap)?;
@@ -395,7 +426,7 @@ fn decode_track<D: AsRef<[u8]>>(
             )
         });
         frames.push(Frame::new(
-            HeifImage::from_frame(pic, color, metadata.clone()),
+            HeifImage::from_frame(pic, color, metadata),
             delay,
             None,
             Some(track.track_id),

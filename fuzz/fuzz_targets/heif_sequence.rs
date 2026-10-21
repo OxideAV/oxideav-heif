@@ -20,6 +20,16 @@ fuzz_target!(|data: &[u8]| {
         let _ = t.orientation();
         let _ = t.loop_behaviour();
         let _ = t.is_visual();
+        let _ = t.is_metadata();
+        let _ = t.metadata_kind();
+        // The track-level MetaBox (HEIF §8.3): item resolution against
+        // the file / its idat, the Exif / XMP items.
+        let _ = t.sequence_metadata(&file);
+        if let Some(m) = &t.meta {
+            for it in m.items.iter().take(64) {
+                let _ = file.item_data_in(m, it.id);
+            }
+        }
         let _ = t.primary_entry();
         let _ = t.sample_duration_total();
         let _ = t.references_of(b"auxl");
@@ -38,6 +48,7 @@ fuzz_target!(|data: &[u8]| {
     for t in movie.tracks.iter().take(64) {
         let _ = movie.auxiliary_tracks_of(t.track_id).len();
         let _ = movie.alpha_track_of(t.track_id).map(|a| a.aux_kind());
+        let _ = movie.metadata_tracks_of(t.track_id).len();
         let _ = t.sample_index_at(u64::MAX / 4, 1);
     }
     let _ = movie.producer_reference_times.len() + movie.subsegment_indexes.len();

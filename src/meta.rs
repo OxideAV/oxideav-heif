@@ -82,6 +82,95 @@ pub const ITEM_TYPE_URI: FourCc = *b"uri ";
 /// Region item (HEIF §6.10).
 pub const ITEM_TYPE_RGAN: FourCc = *b"rgan";
 
+/// Strip the `exif_tiff_header_offset` word of an `Exif` item body or
+/// an Exif metadata-track sample (HEIF Annex A.2.1 `ExifDataBlock`) and
+/// return the bytes from the TIFF header on.
+pub fn exif_payload(item: &[u8]) -> Result<Vec<u8>> {
+    if item.len() < 4 {
+        return Err(HeifError::invalid("Exif item shorter than its offset word"));
+    }
+    let off = u32::from_be_bytes([item[0], item[1], item[2], item[3]]) as usize;
+    let start = 4usize
+        .checked_add(off)
+        .filter(|s| *s <= item.len())
+        .ok_or_else(|| {
+            HeifError::invalid(format!("Exif tiff header offset {off} past the item"))
+        })?;
+    Ok(item[start..].to_vec())
+}
+
+/// An `ExifDataBlock` (Annex A.2.1) over a payload that starts at its
+/// TIFF header: the zero offset word then the payload.
+pub fn exif_data_block(tiff: &[u8]) -> Vec<u8> {
+    let mut body = 0u32.to_be_bytes().to_vec();
+    body.extend_from_slice(tiff);
+    body
+}
+
+/// Inflate a `deflate`-encoded metadata item (RFC 1951; `dExf` items
+/// and `content_encoding = "deflate"` XMP, HEIF Amd 2:2026 A.2.1 /
+/// O.4.3), capped at [`crate::file::MAX_ITEM_BYTES`]. `None` when the
+/// crate is built without the `deflate` feature.
+pub fn inflate_metadata(body: &[u8]) -> Result<Option<Vec<u8>>> {
+    #[cfg(feature = "deflate")]
+    {
+        compcol::vec::decompress_to_vec_capped::<compcol::deflate::Deflate>(
+            body,
+            crate::file::MAX_ITEM_BYTES,
+        )
+        .map(Some)
+        .map_err(|e| HeifError::invalid(format!("deflate metadata item: {e}")))
+    }
+    #[cfg(not(feature = "deflate"))]
+    {
+        let _ = body;
+        Ok(None)
+    }
+}
+
+/// The Exif payload (from the TIFF header on) and the XMP packet among
+/// the items of `meta` listed in `ids` — the first `Exif` / `dExf` item
+/// and the first XMP `mime` item, deflated ones inflated. `file`
+/// resolves the item bodies (a track-level `meta` resolves against the
+/// same file bytes). An unreadable item is skipped.
+pub fn metadata_items<D: AsRef<[u8]>>(
+    file: &crate::file::HeifFile<D>,
+    meta: &Meta,
+    ids: impl IntoIterator<Item = u32>,
+) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    let mut exif = None;
+    let mut xmp = None;
+    for id in ids {
+        let Some(m) = meta.item(id) else {
+            continue;
+        };
+        let Ok(body) = file.item_data_in(meta, id) else {
+            continue;
+        };
+        if m.item_type == ITEM_TYPE_EXIF && exif.is_none() {
+            exif = exif_payload(&body).ok();
+        } else if m.item_type == ITEM_TYPE_DEXF && exif.is_none() {
+            if let Ok(Some(block)) = inflate_metadata(&body) {
+                exif = exif_payload(&block).ok();
+            }
+        } else if m.is_xmp() && xmp.is_none() {
+            let deflated = m
+                .content_encoding
+                .as_deref()
+                .map(|e| e.eq_ignore_ascii_case("deflate"))
+                .unwrap_or(false);
+            if deflated {
+                if let Ok(Some(packet)) = inflate_metadata(&body) {
+                    xmp = Some(packet);
+                }
+            } else {
+                xmp = Some(body.into_owned());
+            }
+        }
+    }
+    (exif, xmp)
+}
+
 /// Item reference types (HEIF §6 / §7.4.5 of the 2017 edition).
 pub mod reference {
     use super::FourCc;

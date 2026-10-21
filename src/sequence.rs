@@ -87,6 +87,16 @@ pub struct SampleEntry {
     pub amve: Option<Amve>,
     /// Every child box, raw, in order.
     pub children: Vec<RawProperty>,
+    /// `content_encoding` of a `metx` / `mett` metadata sample entry
+    /// (ISO/IEC 14496-12 §12.3.3; empty = not encoded).
+    pub content_encoding: Option<String>,
+    /// `namespace` of a `metx` entry (a space-separated list of XML
+    /// namespaces; the XMP track of HEIF Annex A.3).
+    pub namespace: Option<String>,
+    /// `schema_location` of a `metx` entry.
+    pub schema_location: Option<String>,
+    /// `mime_format` of a `mett` entry.
+    pub mime_format: Option<String>,
 }
 impl SampleEntry {
     /// Every field as a positional argument, in declaration order
@@ -133,6 +143,10 @@ impl SampleEntry {
             cclv,
             amve,
             children,
+            content_encoding: None,
+            namespace: None,
+            schema_location: None,
+            mime_format: None,
         }
     }
 }
@@ -406,6 +420,11 @@ pub struct Track {
     pub sample_groups: Vec<SampleGroup>,
     /// `sgpd` group descriptions of the `stbl`, in file order.
     pub sample_group_descriptions: Vec<SampleGroupDescription>,
+    /// The track-level `MetaBox` (ISO/IEC 14496-12 §8.11.1; HEIF §8.3:
+    /// metadata true for the image sequence as a whole — `Exif` items
+    /// per Annex A.2.2, XMP `mime` items per A.3), when present. Its
+    /// items resolve through [`crate::HeifFile::item_data_in`].
+    pub meta: Option<crate::meta::Meta>,
 }
 impl Track {
     /// Every field as a positional argument, in declaration order
@@ -449,6 +468,7 @@ impl Track {
             track_duration,
             sample_groups,
             sample_group_descriptions,
+            meta: None,
         }
     }
 }
@@ -546,6 +566,41 @@ impl Track {
         matches!(&self.handler, b"pict" | b"vide" | b"auxv")
     }
 
+    /// A timed metadata track (handler `meta`, ISO/IEC 14496-12
+    /// §12.3): its samples describe the time-parallel samples of the
+    /// tracks it references through `cdsc` (HEIF §8.3).
+    pub fn is_metadata(&self) -> bool {
+        &self.handler == b"meta"
+    }
+
+    /// The kind of metadata a metadata track carries, from its sample
+    /// entry: `Exif` (HEIF Annex A.2.2: every sample an
+    /// `ExifDataBlock`), `metx` (A.3: XML samples — XMP when the
+    /// namespace says so, taken as XMP here whenever the entry is
+    /// `metx`), `None` for anything else.
+    pub fn metadata_kind(&self) -> Option<MetadataTrackKind> {
+        let e = self.sample_entries.first()?;
+        match &e.entry_type {
+            b"Exif" => Some(MetadataTrackKind::Exif),
+            b"metx" => Some(MetadataTrackKind::Xmp),
+            _ => None,
+        }
+    }
+
+    /// The track-level `meta`'s Exif payload (from the TIFF header on)
+    /// and XMP packet — the metadata true for the whole sequence (HEIF
+    /// §8.3, Annex A.2.2 / A.3): the first `Exif` / `dExf` item and
+    /// the first XMP `mime` item of the `trak`'s `MetaBox`.
+    pub fn sequence_metadata<D: AsRef<[u8]>>(
+        &self,
+        file: &HeifFile<D>,
+    ) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+        match &self.meta {
+            Some(m) => crate::meta::metadata_items(file, m, m.items.iter().map(|i| i.id)),
+            None => (None, None),
+        }
+    }
+
     /// The first sample entry.
     pub fn primary_entry(&self) -> Option<&SampleEntry> {
         self.sample_entries.first()
@@ -630,6 +685,18 @@ impl Track {
     }
 }
 
+/// What a timed metadata track carries (its sample entry type).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MetadataTrackKind {
+    /// `Exif` sample entry (HEIF Annex A.2.2): every sample an
+    /// `ExifDataBlock`.
+    Exif,
+    /// `metx` sample entry (ISO/IEC 14496-12 §12.3.3.2) — XMP packets
+    /// (HEIF Annex A.3).
+    Xmp,
+}
+
 /// The `moov` box.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -683,6 +750,19 @@ impl Movie {
         self.tracks
             .iter()
             .filter(|t| t.track_id != track_id && t.references_of(b"auxl").contains(&track_id))
+            .collect()
+    }
+
+    /// The timed metadata tracks describing `track_id` (HEIF §8.3: a
+    /// `cdsc` track reference from the metadata track), in file order.
+    pub fn metadata_tracks_of(&self, track_id: u32) -> Vec<&Track> {
+        self.tracks
+            .iter()
+            .filter(|t| {
+                t.track_id != track_id
+                    && t.is_metadata()
+                    && t.references_of(b"cdsc").contains(&track_id)
+            })
             .collect()
     }
 
@@ -1075,8 +1155,12 @@ fn parse_trak(trak: &[u8], file_len: u64) -> Result<Track> {
     let (_, stbl) =
         find_box(minf, b"stbl")?.ok_or_else(|| HeifError::invalid("minf without stbl"))?;
     let sample_entries = match find_box(stbl, b"stsd")? {
-        Some((_, stsd)) => parse_stsd(stsd)?,
+        Some((_, stsd)) => parse_stsd(stsd, &handler)?,
         None => Vec::new(),
+    };
+    let meta = match find_box(trak, b"meta")? {
+        Some((_, m)) => Some(crate::meta::Meta::parse(m)?),
+        None => None,
     };
     let samples = parse_sample_table(stbl, file_len)?;
     let mut sample_groups = Vec::new();
@@ -1153,10 +1237,11 @@ fn parse_trak(trak: &[u8], file_len: u64) -> Result<Track> {
         track_duration: tk.duration,
         sample_groups,
         sample_group_descriptions,
+        meta,
     })
 }
 
-fn parse_stsd(p: &[u8]) -> Result<Vec<SampleEntry>> {
+fn parse_stsd(p: &[u8], handler: &FourCc) -> Result<Vec<SampleEntry>> {
     let (_v, _f, body) = parse_full_box(p)?;
     let mut r = Reader::new(body);
     let n = r.u32("stsd entry_count")? as usize;
@@ -1165,10 +1250,83 @@ fn parse_stsd(p: &[u8]) -> Result<Vec<SampleEntry>> {
     let mut cursor = 0usize;
     while out.len() < n && cursor < entries.len() {
         let h = crate::boxes::parse_box_header(entries, cursor)?;
-        out.push(parse_visual_entry(h.box_type, payload(entries, &h))?);
+        let body = payload(entries, &h);
+        // Visual handlers carry a VisualSampleEntry; every other
+        // handler's entry is read as the plain SampleEntry header plus
+        // the metadata fields of ISO/IEC 14496-12 §12.3.3 (`metx` /
+        // `mett`) — `soun` / `hint` / `text` entries keep their children
+        // only.
+        out.push(match handler {
+            b"vide" | b"pict" | b"auxv" => parse_visual_entry(h.box_type, body)?,
+            _ => parse_other_entry(h.box_type, body)?,
+        });
         cursor = h.end();
     }
     Ok(out)
+}
+
+/// A non-visual sample entry: the SampleEntry header, then for the
+/// timed-metadata entries (§12.3.3.2) `metx` (`content_encoding`,
+/// `namespace`, `schema_location`) or `mett` (`content_encoding`,
+/// `mime_format`) and the child boxes; an `Exif` entry (HEIF Annex
+/// A.2.2) has nothing beyond the header. Strings end at the entry's
+/// end when a writer leaves a trailing one out.
+fn parse_other_entry(entry_type: FourCc, p: &[u8]) -> Result<SampleEntry> {
+    let mut r = Reader::new(p);
+    r.skip(6, "SampleEntry reserved")?;
+    let data_reference_index = r.u16("SampleEntry data_reference_index")?;
+    let mut entry = SampleEntry::new(
+        entry_type,
+        data_reference_index,
+        0,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Vec::new(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Vec::new(),
+    );
+    let cstr_opt = |r: &mut Reader<'_>, what: &str| -> Result<Option<String>> {
+        if r.is_empty() {
+            Ok(None)
+        } else {
+            r.cstr(what).map(Some)
+        }
+    };
+    match &entry_type {
+        b"metx" => {
+            entry.content_encoding = cstr_opt(&mut r, "metx content_encoding")?;
+            entry.namespace = cstr_opt(&mut r, "metx namespace")?;
+            entry.schema_location = cstr_opt(&mut r, "metx schema_location")?;
+        }
+        b"mett" => {
+            entry.content_encoding = cstr_opt(&mut r, "mett content_encoding")?;
+            entry.mime_format = cstr_opt(&mut r, "mett mime_format")?;
+        }
+        _ => {}
+    }
+    let rest = r.rest();
+    for h in iter_boxes(rest) {
+        let Ok(h) = h else {
+            break;
+        };
+        entry.children.push(RawProperty {
+            box_type: h.box_type,
+            user_type: h.user_type,
+            body: payload(rest, &h).to_vec(),
+            box_size: h.total_len(),
+        });
+    }
+    Ok(entry)
 }
 
 /// VisualSampleEntry: SampleEntry (6 reserved + data_reference_index)
@@ -1209,6 +1367,10 @@ fn parse_visual_entry(entry_type: FourCc, p: &[u8]) -> Result<SampleEntry> {
         cclv: None,
         amve: None,
         children: Vec::new(),
+        content_encoding: None,
+        namespace: None,
+        schema_location: None,
+        mime_format: None,
     };
     // QuickTime writers end a sample entry with a 4-byte zero
     // terminator after the child boxes; stop before a tail shorter
@@ -1614,6 +1776,7 @@ mod tests {
             track_duration: 0,
             sample_groups: vec![],
             sample_group_descriptions: vec![],
+            meta: None,
         };
         assert_eq!(
             t.orientation(),
@@ -1738,6 +1901,7 @@ mod tests {
             track_duration: 0,
             sample_groups: vec![parse_sbgp(&sbgp[8..]).unwrap()],
             sample_group_descriptions: vec![desc2],
+            meta: None,
         };
         assert_eq!(t.group_description_index(b"eqiv", None, 0), Some(1));
         assert_eq!(t.group_description_index(b"eqiv", Some(7), 0), Some(1));

@@ -139,7 +139,8 @@ mod tests {
                 "depth",
                 "filters",
                 "chroma",
-                "cabac"
+                "cabac",
+                "tiling"
             ]
         );
         let schema = ctx

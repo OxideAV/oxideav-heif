@@ -61,6 +61,17 @@ pub const CODEC_ID: &str = "heif";
 /// whole `avif`-branded files, which the `"heif"` muxer writes through
 /// exactly like a `"heif"` still stream's.
 pub const CODEC_ID_AVIF: &str = "avif";
+/// Codec id of the `Data` streams the demuxer surfaces for Exif
+/// metadata tracks (HEIF §8.3 / Annex A.2.2): every packet is one
+/// sample's Exif payload from the TIFF header on (the `ExifDataBlock`
+/// offset word resolved), time-parallel to the pictures of the track it
+/// describes (`track:<id>:tref:cdsc`). The muxer takes a stream of this
+/// id back into an `Exif` metadata track.
+pub const CODEC_ID_EXIF: &str = "exif";
+/// Codec id of the `Data` streams for XMP metadata tracks (Annex A.3,
+/// `metx` sample entry): every packet one XMP packet. The muxer takes
+/// a stream of this id back into a `metx` metadata track.
+pub const CODEC_ID_XMP: &str = "xmp";
 /// Maximum file size the demuxer reads into memory.
 pub const MAX_FILE_BYTES: u64 = 1 << 32;
 
@@ -230,6 +241,16 @@ struct TrackStream {
     /// each packet is a synthesized single-image HEIF file (master
     /// sample + time-parallel alpha sample) for the `"heif"` codec.
     alpha_track_index: Option<usize>,
+    /// Timed metadata tracks (HEIF §8.3) composed into this stream:
+    /// the time-parallel Exif / XMP sample of each becomes a metadata
+    /// item of the synthesized still, so the decoded frame carries it
+    /// as a per-frame blob. A composed stream exists for a master with
+    /// an alpha track or at least one such metadata track.
+    metadata_track_indices: Vec<usize>,
+    /// This stream is a timed metadata track surfaced as a `Data`
+    /// stream: packets are the sample payloads (`Exif` offset word
+    /// resolved).
+    data_kind: Option<crate::sequence::MetadataTrackKind>,
 }
 
 /// The metadata blobs of an image item (r476, core 0.1.40): its ICC
@@ -244,21 +265,6 @@ fn item_blobs<D: AsRef<[u8]>>(file: &HeifFile<D>, node: &ImageNode) -> Vec<Metad
         node.properties.icc_profile().map(<[u8]>::to_vec),
         exif,
         xmp.map(String::into_bytes),
-        None,
-    ))
-}
-
-/// The metadata blobs of a visual sample entry: its ICC profile
-/// (`colr` `prof` / `rICC`) — what the contract `decode_all` puts on
-/// every frame of the track.
-fn entry_blobs(entry: &crate::sequence::SampleEntry) -> Vec<MetadataBlob> {
-    crate::api_registry::blobs_of_metadata(&crate::api::Metadata::new(
-        entry.colr.iter().find_map(|c| match c {
-            crate::props::Colr::Icc { profile, .. } => Some(profile.clone()),
-            _ => None,
-        }),
-        None,
-        None,
         None,
     ))
 }
@@ -306,6 +312,7 @@ fn entry_item(
 pub fn synthesize_still(
     master: (&Track, &[u8]),
     alpha: Option<(&Track, &[u8])>,
+    metadata: &[(crate::sequence::MetadataTrackKind, &[u8])],
 ) -> Result<Vec<u8>> {
     let (mt, mdata) = master;
     let me = mt
@@ -382,8 +389,50 @@ pub fn synthesize_still(
         }
         w.add_alpha(id, a_type, adata.to_vec(), aprops, false);
     }
+    // The time-parallel metadata samples (HEIF §8.3) as the still's
+    // own `cdsc` items: an Exif sample is already an ExifDataBlock.
+    for (kind, bytes) in metadata {
+        match kind {
+            crate::sequence::MetadataTrackKind::Exif => {
+                w.add_exif_raw(id, bytes.to_vec());
+            }
+            _ => {
+                w.add_xmp_bytes(id, bytes.to_vec());
+            }
+        }
+    }
     w.set_primary(id);
     w.write_to_vec()
+}
+
+/// The blobs of a visual track's stream: its sample entry's ICC
+/// profile and the track-level `meta`'s Exif / XMP (HEIF §8.3, the
+/// metadata true for the whole sequence).
+fn track_blobs<D: AsRef<[u8]>>(
+    file: &HeifFile<D>,
+    track: &Track,
+    entry: &crate::sequence::SampleEntry,
+) -> Vec<MetadataBlob> {
+    let (exif, xmp) = track.sequence_metadata(file);
+    crate::api_registry::blobs_of_metadata(&crate::api::Metadata::new(
+        entry.colr.iter().find_map(|c| match c {
+            crate::props::Colr::Icc { profile, .. } => Some(profile.clone()),
+            _ => None,
+        }),
+        exif,
+        xmp,
+        None,
+    ))
+}
+
+/// The metadata tracks of `track_id` this demuxer composes and
+/// surfaces: those whose sample entry is `Exif` or `metx`.
+fn known_metadata_tracks(mv: &Movie, track_id: u32) -> Vec<usize> {
+    mv.metadata_tracks_of(track_id)
+        .into_iter()
+        .filter(|m| m.metadata_kind().is_some())
+        .filter_map(|m| mv.tracks.iter().position(|x| x.track_id == m.track_id))
+        .collect()
 }
 
 /// The HEIF demuxer.
@@ -622,12 +671,13 @@ impl HeifDemuxer {
                 if !t.is_visual() || &t.handler == b"auxv" {
                     continue;
                 }
-                let Some(alpha) = mv.alpha_track_of(t.track_id) else {
+                let alpha = mv.alpha_track_of(t.track_id);
+                let ai =
+                    alpha.and_then(|a| mv.tracks.iter().position(|x| x.track_id == a.track_id));
+                let metadata_track_indices = known_metadata_tracks(mv, t.track_id);
+                if ai.is_none() && metadata_track_indices.is_empty() {
                     continue;
-                };
-                let Some(ai) = mv.tracks.iter().position(|x| x.track_id == alpha.track_id) else {
-                    continue;
-                };
+                }
                 let Some(entry) = t.primary_entry() else {
                     continue;
                 };
@@ -642,10 +692,15 @@ impl HeifDemuxer {
                     .unwrap_or(crate::props::Colr::MIAF_DEFAULT);
                 let mut params = CodecParameters::video(CodecId::new(CODEC_ID))
                     .with_color_signal(crate::image::core_bridge::color_signal_of(&colour))
-                    .with_blobs(entry_blobs(entry));
+                    .with_blobs(track_blobs(&file, t, entry));
                 params.width = Some(entry.width as u32);
                 params.height = Some(entry.height as u32);
-                params.pixel_format = core_pixel_format_for(layout.with_alpha(), &colour);
+                let layout = if ai.is_some() {
+                    layout.with_alpha()
+                } else {
+                    layout
+                };
+                params.pixel_format = core_pixel_format_for(layout, &colour);
                 let time_base = TimeBase::new(1, t.timescale.max(1) as i64);
                 let index = (track_base + streams.len()) as u32;
                 streams.push(StreamInfo {
@@ -661,13 +716,27 @@ impl HeifDemuxer {
                         track_index: ti,
                         cursor: 0,
                         time_base,
-                        alpha_track_index: Some(ai),
+                        alpha_track_index: ai,
+                        metadata_track_indices: metadata_track_indices.clone(),
+                        data_kind: None,
                     },
                 ));
-                metadata.push((
-                    format!("track:{}:alpha_track", t.track_id),
-                    alpha.track_id.to_string(),
-                ));
+                if let Some(alpha) = alpha {
+                    metadata.push((
+                        format!("track:{}:alpha_track", t.track_id),
+                        alpha.track_id.to_string(),
+                    ));
+                }
+                if !metadata_track_indices.is_empty() {
+                    metadata.push((
+                        format!("track:{}:metadata_tracks", t.track_id),
+                        metadata_track_indices
+                            .iter()
+                            .map(|i| mv.tracks[*i].track_id.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ));
+                }
                 metadata.push((
                     format!("stream:{index}:composed_from_track"),
                     t.track_id.to_string(),
@@ -711,7 +780,7 @@ impl HeifDemuxer {
                 }
                 params = params
                     .with_tag(CodecTag::fourcc(&entry.entry_type))
-                    .with_blobs(entry_blobs(entry));
+                    .with_blobs(track_blobs(&file, t, entry));
                 let time_base = TimeBase::new(1, t.timescale.max(1) as i64);
                 let index = (track_base + streams.len()) as u32;
                 streams.push(StreamInfo {
@@ -728,6 +797,8 @@ impl HeifDemuxer {
                         cursor: 0,
                         time_base,
                         alpha_track_index: None,
+                        metadata_track_indices: Vec::new(),
+                        data_kind: None,
                     },
                 ));
                 metadata.push((format!("stream:{index}:track_id"), t.track_id.to_string()));
@@ -738,6 +809,55 @@ impl HeifDemuxer {
                 if let Some(a) = &entry.aux_track_type {
                     metadata.push((format!("track:{}:aux_track_type", t.track_id), a.clone()));
                 }
+                for (rt, ids) in &t.references {
+                    metadata.push((
+                        format!("track:{}:tref:{}", t.track_id, crate::boxes::fourcc_str(rt)),
+                        ids.iter().map(u32::to_string).collect::<Vec<_>>().join(","),
+                    ));
+                }
+            }
+        }
+        // Timed metadata tracks (HEIF §8.3) as `Data` streams: Exif
+        // payloads / XMP packets, one packet per sample, time-parallel
+        // to the track they describe.
+        if let Some(mv) = &movie {
+            for (ti, t) in mv.tracks.iter().enumerate() {
+                let Some(kind) = t.metadata_kind() else {
+                    continue;
+                };
+                if !t.is_metadata() {
+                    continue;
+                }
+                let id = match kind {
+                    crate::sequence::MetadataTrackKind::Exif => CODEC_ID_EXIF,
+                    _ => CODEC_ID_XMP,
+                };
+                let params = CodecParameters::data(CodecId::new(id));
+                let time_base = TimeBase::new(1, t.timescale.max(1) as i64);
+                let index = (track_base + streams.len()) as u32;
+                streams.push(StreamInfo {
+                    index,
+                    time_base,
+                    duration: Some(t.duration as i64),
+                    start_time: t.samples.first().map(|s| s.pts() as i64),
+                    params,
+                });
+                tracks.push((
+                    index,
+                    TrackStream {
+                        track_index: ti,
+                        cursor: 0,
+                        time_base,
+                        alpha_track_index: None,
+                        metadata_track_indices: Vec::new(),
+                        data_kind: Some(kind),
+                    },
+                ));
+                metadata.push((format!("stream:{index}:track_id"), t.track_id.to_string()));
+                metadata.push((
+                    format!("track:{}:handler", t.track_id),
+                    crate::boxes::fourcc_str(&t.handler),
+                ));
                 for (rt, ids) in &t.references {
                     metadata.push((
                         format!("track:{}:tref:{}", t.track_id, crate::boxes::fourcc_str(rt)),
@@ -906,22 +1026,41 @@ impl oxideav_core::Demuxer for HeifDemuxer {
         let idx = *idx;
         let t = self.track(ts);
         let s = t.samples[ts.cursor];
-        let data = match ts.alpha_track_index {
-            None => sample_bytes(&self.file, &s)?.to_vec(),
-            Some(ai) => {
-                let at = &self
-                    .movie
-                    .as_ref()
-                    .expect("track stream implies movie")
-                    .tracks[ai];
-                let alpha = at
-                    .sample_index_at(s.dts, t.timescale)
-                    .and_then(|i| at.samples.get(i))
-                    .map(|a| sample_bytes(&self.file, a))
-                    .transpose()?
-                    .map(|bytes| (at, bytes));
-                synthesize_still((t, sample_bytes(&self.file, &s)?), alpha)?
+        let mv = self.movie.as_ref().expect("track stream implies movie");
+        let data = if let Some(kind) = ts.data_kind {
+            let bytes = sample_bytes(&self.file, &s)?;
+            match kind {
+                crate::sequence::MetadataTrackKind::Exif => {
+                    crate::meta::exif_payload(bytes).unwrap_or_else(|_| bytes.to_vec())
+                }
+                _ => bytes.to_vec(),
             }
+        } else if ts.alpha_track_index.is_none() && ts.metadata_track_indices.is_empty() {
+            sample_bytes(&self.file, &s)?.to_vec()
+        } else {
+            let time_parallel = |other: &'_ Track| -> CoreResult<Option<&'_ [u8]>> {
+                other
+                    .sample_index_at(s.dts, t.timescale)
+                    .and_then(|i| other.samples.get(i))
+                    .map(|a| sample_bytes(&self.file, a))
+                    .transpose()
+                    .map_err(CoreError::from)
+            };
+            let alpha = match ts.alpha_track_index {
+                Some(ai) => {
+                    let at = &mv.tracks[ai];
+                    time_parallel(at)?.map(|bytes| (at, bytes))
+                }
+                None => None,
+            };
+            let mut metadata = Vec::with_capacity(ts.metadata_track_indices.len());
+            for mi in &ts.metadata_track_indices {
+                let mt = &mv.tracks[*mi];
+                if let (Some(kind), Some(bytes)) = (mt.metadata_kind(), time_parallel(mt)?) {
+                    metadata.push((kind, bytes));
+                }
+            }
+            synthesize_still((t, sample_bytes(&self.file, &s)?), alpha, &metadata)?
         };
         let tb = ts.time_base;
         self.tracks[i].1.cursor += 1;

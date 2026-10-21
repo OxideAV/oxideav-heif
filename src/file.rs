@@ -205,7 +205,16 @@ impl<D: AsRef<[u8]>> HeifFile<D> {
     /// every construction method). Borrows from the file when the item
     /// is a single contiguous span.
     pub fn item_data(&self, item_id: u32) -> Result<Cow<'_, [u8]>> {
-        self.item_data_depth(item_id, 0)
+        self.item_data_in(self.meta()?, item_id)
+    }
+
+    /// [`item_data`](Self::item_data) against a given `meta` tree — the
+    /// file-level one, or a track-level `MetaBox` (ISO/IEC 14496-12
+    /// §8.11.1: items of a `trak`'s `meta` resolve their construction
+    /// method 0 offsets against this file and method 1 against that
+    /// `meta`'s own `idat`).
+    pub fn item_data_in<'m>(&'m self, meta: &'m Meta, item_id: u32) -> Result<Cow<'m, [u8]>> {
+        self.item_data_depth(meta, item_id, 0)
     }
 
     /// Owned copy of [`item_data`](Self::item_data).
@@ -312,13 +321,17 @@ impl<D: AsRef<[u8]>> HeifFile<D> {
         Ok(out)
     }
 
-    fn item_data_depth(&self, item_id: u32, depth: usize) -> Result<Cow<'_, [u8]>> {
+    fn item_data_depth<'m>(
+        &'m self,
+        meta: &'m Meta,
+        item_id: u32,
+        depth: usize,
+    ) -> Result<Cow<'m, [u8]>> {
         if depth > MAX_ILOC_DEPTH {
             return Err(HeifError::exhausted(format!(
                 "item {item_id}: construction-method-2 chain deeper than {MAX_ILOC_DEPTH}"
             )));
         }
-        let meta = self.meta()?;
         let loc = meta
             .location(item_id)
             .ok_or_else(|| HeifError::invalid(format!("item {item_id} has no iloc entry")))?;
@@ -357,7 +370,7 @@ impl<D: AsRef<[u8]>> HeifFile<D> {
                             "item {item_id} references itself through construction method 2"
                         )));
                     }
-                    let src = self.item_data_depth(src_id, depth + 1)?;
+                    let src = self.item_data_depth(meta, src_id, depth + 1)?;
                     let start = loc
                         .base_offset
                         .checked_add(e.offset)

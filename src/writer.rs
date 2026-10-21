@@ -1761,6 +1761,62 @@ impl SequenceAlphaTrack {
     }
 }
 
+/// A timed metadata track for [`SequenceWriter`] (HEIF §8.3): a
+/// `meta`-handler track linked to the master by a `cdsc` track
+/// reference whose samples describe the time-parallel master samples
+/// — `Exif` samples (Annex A.2.2: every sample an `ExifDataBlock`,
+/// sample entry `Exif`) or XMP packets (Annex A.3: an XML metadata
+/// sample entry `metx` naming the XMP namespace). The samples carry
+/// their own durations in `timescale` (a sample describes the master
+/// samples its interval covers; one sample over the whole duration
+/// describes them all), so a track need not have one sample per
+/// picture.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct SequenceMetadataTrack {
+    /// What the samples are.
+    pub kind: crate::sequence::MetadataTrackKind,
+    /// Media timescale of this track.
+    pub timescale: u32,
+    /// The samples: `Exif` — the payload from the TIFF header on (the
+    /// `ExifDataBlock` offset word is written by the writer); XMP —
+    /// the packet bytes.
+    pub samples: Vec<SequenceSample>,
+}
+impl SequenceMetadataTrack {
+    /// The bytes the samples occupy in `mdat` (an Exif sample is stored
+    /// as an `ExifDataBlock`: four bytes longer than its payload).
+    fn stored_len(&self) -> u64 {
+        let prefix = match self.kind {
+            crate::sequence::MetadataTrackKind::Exif => 4u64,
+            _ => 0,
+        };
+        self.samples
+            .iter()
+            .map(|s| s.data.len() as u64 + prefix)
+            .sum()
+    }
+
+    /// Every field as a positional argument, in declaration order.
+    pub fn new(
+        kind: crate::sequence::MetadataTrackKind,
+        timescale: u32,
+        samples: Vec<SequenceSample>,
+    ) -> Self {
+        Self {
+            kind,
+            timescale,
+            samples,
+        }
+    }
+}
+
+/// The XML namespace a `metx` XMP track's sample entry names: the
+/// namespace of the `x:xmpmeta` packet wrapper (HEIF Annex A.3 asks
+/// for "the XMP namespace" without spelling it; this is the one the
+/// packet's own root element declares).
+pub const XMP_NAMESPACE: &str = "adobe:ns:meta/";
+
 /// Builder for an image-sequence file (`msf1`).
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -1803,6 +1859,17 @@ pub struct SequenceWriter {
     /// [`crate::sequence::LoopBehaviour::Forever`] sets `RepeatEdits`
     /// with the all-ones (indefinite) track duration.
     pub looping: Option<crate::sequence::LoopBehaviour>,
+    /// Exif payload (from the TIFF header on) true for the whole
+    /// sequence, written as an `Exif` item of the master track's
+    /// `MetaBox` (HEIF §8.3, Annex A.2.2).
+    pub exif: Option<Vec<u8>>,
+    /// XMP packet true for the whole sequence, written as a `mime`
+    /// (`application/rdf+xml`) item of the master track's `MetaBox`
+    /// (Annex A.3).
+    pub xmp: Option<Vec<u8>>,
+    /// Timed metadata tracks describing the master track (tracks after
+    /// the alpha one, each with a `cdsc` reference to track 1).
+    pub metadata_tracks: Vec<SequenceMetadataTrack>,
 }
 impl SequenceWriter {}
 
@@ -1830,7 +1897,27 @@ impl SequenceWriter {
             cover_sample: None,
             alpha: None,
             looping: None,
+            exif: None,
+            xmp: None,
+            metadata_tracks: Vec::new(),
         }
+    }
+
+    /// Set the sequence-level Exif payload (see [`SequenceWriter::exif`]).
+    pub fn with_exif(mut self, exif: Option<Vec<u8>>) -> Self {
+        self.exif = exif;
+        self
+    }
+
+    /// Set the sequence-level XMP packet (see [`SequenceWriter::xmp`]).
+    pub fn with_xmp(mut self, xmp: Option<Vec<u8>>) -> Self {
+        self.xmp = xmp;
+        self
+    }
+
+    /// Queue a timed metadata track (see [`SequenceMetadataTrack`]).
+    pub fn push_metadata_track(&mut self, track: SequenceMetadataTrack) {
+        self.metadata_tracks.push(track);
     }
 
     /// Set the looping behaviour (see [`SequenceWriter::looping`]).
@@ -1876,6 +1963,13 @@ impl SequenceWriter {
                 return Err(HeifError::invalid(
                     "sequence writer: alpha config is not a decoder configuration",
                 ));
+            }
+        }
+        for (i, m) in self.metadata_tracks.iter().enumerate() {
+            if m.samples.is_empty() {
+                return Err(HeifError::invalid(format!(
+                    "sequence writer: metadata track {i} has no samples"
+                )));
             }
         }
         let (major, compat) = self.auto_brands();
@@ -2040,7 +2134,20 @@ impl SequenceWriter {
             None => (Vec::new(), (Vec::new(), 0)),
         };
         // moov
-        let next_track_id: u32 = if self.alpha.is_some() { 3 } else { 2 };
+        let next_track_id: u32 =
+            2 + self.alpha.is_some() as u32 + self.metadata_tracks.len() as u32;
+        let first_meta_track = 2 + self.alpha.is_some() as u32;
+        // The sequence-level metadata: a MetaBox in the master trak
+        // (HEIF §8.3), its items in `idat` so nothing depends on the
+        // file layout.
+        // Item ids of the track-level meta are a scope of their own
+        // (14496-12 §8.11.1), but a reader that pools every MetaBox's
+        // items into one table trips over a collision with the cover
+        // still's ids (measured: ffmpeg refuses a file whose cover
+        // carries Exif / XMP items and whose track meta re-uses their
+        // ids), so they start past the still's.
+        let first_item_id = self.still.as_ref().map(|w| w.next_id).unwrap_or(1);
+        let track_meta = track_meta_box(self.exif.as_deref(), self.xmp.as_deref(), first_item_id);
         let mvhd = {
             let mut b = vec![0u8; 8];
             b.extend_from_slice(&ts.to_be_bytes());
@@ -2069,6 +2176,7 @@ impl SequenceWriter {
             samples: &self.samples,
             tref_auxl: None,
             looping: self.looping,
+            meta: &track_meta,
         };
         let alpha = self.alpha.as_ref().map(|a| TrackSpec {
             track_id: 2,
@@ -2085,8 +2193,14 @@ impl SequenceWriter {
             samples: &a.samples,
             tref_auxl: Some(1),
             looping: self.looping,
+            meta: &[],
         });
         let master_len: u64 = self.samples.iter().map(|s| s.data.len() as u64).sum();
+        let alpha_len: u64 = self
+            .alpha
+            .as_ref()
+            .map(|a| a.samples.iter().map(|s| s.data.len() as u64).sum())
+            .unwrap_or(0);
         let moov_for = |base: u64| -> Vec<u8> {
             let mut moov = Vec::new();
             moov.extend_from_slice(&mvhd);
@@ -2094,9 +2208,27 @@ impl SequenceWriter {
             if let Some(a) = &alpha {
                 moov.extend(trak_box(a, ts, base + master_len));
             }
+            let mut off = base + master_len + alpha_len;
+            for (i, m) in self.metadata_tracks.iter().enumerate() {
+                moov.extend(metadata_trak_box(
+                    m,
+                    first_meta_track + i as u32,
+                    ts,
+                    off,
+                    self.looping,
+                ));
+                off += m.stored_len();
+            }
             boxed(b"moov", &moov)
         };
-        // Layout: ftyp, moov, [meta], mdat(still data + samples).
+        // Layout: ftyp, [meta], moov, mdat(still data + samples). The
+        // file-level meta precedes the moov: a black-box reader that
+        // walks the track-level MetaBox (HEIF §8.3) with the item state
+        // of a file-level one it has already read refuses the file
+        // ("missing stream referenced by thmb item") whenever the cover
+        // still carries `cdsc` metadata items; read first, the
+        // file-level meta is complete before the track's is seen, and
+        // every other reader on this machine opens both orders.
         let moov_len = moov_for(0).len() as u64;
         let mut still_meta = still_meta;
         let (still_mdat_bytes, still_mdat_old_base) = still_mdat;
@@ -2120,8 +2252,8 @@ impl SequenceWriter {
             relocate_iloc(&mut still_meta, delta, override_extent)?;
         }
         let mut out = ftyp;
-        out.extend(moov_for(samples_base));
         out.extend_from_slice(&still_meta);
+        out.extend(moov_for(samples_base));
         let mut mdat = still_mdat_bytes;
         for s in &self.samples {
             mdat.extend_from_slice(&s.data);
@@ -2131,9 +2263,175 @@ impl SequenceWriter {
                 mdat.extend_from_slice(&s.data);
             }
         }
+        for m in &self.metadata_tracks {
+            for s in &m.samples {
+                match m.kind {
+                    crate::sequence::MetadataTrackKind::Exif => {
+                        mdat.extend_from_slice(&crate::meta::exif_data_block(&s.data))
+                    }
+                    _ => mdat.extend_from_slice(&s.data),
+                }
+            }
+        }
         push_box(&mut out, b"mdat", &mdat);
         Ok(out)
     }
+}
+
+/// A track-level `MetaBox` (ISO/IEC 14496-12 §8.11.1, `pict` handler —
+/// no `pitm`, so the handler is required) holding an `Exif` item
+/// (Annex A.2.1 `ExifDataBlock`) and / or an XMP `mime` item, their
+/// bodies in `idat` (construction method 1). Empty when neither is
+/// given. Items are numbered from `first_item_id`.
+fn track_meta_box(exif: Option<&[u8]>, xmp: Option<&[u8]>, first_item_id: u32) -> Vec<u8> {
+    let mut items: Vec<(FourCc, Option<&str>, Vec<u8>)> = Vec::new();
+    if let Some(e) = exif {
+        items.push((ITEM_TYPE_EXIF, None, crate::meta::exif_data_block(e)));
+    }
+    if let Some(x) = xmp {
+        items.push((ITEM_TYPE_MIME, Some("application/rdf+xml"), x.to_vec()));
+    }
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let mut hdlr_body = vec![0u8; 4];
+    hdlr_body.extend_from_slice(b"pict");
+    hdlr_body.extend_from_slice(&[0u8; 12]);
+    hdlr_body.push(0);
+    let hdlr = full_boxed(b"hdlr", 0, 0, &hdlr_body);
+    let mut iinf_body = (items.len() as u16).to_be_bytes().to_vec();
+    let mut iloc_body = vec![(4 << 4) | 4, 0]; // offset_size 4, length_size 4, base_offset_size 0, index_size 0
+    iloc_body.extend_from_slice(&(items.len() as u16).to_be_bytes());
+    let mut idat = Vec::new();
+    for (i, (item_type, content_type, body)) in items.iter().enumerate() {
+        let id = (first_item_id + i as u32).min(u16::MAX as u32) as u16;
+        let mut infe = id.to_be_bytes().to_vec();
+        infe.extend_from_slice(&0u16.to_be_bytes()); // item_protection_index
+        infe.extend_from_slice(item_type);
+        infe.push(0); // item_name
+        if let Some(ct) = content_type {
+            infe.extend_from_slice(ct.as_bytes());
+            infe.push(0);
+        }
+        iinf_body.extend(full_boxed(b"infe", 2, 0, &infe));
+        iloc_body.extend_from_slice(&id.to_be_bytes());
+        iloc_body.extend_from_slice(&1u16.to_be_bytes()); // construction_method 1 (idat)
+        iloc_body.extend_from_slice(&0u16.to_be_bytes()); // data_reference_index
+        iloc_body.extend_from_slice(&1u16.to_be_bytes()); // extent_count
+        iloc_body.extend_from_slice(&(idat.len() as u32).to_be_bytes());
+        iloc_body.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        idat.extend_from_slice(body);
+    }
+    let mut meta = hdlr;
+    meta.extend(full_boxed(b"iinf", 0, 0, &iinf_body));
+    meta.extend(full_boxed(b"iloc", 1, 0, &iloc_body));
+    meta.extend(boxed(b"idat", &idat));
+    full_boxed(b"meta", 0, 0, &meta)
+}
+
+/// A timed metadata `trak` (ISO/IEC 14496-12 §12.3: `meta` handler,
+/// `nmhd`, a `MetaDataSampleEntry`) whose samples start at
+/// `chunk_offset`, with a `cdsc` track reference to track 1 (HEIF
+/// §8.3). `Exif` tracks get the `Exif` sample entry (Annex A.2.2),
+/// XMP tracks a `metx` entry naming [`XMP_NAMESPACE`] (A.3).
+fn metadata_trak_box(
+    m: &SequenceMetadataTrack,
+    track_id: u32,
+    movie_ts: u32,
+    chunk_offset: u64,
+    looping: Option<crate::sequence::LoopBehaviour>,
+) -> Vec<u8> {
+    use crate::sequence::MetadataTrackKind as K;
+    let ts = m.timescale.max(1);
+    let total: u64 = m.samples.iter().map(|s| s.duration as u64).sum();
+    // The track header counts in the movie timescale.
+    let movie_total = total
+        .saturating_mul(movie_ts as u64)
+        .checked_div(ts as u64)
+        .unwrap_or(total);
+    let (tkhd_duration, edts) = looping_boxes(looping, movie_total);
+    let tkhd = {
+        let mut b = vec![0u8; 8];
+        b.extend_from_slice(&track_id.to_be_bytes());
+        b.extend_from_slice(&[0u8; 4]);
+        b.extend_from_slice(&tkhd_duration.to_be_bytes());
+        b.extend_from_slice(&[0u8; 8]);
+        b.extend_from_slice(&[0u8; 8]);
+        for mx in [0x10000u32, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000] {
+            b.extend_from_slice(&mx.to_be_bytes());
+        }
+        b.extend_from_slice(&[0u8; 8]); // width / height 0
+        full_boxed(b"tkhd", 0, 3, &b)
+    };
+    let tref = boxed(b"tref", &boxed(b"cdsc", &1u32.to_be_bytes()));
+    let mdhd = {
+        let mut b = vec![0u8; 8];
+        b.extend_from_slice(&ts.to_be_bytes());
+        b.extend_from_slice(&(total.min(u32::MAX as u64) as u32).to_be_bytes());
+        b.extend_from_slice(&0x55c4u16.to_be_bytes()); // 'und'
+        b.extend_from_slice(&0u16.to_be_bytes());
+        full_boxed(b"mdhd", 0, 0, &b)
+    };
+    let hdlr = {
+        let mut b = vec![0u8; 4];
+        b.extend_from_slice(b"meta");
+        b.extend_from_slice(&[0u8; 12]);
+        b.push(0);
+        full_boxed(b"hdlr", 0, 0, &b)
+    };
+    let nmhd = full_boxed(b"nmhd", 0, 0, &[]);
+    let dinf = {
+        let url = full_boxed(b"url ", 0, 1, &[]);
+        let mut d = 1u32.to_be_bytes().to_vec();
+        d.extend(url);
+        boxed(b"dinf", &full_boxed(b"dref", 0, 0, &d))
+    };
+    let stsd = {
+        let mut e = vec![0u8; 6];
+        e.extend_from_slice(&1u16.to_be_bytes());
+        let entry_type: FourCc = match m.kind {
+            K::Exif => *b"Exif",
+            _ => {
+                e.push(0); // content_encoding: none
+                e.extend_from_slice(XMP_NAMESPACE.as_bytes());
+                e.push(0);
+                e.push(0); // schema_location: none
+                *b"metx"
+            }
+        };
+        let mut b = 1u32.to_be_bytes().to_vec();
+        b.extend(boxed(&entry_type, &e));
+        full_boxed(b"stsd", 0, 0, &b)
+    };
+    // Sample sizes as stored (the Exif offset word included).
+    let stored: Vec<SequenceSample> = m
+        .samples
+        .iter()
+        .map(|s| SequenceSample {
+            data: match m.kind {
+                K::Exif => crate::meta::exif_data_block(&s.data),
+                _ => s.data.clone(),
+            },
+            duration: s.duration,
+            sync: s.sync,
+        })
+        .collect();
+    let mut stbl = stsd;
+    stbl.extend(sample_table_boxes(&stored, chunk_offset));
+    let mut minf = Vec::new();
+    minf.extend_from_slice(&nmhd);
+    minf.extend_from_slice(&dinf);
+    minf.extend(boxed(b"stbl", &stbl));
+    let mut mdia = Vec::new();
+    mdia.extend_from_slice(&mdhd);
+    mdia.extend_from_slice(&hdlr);
+    mdia.extend(boxed(b"minf", &minf));
+    let mut trak = Vec::new();
+    trak.extend_from_slice(&tkhd);
+    trak.extend_from_slice(&tref);
+    trak.extend_from_slice(&edts);
+    trak.extend(boxed(b"mdia", &mdia));
+    boxed(b"trak", &trak)
 }
 
 /// One track of a [`SequenceWriter`] file.
@@ -2151,6 +2449,8 @@ struct TrackSpec<'a> {
     samples: &'a [SequenceSample],
     tref_auxl: Option<u32>,
     looping: Option<crate::sequence::LoopBehaviour>,
+    /// A serialized track-level `meta` box (empty = none).
+    meta: &'a [u8],
 }
 
 /// `(tkhd duration, edts box)` for a looping setting over a media
@@ -2247,9 +2547,35 @@ fn trak_box(t: &TrackSpec<'_>, ts: u32, chunk_offset: u64) -> Vec<u8> {
         b.extend(boxed(&t.entry_type, &e));
         full_boxed(b"stsd", 0, 0, &b)
     };
+    let mut stbl = stsd;
+    stbl.extend(sample_table_boxes(t.samples, chunk_offset));
+    let mut minf = Vec::new();
+    minf.extend_from_slice(&vmhd);
+    minf.extend_from_slice(&dinf);
+    minf.extend(boxed(b"stbl", &stbl));
+    let mut mdia = Vec::new();
+    mdia.extend_from_slice(&mdhd);
+    mdia.extend_from_slice(&hdlr);
+    mdia.extend(boxed(b"minf", &minf));
+    let mut trak = Vec::new();
+    trak.extend_from_slice(&tkhd);
+    trak.extend_from_slice(&tref);
+    trak.extend_from_slice(&edts);
+    trak.extend(boxed(b"mdia", &mdia));
+    trak.extend_from_slice(t.meta);
+    boxed(b"trak", &trak)
+}
+
+/// The sample tables of one chunk starting at `chunk_offset`: `stts`
+/// (duration runs), `stsc` (one chunk), `stsz`, `stco` / `co64` per
+/// ISO/IEC 14496-12 §8.7.5 (32-bit offsets whenever they fit — several
+/// third-party readers refuse a table without `stco`), and `stss`
+/// when not every sample is a sync sample.
+fn sample_table_boxes(samples: &[SequenceSample], chunk_offset: u64) -> Vec<u8> {
+    let t_samples = samples;
     let stts = {
         let mut runs: Vec<(u32, u32)> = Vec::new();
-        for s in t.samples {
+        for s in t_samples {
             match runs.last_mut() {
                 Some((n, d)) if *d == s.duration => *n += 1,
                 _ => runs.push((1, s.duration)),
@@ -2265,23 +2591,22 @@ fn trak_box(t: &TrackSpec<'_>, ts: u32, chunk_offset: u64) -> Vec<u8> {
     let stsc = {
         let mut b = 1u32.to_be_bytes().to_vec();
         b.extend_from_slice(&1u32.to_be_bytes());
-        b.extend_from_slice(&(t.samples.len() as u32).to_be_bytes());
+        b.extend_from_slice(&(t_samples.len() as u32).to_be_bytes());
         b.extend_from_slice(&1u32.to_be_bytes());
         full_boxed(b"stsc", 0, 0, &b)
     };
     let stsz = {
         let mut b = 0u32.to_be_bytes().to_vec();
-        b.extend_from_slice(&(t.samples.len() as u32).to_be_bytes());
-        for s in t.samples {
+        b.extend_from_slice(&(t_samples.len() as u32).to_be_bytes());
+        for s in t_samples {
             b.extend_from_slice(&(s.data.len() as u32).to_be_bytes());
         }
         full_boxed(b"stsz", 0, 0, &b)
     };
-    let stss = if t.samples.iter().all(|s| s.sync) {
+    let stss = if t_samples.iter().all(|s| s.sync) {
         Vec::new()
     } else {
-        let syncs: Vec<u32> = t
-            .samples
+        let syncs: Vec<u32> = t_samples
             .iter()
             .enumerate()
             .filter(|(_, s)| s.sync)
@@ -2306,27 +2631,13 @@ fn trak_box(t: &TrackSpec<'_>, ts: u32, chunk_offset: u64) -> Vec<u8> {
             full_boxed(b"co64", 0, 0, &b)
         }
     };
-    let mut stbl = Vec::new();
-    stbl.extend_from_slice(&stsd);
-    stbl.extend_from_slice(&stts);
-    stbl.extend_from_slice(&stsc);
-    stbl.extend_from_slice(&stsz);
-    stbl.extend_from_slice(&chunk);
-    stbl.extend_from_slice(&stss);
-    let mut minf = Vec::new();
-    minf.extend_from_slice(&vmhd);
-    minf.extend_from_slice(&dinf);
-    minf.extend(boxed(b"stbl", &stbl));
-    let mut mdia = Vec::new();
-    mdia.extend_from_slice(&mdhd);
-    mdia.extend_from_slice(&hdlr);
-    mdia.extend(boxed(b"minf", &minf));
-    let mut trak = Vec::new();
-    trak.extend_from_slice(&tkhd);
-    trak.extend_from_slice(&tref);
-    trak.extend_from_slice(&edts);
-    trak.extend(boxed(b"mdia", &mdia));
-    boxed(b"trak", &trak)
+    let mut out = Vec::new();
+    out.extend_from_slice(&stts);
+    out.extend_from_slice(&stsc);
+    out.extend_from_slice(&stsz);
+    out.extend_from_slice(&chunk);
+    out.extend_from_slice(&stss);
+    out
 }
 
 /// Shift every construction-method-0 extent offset of the `iloc` inside

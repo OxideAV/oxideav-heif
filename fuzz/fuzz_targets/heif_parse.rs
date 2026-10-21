@@ -55,6 +55,15 @@ fuzz_target!(|data: &[u8]| {
             let _ = deti.tile_spans(data, 4);
         }
     }
+    // Re-muxing: every item (tili ones with their offset table and tipa
+    // properties) through the writer's import.
+    for it in meta.items.iter().take(16) {
+        let mut w = oxideav_heif::HeifWriter::new();
+        if let Ok(id) = w.import_item(&file, it.id) {
+            w.set_primary(id);
+            let _ = w.write_to_vec();
+        }
+    }
     for g in meta.entity_groups.iter().take(64) {
         let _ = (
             g.version,

@@ -1529,42 +1529,9 @@ pub fn decode_primary<D: AsRef<[u8]>>(
     decode_item(file, id, decoder)
 }
 
-/// Inflate a `deflate`-encoded metadata item (RFC 1951; `dExf` items
-/// and `content_encoding = "deflate"` XMP, HEIF Amd 2:2026 A.2.1 /
-/// O.4.3), capped at [`crate::file::MAX_ITEM_BYTES`]. `None` when the
-/// crate is built without the `deflate` feature.
-pub fn inflate_metadata(body: &[u8]) -> Result<Option<Vec<u8>>> {
-    #[cfg(feature = "deflate")]
-    {
-        compcol::vec::decompress_to_vec_capped::<compcol::deflate::Deflate>(
-            body,
-            crate::file::MAX_ITEM_BYTES,
-        )
-        .map(Some)
-        .map_err(|e| HeifError::invalid(format!("deflate metadata item: {e}")))
-    }
-    #[cfg(not(feature = "deflate"))]
-    {
-        let _ = body;
-        Ok(None)
-    }
-}
+pub use crate::meta::inflate_metadata;
 
-/// Strip the `exif_tiff_header_offset` word of an `Exif` item body
-/// (HEIF Annex A.2.1) and return the bytes from the TIFF header on.
-pub fn exif_payload(item: &[u8]) -> Result<Vec<u8>> {
-    if item.len() < 4 {
-        return Err(HeifError::invalid("Exif item shorter than its offset word"));
-    }
-    let off = u32::from_be_bytes([item[0], item[1], item[2], item[3]]) as usize;
-    let start = 4usize
-        .checked_add(off)
-        .filter(|s| *s <= item.len())
-        .ok_or_else(|| {
-            HeifError::invalid(format!("Exif tiff header offset {off} past the item"))
-        })?;
-    Ok(item[start..].to_vec())
-}
+pub use crate::meta::exif_payload;
 
 /// The Exif payload (from the TIFF header on) and the XMP packet of the
 /// metadata items describing `node` (`cdsc`): the first `Exif` /

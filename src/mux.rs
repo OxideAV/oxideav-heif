@@ -29,9 +29,10 @@ use crate::error::{HeifError, Result};
 use crate::hvcc::{join_length_prefixed, split_length_prefixed, HevcConfig};
 use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_AVC1, ITEM_TYPE_HVC1};
 use crate::props::{Colr, Ispe, Pixi, Property};
+use crate::sequence::MetadataTrackKind;
 use crate::vvcc::VvcConfig;
 use crate::vvcdec::vvc_item_from_annex_b;
-use crate::writer::{HeifWriter, SequenceWriter};
+use crate::writer::{HeifWriter, SequenceMetadataTrack, SequenceWriter};
 
 /// Container name the muxer is registered under.
 pub const MUXER_NAME: &str = "heif";
@@ -49,6 +50,15 @@ enum Codec {
     Still,
 }
 
+/// A timed metadata stream on its way to a metadata track: stream
+/// index, kind, media timescale, `(sample, duration)` so far.
+struct MetadataStream {
+    index: u32,
+    kind: MetadataTrackKind,
+    timescale: u32,
+    samples: Vec<(Vec<u8>, u32)>,
+}
+
 /// The image-sequence muxer.
 pub struct HeifSequenceMuxer {
     output: Box<dyn WriteSeek>,
@@ -62,6 +72,9 @@ pub struct HeifSequenceMuxer {
     samples: Vec<(Vec<u8>, u32, bool)>,
     /// The whole-file packets of a still stream (one picture each).
     still: Vec<Vec<u8>>,
+    /// The `Data` streams of codec id `exif` / `xmp` (HEIF §8.3 timed
+    /// metadata).
+    metadata_streams: Vec<MetadataStream>,
     header_written: bool,
     finished: bool,
 }
@@ -118,6 +131,26 @@ impl HeifSequenceMuxer {
             (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
             _ => None,
         };
+        // Timed metadata streams describing the pictures (the demuxer's
+        // `exif` / `xmp` `Data` streams, or a caller's): each becomes a
+        // metadata track with a `cdsc` reference to the picture track.
+        let metadata_streams = streams
+            .iter()
+            .filter(|s| s.params.media_type == oxideav_core::MediaType::Data)
+            .filter_map(|s| {
+                let kind = match s.params.codec_id.as_str() {
+                    crate::demux::CODEC_ID_EXIF => MetadataTrackKind::Exif,
+                    crate::demux::CODEC_ID_XMP => MetadataTrackKind::Xmp,
+                    _ => return None,
+                };
+                Some(MetadataStream {
+                    index: s.index,
+                    kind,
+                    timescale: s.time_base.den().max(1) as u32,
+                    samples: Vec::new(),
+                })
+            })
+            .collect();
         Ok(Self {
             output,
             stream,
@@ -129,6 +162,7 @@ impl HeifSequenceMuxer {
             coded_size,
             samples: Vec::new(),
             still: Vec::new(),
+            metadata_streams,
             header_written: false,
             finished: false,
         })
@@ -322,7 +356,29 @@ impl HeifSequenceMuxer {
         // describing the cover image (the file-level `meta` the still
         // path reads them from).
         let metadata = crate::api_registry::metadata_of_blobs(&[], self.stream.params.blobs());
-        sw.entry_properties.push(Property::Colr(Colr::MIAF_DEFAULT));
+        // Sequence-level Exif / XMP: the master track's MetaBox (HEIF
+        // §8.3, Annex A.2.2 / A.3) — what the demuxer reads back onto
+        // the track's stream parameters.
+        sw.exif = metadata.exif.clone();
+        sw.xmp = metadata.xmp.clone();
+        for m in &self.metadata_streams {
+            if m.samples.is_empty() {
+                continue;
+            }
+            sw.push_metadata_track(SequenceMetadataTrack::new(
+                m.kind,
+                m.timescale,
+                m.samples
+                    .iter()
+                    .map(|(d, dur)| crate::writer::SequenceSample::new(d.clone(), *dur, true))
+                    .collect(),
+            ));
+        }
+        // An ICC profile next to the nclx: HEIF §6.5.5 wants that nclx
+        // to signal unspecified primaries / transfer (2 / 2) — the
+        // still encoder's pairing.
+        let nclx = crate::encode::nclx_for_icc(&Colr::MIAF_DEFAULT, metadata.icc.is_some());
+        sw.entry_properties.push(Property::Colr(nclx.clone()));
         if let Some(icc) = &metadata.icc {
             sw.entry_properties.push(Property::Colr(Colr::Icc {
                 restricted: false,
@@ -350,7 +406,7 @@ impl HeifSequenceMuxer {
                     }),
                     false,
                 ),
-                (Property::Colr(Colr::MIAF_DEFAULT), false),
+                (Property::Colr(nclx), false),
             ];
             if let Some(icc) = &metadata.icc {
                 props.push((
@@ -399,6 +455,14 @@ impl Muxer for HeifSequenceMuxer {
             return Err(CoreError::invalid("heif muxer: write_header first"));
         }
         if packet.stream_index != self.stream.index {
+            if let Some(m) = self
+                .metadata_streams
+                .iter_mut()
+                .find(|m| m.index == packet.stream_index)
+            {
+                let duration = u32::try_from(packet.duration.unwrap_or(1).max(1)).unwrap_or(1);
+                m.samples.push((packet.data.clone(), duration));
+            }
             return Ok(());
         }
         self.push(packet)?;

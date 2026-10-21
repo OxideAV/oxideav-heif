@@ -252,10 +252,13 @@ fn sequence_muxer_writes_the_stream_blobs() {
     );
     let timed: Vec<_> = frames.iter().filter(|f| f.track_id.is_some()).collect();
     assert_eq!(timed.len(), 2);
+    // r478: the track frames carry the three too — Exif / XMP from the
+    // master track's MetaBox (HEIF §8.3).
     for f in &timed {
-        assert_eq!(f.image.metadata.icc.as_deref(), Some(icc.as_slice()));
+        assert_eq!(f.image.metadata, cover.image.metadata);
     }
     // Framework: the still stream's blobs and the track stream's.
+    let bytes_copy = bytes.clone();
     let demuxer = ctx
         .containers
         .open_demuxer("heif", Box::new(Cursor::new(bytes)), &ctx.codecs)
@@ -271,9 +274,13 @@ fn sequence_muxer_writes_the_stream_blobs() {
         .find(|s| s.params.codec_id.as_str() == "h265")
         .unwrap();
     assert_eq!(
-        track.params.blob(&BlobKind::ICC).map(|b| b.data.as_slice()),
-        Some(icc.as_slice()),
-        "track stream ICC blob"
+        oxideav_heif::metadata_of_blobs(&[], track.params.blobs()),
+        cover.image.metadata,
+        "track stream blobs (ICC from the sample entry, Exif / XMP from the track meta)"
+    );
+    assert!(
+        !has_box(&bytes_copy, b"nmhd"),
+        "no metadata track without Data streams"
     );
 }
 
@@ -757,4 +764,225 @@ fn still_burst_merges_into_one_collection_with_per_item_metadata() {
         }
     }
     assert_eq!(n, 3);
+}
+
+/// Timed metadata through the muxer (round 478, HEIF §8.3): the
+/// stream's Exif / XMP blobs become the master track's `MetaBox` items,
+/// `Data` streams of codec id `exif` / `xmp` become `Exif` / `metx`
+/// metadata tracks with `cdsc` references, and the demuxer reads all of
+/// it back — the blobs on the track's stream parameters, the tracks as
+/// `Data` streams with the same packets, the composed `"heif"` stream's
+/// frames with the per-picture blobs.
+#[test]
+fn metadata_tracks_round_trip_through_the_muxer() {
+    use oxideav_core::{BlobKind, MetadataBlob, Packet};
+    let ctx = context();
+    let mut params = CodecParameters::video(CodecId::new("h265"));
+    params.width = Some(32);
+    params.height = Some(32);
+    params.pixel_format = Some(PixelFormat::Yuv420P);
+    params.options = oxideav_core::CodecOptions::new().set("mode", "pcm");
+    let mut enc = ctx.codecs.first_encoder(&params).unwrap();
+    let frames: Vec<HeifFrame> = (0..3).map(frame).collect();
+    let mut packets = Vec::new();
+    for (i, f) in frames.iter().enumerate() {
+        let (mut vf, _) = f.to_core().unwrap();
+        vf.pts = Some(i as i64);
+        enc.send_frame(&Frame::Video(vf)).unwrap();
+        while let Ok(p) = enc.receive_packet() {
+            packets.push(p);
+        }
+    }
+    enc.flush().unwrap();
+    while let Ok(p) = enc.receive_packet() {
+        packets.push(p);
+    }
+    assert_eq!(packets.len(), 3);
+    let icc: Vec<u8> = (0..200u32).map(|i| (i * 7 % 250) as u8).collect();
+    let seq_exif = b"MM\0*\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x01\0\0\0\0\0\0".to_vec();
+    let seq_xmp = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>".to_vec();
+    let exif_of = |i: u8| {
+        let mut e = seq_exif.clone();
+        e[18] = i + 2;
+        e
+    };
+    let xmp_of =
+        |i: u8| format!("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" frame=\"{i}\"/>").into_bytes();
+    let mut sparams = enc.output_params().clone();
+    sparams.push_blob(MetadataBlob::new(BlobKind::ICC, icc.clone()));
+    sparams.push_blob(MetadataBlob::new(BlobKind::EXIF, seq_exif.clone()));
+    sparams.push_blob(MetadataBlob::new(BlobKind::XMP, seq_xmp.clone()));
+    let tb = TimeBase::new(1, 10);
+    let streams = vec![
+        StreamInfo {
+            index: 0,
+            time_base: tb,
+            duration: Some(3),
+            start_time: Some(0),
+            params: sparams,
+        },
+        StreamInfo {
+            index: 1,
+            time_base: tb,
+            duration: Some(3),
+            start_time: Some(0),
+            params: CodecParameters::data(CodecId::new("exif")),
+        },
+        StreamInfo {
+            index: 2,
+            time_base: tb,
+            duration: Some(3),
+            start_time: Some(0),
+            params: CodecParameters::data(CodecId::new("xmp")),
+        },
+    ];
+    let path = std::env::temp_dir().join(format!(
+        "oxideav-heif-mux-metatracks-{}.heic",
+        std::process::id()
+    ));
+    let sink: Box<dyn oxideav_core::WriteSeek> = Box::new(std::fs::File::create(&path).unwrap());
+    let mut muxer = ctx.containers.open_muxer("heif", sink, &streams).unwrap();
+    muxer.write_header().unwrap();
+    for (i, p) in packets.iter().enumerate() {
+        muxer
+            .write_packet(&p.clone().with_duration(1).with_stream_index(0))
+            .unwrap();
+        muxer
+            .write_packet(
+                &Packet::new(1, tb, exif_of(i as u8))
+                    .with_pts(i as i64)
+                    .with_duration(1)
+                    .with_keyframe(true),
+            )
+            .unwrap();
+    }
+    muxer
+        .write_packet(&Packet::new(2, tb, xmp_of(0)).with_pts(0).with_duration(1))
+        .unwrap();
+    muxer
+        .write_packet(&Packet::new(2, tb, xmp_of(1)).with_pts(1).with_duration(2))
+        .unwrap();
+    muxer.write_trailer().unwrap();
+    drop(muxer);
+    let bytes = std::fs::read(&path).unwrap();
+    for (bin, args) in [
+        ("heif-info", vec![path.to_string_lossy().to_string()]),
+        (
+            "ffmpeg",
+            vec![
+                "-nostdin".into(),
+                "-loglevel".into(),
+                "error".into(),
+                "-i".into(),
+                path.to_string_lossy().to_string(),
+                "-f".into(),
+                "null".into(),
+                "-".into(),
+            ],
+        ),
+        (
+            "sips",
+            vec![
+                "-g".into(),
+                "pixelWidth".into(),
+                path.to_string_lossy().to_string(),
+            ],
+        ),
+    ] {
+        match std::process::Command::new(bin).args(&args).output() {
+            Ok(out) => assert!(
+                out.status.success(),
+                "{bin} refused the sequence with metadata tracks: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(_) => eprintln!("SKIP: {bin} not installed"),
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+    let f = oxideav_heif::HeifFile::parse(&bytes).unwrap();
+    let mv = oxideav_heif::sequence::parse_movie(&f).unwrap().unwrap();
+    assert_eq!(mv.tracks.len(), 3, "pict + Exif + metx");
+    assert_eq!(
+        mv.tracks[0].sequence_metadata(&f),
+        (Some(seq_exif.clone()), Some(seq_xmp.clone()))
+    );
+    let rep = oxideav_heif::miaf::check(&f, oxideav_heif::miaf::MiafProfile::Miaf).unwrap();
+    assert!(rep.is_conformant(), "{:#?}", rep.violations);
+    // Contract.
+    let all = oxideav_heif::decode_all(&bytes).unwrap();
+    let timed: Vec<_> = all.iter().filter(|f| f.track_id.is_some()).collect();
+    assert_eq!(timed.len(), 3);
+    for (i, fr) in timed.iter().enumerate() {
+        assert_eq!(
+            fr.image.metadata,
+            oxideav_heif::Metadata::new(
+                Some(icc.clone()),
+                Some(exif_of(i as u8)),
+                Some(xmp_of(i.min(1) as u8)),
+                None
+            ),
+            "frame {i}"
+        );
+    }
+    // Framework.
+    let mut demuxer = ctx
+        .containers
+        .open_demuxer("heif", Box::new(Cursor::new(bytes)), &ctx.codecs)
+        .unwrap();
+    let streams = demuxer.streams().to_vec();
+    let by_id = |id: &str| {
+        streams
+            .iter()
+            .find(|s| s.params.codec_id.as_str() == id)
+            .cloned()
+            .unwrap()
+    };
+    let raw = by_id("h265");
+    for kind in [BlobKind::ICC, BlobKind::EXIF, BlobKind::XMP] {
+        assert!(raw.params.blob(&kind).is_some(), "track stream {kind:?}");
+    }
+    let exif_stream = by_id("exif");
+    let xmp_stream = by_id("xmp");
+    let composed = streams
+        .iter()
+        .find(|s| s.params.codec_id.as_str() == "heif" && s.time_base == tb)
+        .cloned()
+        .expect("composed stream");
+    let mut dec = ctx.codecs.first_decoder(&composed.params).unwrap();
+    let (mut exifs, mut xmps) = (Vec::new(), Vec::new());
+    loop {
+        match demuxer.next_packet() {
+            Ok(p) if p.stream_index == composed.index => dec.send_packet(&p).unwrap(),
+            Ok(p) if p.stream_index == exif_stream.index => exifs.push(p.data.clone()),
+            Ok(p) if p.stream_index == xmp_stream.index => xmps.push((p.data.clone(), p.duration)),
+            Ok(_) => {}
+            Err(Error::Eof) => break,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    assert_eq!(exifs, (0..3u8).map(exif_of).collect::<Vec<_>>());
+    assert_eq!(xmps, vec![(xmp_of(0), Some(1)), (xmp_of(1), Some(2))]);
+    dec.flush().unwrap();
+    let mut i = 0;
+    while let Ok(Frame::Video(v)) = dec.receive_frame() {
+        let blobs = v.blobs();
+        assert_eq!(
+            blobs
+                .iter()
+                .find(|b| b.is(&BlobKind::EXIF))
+                .map(|b| b.data.clone()),
+            Some(exif_of(i as u8))
+        );
+        assert_eq!(
+            blobs
+                .iter()
+                .find(|b| b.is(&BlobKind::XMP))
+                .map(|b| b.data.clone()),
+            Some(xmp_of(i.min(1) as u8))
+        );
+        let back = HeifFrame::from_core(&v, 32, 32, PixelFormat::Yuv420P).unwrap();
+        assert_eq!(back, frames[i], "frame {i}");
+        i += 1;
+    }
+    assert_eq!(i, 3);
 }

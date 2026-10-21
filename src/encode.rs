@@ -2162,7 +2162,7 @@ fn depth_urn(opts: &EncodeOptions) -> &'static str {
 /// for an nclx paired with an ICC (only the matrix / range stay
 /// meaningful, since the ICC governs colour); the caller's `nclx` is
 /// used unchanged when there is no ICC.
-fn nclx_for_icc(colr: &Colr, icc_present: bool) -> Colr {
+pub(crate) fn nclx_for_icc(colr: &Colr, icc_present: bool) -> Colr {
     match (colr, icc_present) {
         (
             Colr::Nclx {
