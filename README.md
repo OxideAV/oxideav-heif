@@ -924,6 +924,87 @@ writer round-trips (`tests/gainmap.rs`, `tests/avc_lhevc.rs`,
 `tests/writer.rs`) and, for gain maps, the vendored oracle files.
 
 
+## Production soak (r478; this machine: macOS 26.6 / Apple M4 Max, release build)
+
+`examples/heifsoak` decodes and re-encodes every file it is given under
+an `ExecutionContext` budget and records wall time (median of 3) and
+peak RSS (a fresh child process per file) — `heifsoak --threads 1,4,8
+--all-encodes docs/image/heif/device-samples docs/image/heif/conformance`
+is the run below: the 81 files of the device-sample and conformance
+sets (`docs/image/avif/` stages no files). A file without a decodable
+primary (an image sequence) falls back to the contract `decode_all`;
+a refusal is a row, never a panic.
+
+| Budget | Decode, all 81 files | HEVC re-encode (defaults) | AV1 re-encode (q60 `fast`) | Peak RSS, max over files | Refused |
+|---|---|---|---|---|---|
+| 1 worker | 10.22 s | 38.44 s | 39.01 s | 59 MiB | 20 |
+| 4 workers | 9.75 s | 21.06 s | 13.26 s | 66 MiB | 20 |
+| 8 workers | 9.76 s | 17.73 s | 8.85 s | 76 MiB | 20 |
+
+The 20 refusals are the documented ones: the 13 `cenc` / `cbcs` /
+`cens` / `cbc1` encrypted files (`ienc` is an unrecognised essential
+property — protected items are out of scope), C044 (a `pred` item
+whose base is inter-coded), `iff_hevc_single_item` /
+`_main10` (the h265 crate's SPS parser refuses their VUI
+`max_bytes_per_pic_denom` — a sibling ask), `iff_hevc_tile_multiple_items_tbas`
+(`hvt1` tile items), `multilayer001` / `002` / `005` (L-HEVC
+enhancement layers and a PPS the base decoder never activates). C034
+was the 21st before this round: its `Exif` item has no `exif_tiff_header_offset`
+word (the item is exactly the staged Exif blob, TIFF header first), and
+the magic read as an offset refused the whole decode; `exif_payload`
+now takes a body that starts at its TIFF header as the payload
+(`tests/decode.rs` pins the blob against `C034.exf`).
+
+Slowest ten decodes (1 worker, after; before → after where a number
+moved; the sequences decode through `decode_all`, serially — every
+sample depends on the previous one):
+
+| File | Layout / frames | Decode 1 w | 4 w | 8 w | Peak RSS 1 → 8 w | Encode HEVC 1 / 4 / 8 w | Encode AV1 1 / 8 w |
+|---|---|---|---|---|---|---|---|
+| C027.heic | sequence, 16 inter frames | 2.145 s | 2.200 s | 2.210 s | 42 MiB | — | — |
+| C028.heic | sequence, 16 inter frames | 2.079 s | 2.125 s | 2.141 s | 41 MiB | — | — |
+| C041.heic | sequence, 9 frames (first non-displayed) | 1.021 s | 1.035 s | 1.032 s | 59 MiB | — | — |
+| C031.heic | sequence + video track, 16 frames | 0.551 s | 0.559 s | 0.570 s | 34 MiB | — | — |
+| iphone_13_pro_max.HEIC | 3024×4032 4:2:0, 48-tile grid + gain map | 0.439 s | 0.147 s | 0.097 s (0.067 s at 16) | 46 → 65 MiB | 3.63 / 1.07 / 0.60 s | 7.11 / 1.23 s |
+| C032.heic | sequence + thumbnail track, 16 frames | 0.281 s | 0.282 s | 0.285 s | 22 MiB | — | — |
+| C038.heic | sequence, 8 frames, infinite `elst` | 0.277 s | 0.279 s | 0.286 s | 21 MiB | — | — |
+| C029.heic | sequence, 8 frames, edit list | 0.276 s | 0.280 s | 0.282 s | 21 MiB | — | — |
+| C030.heic | sequence, 8 frames, edit list | 0.276 s | 0.280 s | 0.280 s | 21 MiB | — | — |
+| C037.heic | sequence, 8 frames, `elst` repeat | 0.275 s | 0.280 s | 0.282 s | 21 MiB | — | — |
+
+Slowest ten encodes (HEVC defaults; AV1 q60; AVC where the source is
+`avc1` — `multilayer004` is the only one, 0.062 s):
+
+| File | Layout | Encode HEVC 1 / 4 / 8 w (bytes) | Encode AV1 1 / 4 / 8 w (bytes) |
+|---|---|---|---|
+| IMG_5195.HEIC | 2566×3313 4:4:4 | 13.91 / 4.42 / 2.46 s (893 KiB) | 7.66 / 2.24 / 1.32 s (214 KiB) |
+| MIAF003.heic | 2048×2048 4:4:4 | 5.18 / 1.95 / 1.38 s (60 KiB) | 1.53 / 0.55 / 0.36 s (10 KiB) |
+| MIAF002.heic | 2048×2048 4:2:0 10-bit | 3.71 / 1.29 / 0.90 s (16 KiB) | 0.87 / 0.31 / 0.21 s (4 KiB) |
+| iphone_13_pro_max.HEIC | 3024×4032 4:2:0 | 3.63 / 1.07 / 0.60 s (2198 KiB) | 7.11 / 2.09 / 1.23 s (740 KiB) |
+| C007.heic | 2560×1440 4:2:0 | 1.07 / 1.11 / 1.12 s (590 KiB) | 1.73 / 0.63 / 0.43 s (172 KiB) |
+| MIAF006.heic | 1920×1440 4:2:0 | 0.80 / 0.81 / 0.81 s (381 KiB) | 1.39 / 0.54 / 0.39 s (155 KiB) |
+| C049.heic | 1920×1080 4:2:0 | 0.65 / 0.66 / 0.67 s (533 KiB) | 1.18 / 0.49 / 0.35 s (164 KiB) |
+| C052.heic | 1280×720 4:2:0 + alpha | 0.48 / 0.49 / 0.49 s (150 KiB) | 0.60 / 0.22 / 0.15 s (44 KiB) |
+| C006.heic | 1280×720 4:2:0 + alpha | 0.48 / 0.50 / 0.50 s (150 KiB) | 0.59 / 0.21 / 0.15 s (44 KiB) |
+| C050.heic | 1280×960 4:2:0 | 0.41 / 0.43 / 0.41 s (525 KiB) | 0.72 / 0.31 / 0.20 s (156 KiB) |
+
+What the numbers say about this crate: every path it owns honours the
+budget — the 12 MP grid decodes 4.5× faster on 8 workers and keeps
+scaling to 16 (the tiles are the parallel unit, the composition a
+memcpy), the automatic grid spends the encode budget the same way
+(3.6 → 0.6 s), the 4:4:4 / 10-bit pictures go to the HEVC quadtree
+coder's wavefront (13.9 → 2.5 s), and AV1 items hand the budget to the
+AV1 crate (7.1 → 1.2 s). Peak RSS is bounded by the output picture
+plus one tile per worker (46 → 76 MiB over the whole set). The rows
+that do not move are codec-internal: an inter-coded sequence decodes
+sample after sample (C027: 134 ms per 1280×720 inter frame in the
+h265 crate), and a single 8-bit 4:2:0 picture below 4 MP codes on the
+historical HEVC coder, whose bytes are budget-independent by design
+(C007: 1.07 s at any budget; `rd` / `tiles` / `ctb` select the
+wavefront coder). No allocation churn, redundant copy or serial
+section attributable to this crate was found in the profile of the
+twenty slowest rows; the C034 refusal was the one defect.
+
 ## Production defaults (r464)
 
 `oxideav convert in.png out.heic` with no flags — equally

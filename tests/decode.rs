@@ -225,3 +225,32 @@ fn fuzz_unit_zero_height_sample_entry_returns() {
     let _ = oxideav_heif::decode_rgba8(&bytes);
     let _ = oxideav_heif::info(&bytes);
 }
+
+/// Conformance file C034 (an `Exif` item linked by `cdsc`) stores its
+/// Exif body without the Annex A.2.1 offset word — the item is exactly
+/// the staged Exif blob, TIFF header first. The payload is read as the
+/// blob (round 478); before, the TIFF magic read as an offset past the
+/// item and the whole decode was refused.
+#[test]
+fn c034_exif_item_without_an_offset_word_decodes_with_its_blob() {
+    let Some(docs) = common::docs_root() else {
+        return;
+    };
+    let conformance = docs.join("../conformance");
+    let heic = conformance.join("heic/C034.heic");
+    let exf = conformance.join("nokia/bitstreams/C034.exf");
+    if !heic.is_file() || !exf.is_file() {
+        return;
+    }
+    let bytes = std::fs::read(&heic).unwrap();
+    let blob = std::fs::read(&exf).unwrap();
+    assert!(blob.starts_with(b"MM\0*"));
+    let info = oxideav_heif::info(&bytes).unwrap();
+    assert!(info.has_exif);
+    let img = oxideav_heif::decode(&bytes).unwrap();
+    assert_eq!((img.width, img.height), (1280, 720));
+    assert_eq!(img.metadata.exif.as_deref(), Some(blob.as_slice()));
+    let f = oxideav_heif::HeifFile::parse(&bytes).unwrap();
+    let d = oxideav_heif::decode_primary(&f, oxideav_heif::ItemDecoder::direct()).unwrap();
+    assert_eq!(d.exif.as_deref(), Some(blob.as_slice()));
+}

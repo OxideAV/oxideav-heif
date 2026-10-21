@@ -84,10 +84,18 @@ pub const ITEM_TYPE_RGAN: FourCc = *b"rgan";
 
 /// Strip the `exif_tiff_header_offset` word of an `Exif` item body or
 /// an Exif metadata-track sample (HEIF Annex A.2.1 `ExifDataBlock`) and
-/// return the bytes from the TIFF header on.
+/// return the bytes from the TIFF header on. A body that starts with
+/// the TIFF header itself (`MM\0*` / `II*\0` where the offset word
+/// should be — the conformance file C034 is written that way, its
+/// item exactly the staged Exif blob) is taken as a block without the
+/// word: that bit pattern, read as an offset, could only point past
+/// any item.
 pub fn exif_payload(item: &[u8]) -> Result<Vec<u8>> {
     if item.len() < 4 {
         return Err(HeifError::invalid("Exif item shorter than its offset word"));
+    }
+    if item.starts_with(b"MM\0*") || item.starts_with(b"II*\0") {
+        return Ok(item.to_vec());
     }
     let off = u32::from_be_bytes([item[0], item[1], item[2], item[3]]) as usize;
     let start = 4usize
@@ -1523,6 +1531,26 @@ fn parse_ipro(p: &[u8]) -> Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exif_payload_resolves_the_offset_word_and_tolerates_a_bare_tiff_header() {
+        assert_eq!(
+            exif_payload(&[0, 0, 0, 0, b'M', b'M', 0, 42]).unwrap(),
+            b"MM\0*"
+        );
+        assert_eq!(
+            exif_payload(&[0, 0, 0, 2, 9, 9, b'I', b'I', 42, 0]).unwrap(),
+            b"II*\0"
+        );
+        // No offset word at all (C034's shape): the body is the payload.
+        assert_eq!(
+            exif_payload(b"MM\0*\0\0\0\x08").unwrap(),
+            b"MM\0*\0\0\0\x08"
+        );
+        assert_eq!(exif_data_block(b"II*\0"), b"\0\0\0\0II*\0");
+        assert!(exif_payload(&[0, 0, 0, 9, 1, 2]).is_err());
+        assert!(exif_payload(&[1, 2]).is_err());
+    }
     use crate::boxes::write::{boxed, full_boxed};
 
     fn infe_v2(id: u16, ty: &[u8; 4], name: &str) -> Vec<u8> {
