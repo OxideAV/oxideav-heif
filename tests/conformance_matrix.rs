@@ -1271,6 +1271,30 @@ fn writer_still_shapes() -> Vec<(String, &'static str, HeifFrame, EncodeOptions)
         frame_from_source(96, 80, 3, 8),
         av1(None),
     ));
+    // Property-pool rows (round 479): grids whose tile count exceeds
+    // the 100-box `ipco` ceiling two readers enforce (285 tiles) and
+    // the 1 000-item `iloc` / stream ceiling three readers enforce
+    // (1 024 tiles). With one shared decoder configuration the `ipco`
+    // holds 5 entries at any tile count, so the first pair opens where
+    // it was refused; the second stays behind the item-count limit.
+    v.push((
+        "hevc 1200×900 grid 64 (285 tiles, 5-entry ipco)".into(),
+        "heic",
+        frame_from_source(1200, 900, 3, 8),
+        pcm().with_grid_tile(Some(64)),
+    ));
+    v.push((
+        "av1 1200×900 grid 64 (285 tiles, 5-entry ipco)".into(),
+        "avif",
+        frame_from_source(1200, 900, 3, 8),
+        av1(None).with_grid_tile(Some(64)),
+    ));
+    v.push((
+        "hevc 2048×2048 grid 64 (1 024 tiles)".into(),
+        "heic",
+        frame_from_source(2048, 2048, 3, 8),
+        pcm().with_grid_tile(Some(64)),
+    ));
     v.push((
         "hevc 4:0:0 (grey)".into(),
         "heic",
@@ -1470,6 +1494,12 @@ fn round_trip_rows(dir: &Path, readers: &[Reader]) -> Vec<RoundTripRow> {
 /// The 12 MP rows (a 4032×3024 encode per codec, ~90 s for AV1 in
 /// release, far longer in a debug build) run only when
 /// `OXIDEAV_HEIF_MATRIX_12MP=1`; CI prints SKIP for them.
+/// Whether the row's `sips` cell is a render (not a refusal).
+fn sips_opens(row: &[(Reader, RCell)]) -> bool {
+    row.iter()
+        .any(|(r, c)| *r == Reader::Sips && !matches!(c, RCell::Refused(_)))
+}
+
 fn twelve_mp() -> bool {
     std::env::var("OXIDEAV_HEIF_MATRIX_12MP")
         .map(|v| v == "1")
@@ -1728,12 +1758,18 @@ fn conformance_matrix_both_directions() {
         // thumbnail instead): those rows are measurements too, and
         // `heif-info` refusing the item type is reported, not gated.
         let unimplemented_item = name.contains(" tili ");
+        // A 1 024-tile grid has 1 025 items: `heif-info` / `heif-convert`
+        // / `magick` stop at 1 000 `iloc` items and ffmpeg at 1 000
+        // streams (item-count limits the property pool cannot move);
+        // the row is a measurement, gated on `sips` and this crate.
+        let item_count_limit = name.contains("1 024 tiles") && sips_opens(row);
         for (r, c) in row {
             if let RCell::Refused(_) = c {
                 assert!(
                     (*r == Reader::Ffmpeg && size_refused)
                         || (no_third_party_decoder && *r != Reader::HeifInfo)
-                        || unimplemented_item,
+                        || unimplemented_item
+                        || (item_count_limit && *r != Reader::Sips),
                     "{name}: {} {}",
                     r.name(),
                     c.md()

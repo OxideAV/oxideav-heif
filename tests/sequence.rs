@@ -561,6 +561,7 @@ fn sequence_level_metadata_round_trips() {
 /// them back, and the demuxer reports them as `copyright` (`und`) /
 /// `copyright:<lang>` pairs.
 #[test]
+#[cfg(feature = "registry")]
 fn copyright_declarations_round_trip_through_cprt() {
     use std::io::Cursor;
 

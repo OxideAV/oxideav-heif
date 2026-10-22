@@ -921,6 +921,9 @@ in r474 (no regressions).
 | vvc 96×80 | REFUSED (Try 'sips --help' for help using this tool) | REFUSED (Could not decode image: Error while loading plugin: No decoding plugin installed) | REFUSED (magick: Error while loading plugin: No decoding plugin installed for this compre) | REFUSED (Error opening output files: Invalid argument) | opens |
 | hevc lossless (pcm) | Δ max 2 mean 0.61 | exact | exact | exact | opens |
 | av1 lossless | Δ max 2 mean 0.61 | exact | exact | exact | opens |
+| hevc 1200×900 grid 64 (285 tiles, 5-entry ipco) | Δ max 2 mean 0.62 | exact | exact | exact | opens |
+| av1 1200×900 grid 64 (285 tiles, 5-entry ipco) | Δ max 2 mean 0.62 | exact | exact | exact | opens |
+| hevc 2048×2048 grid 64 (1 024 tiles) | Δ max 2 mean 0.62 | refused: `iloc` holds 1 025 items (limit 1 000) | refused: same | refused: 1 025 streams | refused: same limit |
 | hevc 4:0:0 (grey) | exact | exact | exact | exact | opens |
 | av1 4:0:0 (grey) | exact | exact | exact | exact | opens |
 | av1 4:4:4 10-bit | Δ max 0 mean 0.00 | Δ max 0 mean 0.12 | Δ max 1 mean 0.27 | Δ max 1 mean 0.45 | opens |
