@@ -425,8 +425,17 @@ pub struct Track {
     /// per Annex A.2.2, XMP `mime` items per A.3), when present. Its
     /// items resolve through [`crate::HeifFile::item_data_in`].
     pub meta: Option<crate::meta::Meta>,
+    /// The track's copyright declarations (`trak/udta/cprt`, ISO/IEC
+    /// 14496-12 §8.10.2 — a `cprt` in a track applies to that track),
+    /// in file order.
+    pub copyrights: Vec<Copyright>,
 }
 impl Track {
+    /// `self` with its track-level copyright declarations.
+    pub fn with_copyrights(mut self, copyrights: Vec<Copyright>) -> Self {
+        self.copyrights = copyrights;
+        self
+    }
     /// Every field as a positional argument, in declaration order
     /// (the struct is `#[non_exhaustive]`: build it here or from
     /// `Default` where one exists, then read / assign its public fields).
@@ -469,6 +478,7 @@ impl Track {
             sample_groups,
             sample_group_descriptions,
             meta: None,
+            copyrights: Vec::new(),
         }
     }
 }
@@ -1249,6 +1259,10 @@ fn parse_trak(trak: &[u8], file_len: u64) -> Result<Track> {
         Some((_, m)) => Some(crate::meta::Meta::parse(m)?),
         None => None,
     };
+    let copyrights = match find_box(trak, b"udta")? {
+        Some((_, udta)) => parse_udta_copyrights(udta)?,
+        None => Vec::new(),
+    };
     let samples = parse_sample_table(stbl, file_len)?;
     let mut sample_groups = Vec::new();
     let mut sample_group_descriptions = Vec::new();
@@ -1325,6 +1339,7 @@ fn parse_trak(trak: &[u8], file_len: u64) -> Result<Track> {
         sample_groups,
         sample_group_descriptions,
         meta,
+        copyrights,
     })
 }
 
@@ -1864,6 +1879,7 @@ mod tests {
             sample_groups: vec![],
             sample_group_descriptions: vec![],
             meta: None,
+            copyrights: Vec::new(),
         };
         assert_eq!(
             t.orientation(),
@@ -1989,6 +2005,7 @@ mod tests {
             sample_groups: vec![parse_sbgp(&sbgp[8..]).unwrap()],
             sample_group_descriptions: vec![desc2],
             meta: None,
+            copyrights: Vec::new(),
         };
         assert_eq!(t.group_description_index(b"eqiv", None, 0), Some(1));
         assert_eq!(t.group_description_index(b"eqiv", Some(7), 0), Some(1));

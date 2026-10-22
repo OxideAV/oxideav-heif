@@ -1042,6 +1042,37 @@ fn muxer_set_metadata_carries_copyright_as_cprt() {
     muxer.write_trailer().unwrap();
     drop(muxer);
     let bytes = std::fs::read(&path).unwrap();
+    // The `udta` / `cprt` boxes do not disturb the black-box readers
+    // (asserted when the binary is present, SKIP otherwise).
+    for (bin, args) in [
+        ("heif-info", vec![path.to_string_lossy().to_string()]),
+        (
+            "ffprobe",
+            vec![
+                "-v".into(),
+                "error".into(),
+                "-show_streams".into(),
+                path.to_string_lossy().to_string(),
+            ],
+        ),
+        (
+            "sips",
+            vec![
+                "-g".into(),
+                "pixelWidth".into(),
+                path.to_string_lossy().to_string(),
+            ],
+        ),
+    ] {
+        match std::process::Command::new(bin).args(&args).output() {
+            Ok(out) => assert!(
+                out.status.success(),
+                "{bin} refused the cprt file: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(_) => eprintln!("SKIP {bin}: not installed"),
+        }
+    }
     let _ = std::fs::remove_file(&path);
     let demuxer = ctx
         .containers

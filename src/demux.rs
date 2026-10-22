@@ -827,6 +827,15 @@ impl HeifDemuxer {
                         ids.iter().map(u32::to_string).collect::<Vec<_>>().join(","),
                     ));
                 }
+                // Track-level `cprt` (§8.10.2: applies to that track).
+                for c in &t.copyrights {
+                    let key = if c.language == "und" {
+                        format!("track:{}:copyright", t.track_id)
+                    } else {
+                        format!("track:{}:copyright:{}", t.track_id, c.language)
+                    };
+                    metadata.push((key, c.notice.clone()));
+                }
             }
         }
         // Timed metadata tracks (HEIF §8.3) as `Data` streams: Exif
@@ -875,6 +884,15 @@ impl HeifDemuxer {
                         format!("track:{}:tref:{}", t.track_id, crate::boxes::fourcc_str(rt)),
                         ids.iter().map(u32::to_string).collect::<Vec<_>>().join(","),
                     ));
+                }
+                // Track-level `cprt` (§8.10.2: applies to that track).
+                for c in &t.copyrights {
+                    let key = if c.language == "und" {
+                        format!("track:{}:copyright", t.track_id)
+                    } else {
+                        format!("track:{}:copyright:{}", t.track_id, c.language)
+                    };
+                    metadata.push((key, c.notice.clone()));
                 }
             }
         }

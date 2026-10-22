@@ -200,6 +200,20 @@ fn print_tree(bytes: &[u8]) {
     }
     if let Ok(meta) = file.meta() {
         println!("primary={:?}", meta.primary_item_id);
+        // The property pool: entries, rows, and the ipma index form
+        // (15-bit past 127 entries).
+        let assoc: usize = meta.associations.iter().map(|a| a.entries.len()).sum();
+        println!(
+            "ipco entries={} ipma rows={} associations={} index form={}",
+            meta.properties.len(),
+            meta.associations.len(),
+            assoc,
+            if meta.properties.len() > 127 {
+                "15-bit"
+            } else {
+                "7-bit"
+            }
+        );
         for it in &meta.items {
             let props = oxideav_heif::props::ItemProperties::resolve(meta, it.id);
             let props: Vec<String> = match props {

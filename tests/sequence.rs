@@ -581,11 +581,16 @@ fn copyright_declarations_round_trip_through_cprt() {
     let coded = encode_hevc_picture(&pic, "pcm", 0).unwrap();
     let mut sw = SequenceWriter::new(*b"hvc1", coded.config.clone(), 32, 32, 10)
         .with_copyright("und", "© 2026 Example")
-        .with_copyright("eng", "Copyright 2026 Example");
+        .with_copyright("eng", "Copyright 2026 Example")
+        .with_track_copyright("fra", "Droits réservés");
     sw.push_sample(coded.data.clone(), 1, true);
     let bytes = sw.write_to_vec().unwrap();
     let f = HeifFile::parse(&bytes).unwrap();
     let mv = parse_movie(&f).unwrap().expect("moov");
+    assert_eq!(
+        mv.tracks[0].copyrights,
+        vec![Copyright::new("fra", "Droits réservés")]
+    );
     assert_eq!(
         mv.copyrights,
         vec![

@@ -1906,6 +1906,10 @@ pub struct SequenceWriter {
     /// §8.10.2), one per language; each language must be a
     /// three-letter lower-case code or the write is refused.
     pub copyrights: Vec<crate::sequence::Copyright>,
+    /// Copyright declarations for the picture track alone, written as
+    /// `cprt` boxes of the master track's `udta` (§8.10.2: a `cprt`
+    /// in a track applies to that track).
+    pub track_copyrights: Vec<crate::sequence::Copyright>,
 }
 impl SequenceWriter {}
 
@@ -1937,7 +1941,16 @@ impl SequenceWriter {
             xmp: None,
             metadata_tracks: Vec::new(),
             copyrights: Vec::new(),
+            track_copyrights: Vec::new(),
         }
+    }
+
+    /// Add a copyright declaration for the picture track (`cprt` in
+    /// the track's `udta`).
+    pub fn with_track_copyright(mut self, language: &str, notice: &str) -> Self {
+        self.track_copyrights
+            .push(crate::sequence::Copyright::new(language, notice));
+        self
     }
 
     /// Add a copyright declaration (`cprt`, §8.10.2) for the whole
@@ -2195,6 +2208,10 @@ impl SequenceWriter {
         // ids), so they start past the still's.
         let first_item_id = self.still.as_ref().map(|w| w.next_id).unwrap_or(1);
         let track_meta = track_meta_box(self.exif.as_deref(), self.xmp.as_deref(), first_item_id);
+        // User data: one `cprt` per declaration (§8.10.2), movie-level
+        // and on the picture track.
+        let udta = udta_box(&self.copyrights)?;
+        let track_udta = udta_box(&self.track_copyrights)?;
         let mvhd = {
             let mut b = vec![0u8; 8];
             b.extend_from_slice(&ts.to_be_bytes());
@@ -2224,6 +2241,7 @@ impl SequenceWriter {
             tref_auxl: None,
             looping: self.looping,
             meta: &track_meta,
+            udta: &track_udta,
         };
         let alpha = self.alpha.as_ref().map(|a| TrackSpec {
             track_id: 2,
@@ -2241,6 +2259,7 @@ impl SequenceWriter {
             tref_auxl: Some(1),
             looping: self.looping,
             meta: &[],
+            udta: &[],
         });
         let master_len: u64 = self.samples.iter().map(|s| s.data.len() as u64).sum();
         let alpha_len: u64 = self
@@ -2248,22 +2267,6 @@ impl SequenceWriter {
             .as_ref()
             .map(|a| a.samples.iter().map(|s| s.data.len() as u64).sum())
             .unwrap_or(0);
-        // Movie-level user data: one `cprt` per declaration (§8.10.2).
-        let udta = if self.copyrights.is_empty() {
-            Vec::new()
-        } else {
-            let mut body = Vec::new();
-            for c in &self.copyrights {
-                let cprt = c.to_body().ok_or_else(|| {
-                    HeifError::invalid(format!(
-                        "sequence writer: cprt language {:?} is not a three-letter lower-case code",
-                        c.language
-                    ))
-                })?;
-                body.extend(full_boxed(b"cprt", 0, 0, &cprt));
-            }
-            boxed(b"udta", &body)
-        };
         let moov_for = |base: u64| -> Vec<u8> {
             let mut moov = Vec::new();
             moov.extend_from_slice(&mvhd);
@@ -2515,6 +2518,8 @@ struct TrackSpec<'a> {
     looping: Option<crate::sequence::LoopBehaviour>,
     /// A serialized track-level `meta` box (empty = none).
     meta: &'a [u8],
+    /// A serialized `udta` box (track-level `cprt`s), or empty.
+    udta: &'a [u8],
 }
 
 /// `(tkhd duration, edts box)` for a looping setting over a media
@@ -2627,7 +2632,28 @@ fn trak_box(t: &TrackSpec<'_>, ts: u32, chunk_offset: u64) -> Vec<u8> {
     trak.extend_from_slice(&edts);
     trak.extend(boxed(b"mdia", &mdia));
     trak.extend_from_slice(t.meta);
+    trak.extend_from_slice(t.udta);
     boxed(b"trak", &trak)
+}
+
+/// A `udta` box holding one `cprt` per declaration (ISO/IEC 14496-12
+/// §8.10.2), empty bytes for no declaration; a language that is not a
+/// three-letter lower-case code is refused.
+fn udta_box(copyrights: &[crate::sequence::Copyright]) -> Result<Vec<u8>> {
+    if copyrights.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut body = Vec::new();
+    for c in copyrights {
+        let cprt = c.to_body().ok_or_else(|| {
+            HeifError::invalid(format!(
+                "sequence writer: cprt language {:?} is not a three-letter lower-case code",
+                c.language
+            ))
+        })?;
+        body.extend(full_boxed(b"cprt", 0, 0, &cprt));
+    }
+    Ok(boxed(b"udta", &body))
 }
 
 /// The sample tables of one chunk starting at `chunk_offset`: `stts`
