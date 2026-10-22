@@ -1465,3 +1465,57 @@ fn empty_item_bodies_are_refused_at_write_time() {
         .all(|l| l.extents.iter().all(|e| e.length == data.len() as u64)));
     let _ = oxideav_heif::decode(&seq).unwrap();
 }
+
+/// HEIF §6.6.2.2 / §6.6.2.3: a `grid` has 1..=256 rows and columns
+/// (one byte each, minus one) and an `iovl` one or more inputs, both
+/// over a non-empty canvas — a zero-row grid used to underflow the
+/// `rows_minus_one` byte and a 257-row one to wrap it.
+#[test]
+fn degenerate_derived_items_are_refused() {
+    use oxideav_heif::derived::{GridDescriptor, OverlayDescriptor};
+    use oxideav_heif::props::Ispe;
+
+    let (hvcc, data) = hevc_record_and_data();
+    let props = || {
+        vec![
+            (hvcc.clone(), true),
+            (Property::Ispe(Ispe::new(64, 64)), false),
+        ]
+    };
+    let mut w = HeifWriter::new();
+    let tile = w.add_coded_item(*b"hvc1", data.clone(), props());
+    for (rows, cols, tiles) in [
+        (0u16, 1u16, 0usize),
+        (1, 0, 0),
+        (257, 1, 257),
+        (1, 257, 257),
+    ] {
+        let ids = vec![tile; tiles];
+        let err = w
+            .add_grid(GridDescriptor::new(rows, cols, 64, 64), &ids, Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("1..=256"), "{rows}x{cols}: {err}");
+    }
+    let err = w
+        .add_grid(GridDescriptor::new(1, 1, 0, 64), &[tile], Vec::new())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("zero output size"), "{err}");
+    let err = w
+        .add_overlay(
+            OverlayDescriptor::new([0; 4], 64, 64, Vec::new()),
+            &[],
+            Vec::new(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no input images"), "{err}");
+    // The 1 × 1 grid and the one-layer overlay are the minimal legal
+    // shapes and write.
+    let g = w
+        .add_grid(GridDescriptor::new(1, 1, 64, 64), &[tile], Vec::new())
+        .unwrap();
+    w.set_primary(g);
+    assert!(w.write_to_vec().is_ok());
+}

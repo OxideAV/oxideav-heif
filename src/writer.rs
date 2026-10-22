@@ -402,6 +402,17 @@ impl HeifWriter {
         tiles: &[u32],
         mut properties: Vec<(Property, bool)>,
     ) -> Result<u32> {
+        // HEIF §6.6.2.3: one or more input images, rows_minus_one /
+        // columns_minus_one one byte each, a canvas the tiles cover.
+        if desc.rows == 0 || desc.columns == 0 || desc.rows > 256 || desc.columns > 256 {
+            return Err(HeifError::invalid(format!(
+                "grid: {}x{} layout (1..=256 rows and columns)",
+                desc.rows, desc.columns
+            )));
+        }
+        if desc.output_width == 0 || desc.output_height == 0 {
+            return Err(HeifError::invalid("grid: zero output size"));
+        }
         if tiles.len() != desc.tile_count() {
             return Err(HeifError::invalid(format!(
                 "grid: {} tiles for a {}x{} layout",
@@ -433,6 +444,13 @@ impl HeifWriter {
         inputs: &[u32],
         mut properties: Vec<(Property, bool)>,
     ) -> Result<u32> {
+        // HEIF §6.6.2.2: one or more input images on a canvas.
+        if inputs.is_empty() {
+            return Err(HeifError::invalid("iovl: no input images"));
+        }
+        if desc.output_width == 0 || desc.output_height == 0 {
+            return Err(HeifError::invalid("iovl: zero output size"));
+        }
         if inputs.len() != desc.offsets.len() {
             return Err(HeifError::invalid(format!(
                 "iovl: {} inputs for {} offsets",

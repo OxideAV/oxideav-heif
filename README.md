@@ -692,9 +692,12 @@ coded body, an empty constrained-extent tile, an empty metadata body
 empty `tili` payload; the only empty body that is ever laid out is
 the cover still's placeholder in a sequence file, whose extent is
 re-targeted at the aliased sample before the file is written. The
-reader resolves a foreign file's zero-length extent per the clause on
-all three construction methods (to the end of the file, the `idat`,
-or the source item).
+derived items are bounded the same way: a `grid` outside 1..=256
+rows / columns or over a zero canvas and an `iovl` with no input
+image are refused (§6.6.2.2 / §6.6.2.3 — a zero-row grid used to
+underflow the `rows_minus_one` byte). The reader resolves a foreign
+file's zero-length extent per the clause on all three construction
+methods (to the end of the file, the `idat`, or the source item).
 
 **Gain maps** (`tests/gainmap.rs`, `tests/fixtures/gainmap/`): four
 AVIF files from a black-box gain-map tool (monochrome, RGB, half-size
