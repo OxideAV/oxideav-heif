@@ -739,8 +739,10 @@ fn brands_are_claimed_truthfully() {
     let seq = sw.write_to_vec().unwrap();
     assert!(has(&seq, &BRAND_MIAF) && has(&seq, b"msf1") && has(&seq, b"mif1"));
     assert!(has(&seq, &BRAND_MIHB));
+    // (Every non-aliased item carries bytes: the master here is not
+    // the cover_sample alias, so it keeps a real body.)
     let mut bad_cover = oxideav_heif::HeifWriter::new();
-    let cid = bad_cover.add_coded_item(*b"hvc1", Vec::new(), coded_props.clone());
+    let cid = bad_cover.add_coded_item(*b"hvc1", data.clone(), coded_props.clone());
     let thumb = bad_cover.add_thumbnail(cid, *b"hvc1", data.clone(), coded_props.clone());
     bad_cover.set_primary(thumb);
     sw.still = Some(bad_cover);
@@ -1227,4 +1229,239 @@ fn overlay_composes_layers_of_mixed_chroma_after_their_transforms() {
         oxideav_heif::decode(&bytes).unwrap().to_frame().unwrap(),
         want
     );
+}
+
+/// The `hvcC` and coded bytes of a small lossless HEVC still, for
+/// hand-built files.
+fn hevc_record_and_data() -> (Property, Vec<u8>) {
+    let bytes = encode_still(&picture(64, 64), &lossless()).unwrap();
+    let f = HeifFile::parse(&bytes).unwrap();
+    let meta = f.meta().unwrap();
+    let id = meta.primary_item_id.unwrap();
+    let hvcc = meta
+        .properties_of(id)
+        .into_iter()
+        .map(|(_, raw, _)| Property::parse(raw).unwrap())
+        .find(|p| matches!(p, Property::HvcC(_)))
+        .unwrap();
+    (hvcc, f.item_data_owned(id).unwrap())
+}
+
+/// The `(version, flags)` of the file's `ipma` box.
+fn ipma_version_flags(bytes: &[u8]) -> (u8, u32) {
+    let pos = bytes
+        .windows(4)
+        .position(|w| w == b"ipma")
+        .expect("ipma box");
+    let fb = &bytes[pos + 4..pos + 8];
+    (fb[0], u32::from_be_bytes([0, fb[1], fb[2], fb[3]]))
+}
+
+/// ISO/IEC 14496-12 §8.11.14: the `ipco` is a pool. A grid of 1 024
+/// tiles coded alike carries one `hvcC`, one tile `ispe`, one `pixi`
+/// and one `colr` — every tile's `ipma` row indexes the same entries
+/// — and the `ipma` stays in its 7-bit form.
+#[test]
+fn ipco_is_a_pool_shared_by_every_item() {
+    use oxideav_heif::derived::GridDescriptor;
+    use oxideav_heif::props::{Colr, Ispe, Pixi};
+
+    let (hvcc, data) = hevc_record_and_data();
+    let tile_props = || {
+        vec![
+            (hvcc.clone(), true),
+            (Property::Ispe(Ispe::new(64, 64)), false),
+            (Property::Pixi(Pixi::new(vec![8, 8, 8])), false),
+            (Property::Colr(Colr::MIAF_DEFAULT), false),
+        ]
+    };
+    let mut w = HeifWriter::new();
+    let tiles: Vec<u32> = (0..1024)
+        .map(|_| w.add_coded_item(*b"hvc1", data.clone(), tile_props()))
+        .collect();
+    let grid = w
+        .add_grid(
+            GridDescriptor::new(32, 32, 64 * 32, 64 * 32),
+            &tiles,
+            vec![(Property::Colr(Colr::MIAF_DEFAULT), false)],
+        )
+        .unwrap();
+    w.set_primary(grid);
+    let bytes = w.write_to_vec().unwrap();
+    let f = HeifFile::parse(&bytes).unwrap();
+    let meta = f.meta().unwrap();
+    assert_eq!(meta.items.len(), 1025);
+    // hvcC, tile ispe, pixi, colr, grid ispe.
+    assert_eq!(meta.properties.len(), 5, "{:?}", meta.properties);
+    assert_eq!(ipma_version_flags(&bytes), (0, 0));
+    let first: Vec<(u16, bool)> = meta
+        .properties_of(tiles[0])
+        .into_iter()
+        .map(|(i, _, e)| (i, e))
+        .collect();
+    assert_eq!(first.len(), 4);
+    for t in &tiles[1..] {
+        let row: Vec<(u16, bool)> = meta
+            .properties_of(*t)
+            .into_iter()
+            .map(|(i, _, e)| (i, e))
+            .collect();
+        assert_eq!(row, first, "tile {t} indexes the shared entries");
+    }
+    // The tiles' bytes are carried as given, and a re-mux keeps them.
+    assert_eq!(f.item_data(tiles[1023]).unwrap().as_ref(), &data[..]);
+    let again = HeifWriter::from_files(&[&bytes])
+        .unwrap()
+        .write_to_vec()
+        .unwrap();
+    let g = HeifFile::parse(&again).unwrap();
+    let gm = g.meta().unwrap();
+    assert_eq!(gm.properties.len(), 5);
+    assert_eq!(gm.items.len(), 1025);
+    assert_eq!(check(&g, MiafProfile::Miaf).unwrap().violations, vec![]);
+}
+
+/// §8.11.14: `ipma` flags bit 0 selects 15-bit property indices, to be
+/// set only when the `ipco` holds more than 127 entries. On each side
+/// of the boundary the writer picks the right form and the reader
+/// resolves every association.
+#[test]
+fn ipma_switches_to_15_bit_indices_past_127_properties() {
+    use oxideav_heif::props::{Ispe, Pasp};
+
+    let (hvcc, data) = hevc_record_and_data();
+    let file_with = |extra: usize| {
+        let mut props = vec![
+            (hvcc.clone(), true),
+            (Property::Ispe(Ispe::new(64, 64)), false),
+        ];
+        for i in 0..extra as u32 {
+            props.push((Property::Pasp(Pasp::new(1 + i, 1)), false));
+        }
+        let mut w = HeifWriter::new();
+        let id = w.add_coded_item(*b"hvc1", data.clone(), props);
+        w.set_primary(id);
+        (w.write_to_vec().unwrap(), id)
+    };
+    for (extra, total, large) in [(125usize, 127usize, false), (126, 128, true)] {
+        let (bytes, id) = file_with(extra);
+        assert_eq!(
+            ipma_version_flags(&bytes),
+            (0, large as u32),
+            "{total} properties"
+        );
+        let f = HeifFile::parse(&bytes).unwrap();
+        let meta = f.meta().unwrap();
+        assert_eq!(meta.properties.len(), total);
+        let row = meta.properties_of(id);
+        assert_eq!(row.len(), total);
+        // Indices resolve 1..=total in association order; every pasp
+        // comes back with its own spacing.
+        for (k, (idx, raw, _)) in row.iter().enumerate() {
+            assert_eq!(*idx as usize, k + 1);
+            if k >= 2 {
+                match Property::parse(raw).unwrap() {
+                    Property::Pasp(p) => assert_eq!(p.h_spacing as usize, k - 1),
+                    other => panic!("{other:?}"),
+                }
+            }
+        }
+        // The file decodes (the pasp entries are descriptive).
+        let img = oxideav_heif::decode(&bytes).unwrap();
+        assert_eq!((img.width, img.height), (64, 64));
+    }
+    // association_count is one byte: a 256-entry row is refused.
+    let mut props = vec![
+        (hvcc.clone(), true),
+        (Property::Ispe(Ispe::new(64, 64)), false),
+    ];
+    for i in 0..254u32 {
+        props.push((Property::Pasp(Pasp::new(1 + i, 1)), false));
+    }
+    let mut w = HeifWriter::new();
+    let id = w.add_coded_item(*b"hvc1", data.clone(), props);
+    w.set_primary(id);
+    let err = w.write_to_vec().unwrap_err().to_string();
+    assert!(err.contains("255"), "{err}");
+}
+
+/// An `iloc` extent of length 0 means "to the end of the source"
+/// (14496-12 §8.11.3.2.4.3), so no item is ever written with an empty
+/// body — the writer refuses each body kind by type.
+#[test]
+fn empty_item_bodies_are_refused_at_write_time() {
+    use oxideav_heif::props::Ispe;
+    use oxideav_heif::writer::ItemBody;
+
+    let (hvcc, data) = hevc_record_and_data();
+    let props = || {
+        vec![
+            (hvcc.clone(), true),
+            (Property::Ispe(Ispe::new(64, 64)), false),
+        ]
+    };
+    let refused = |w: &HeifWriter, what: &str| {
+        let err = w.write_to_vec().unwrap_err().to_string();
+        assert!(err.contains("empty body"), "{what}: {err}");
+    };
+    // Coded.
+    let mut w = HeifWriter::new();
+    let id = w.add_coded_item(*b"hvc1", Vec::new(), props());
+    w.set_primary(id);
+    refused(&w, "coded");
+    // Metadata items: an empty XMP packet, an empty raw Exif body.
+    let mut w = HeifWriter::new();
+    let id = w.add_coded_item(*b"hvc1", data.clone(), props());
+    w.set_primary(id);
+    w.add_xmp(id, "");
+    refused(&w, "xmp");
+    let mut w = HeifWriter::new();
+    let id = w.add_coded_item(*b"hvc1", data.clone(), props());
+    w.set_primary(id);
+    w.add_exif_raw(id, Vec::new());
+    refused(&w, "exif");
+    // Constrained extents: one empty tile among full ones.
+    let mut w = HeifWriter::new();
+    let id = w
+        .add_constrained_extents_item(
+            *b"hvc1",
+            1,
+            2,
+            64,
+            48,
+            vec![data.clone(), Vec::new()],
+            props(),
+        )
+        .unwrap();
+    w.set_primary(id);
+    refused(&w, "cexg");
+    // The same shapes with bytes write, and the alias path (a cover
+    // still whose primary points at a track sample) still carries an
+    // empty placeholder body that the sequence writer re-targets.
+    let mut w = HeifWriter::new();
+    let id = w.add_coded_item(*b"hvc1", data.clone(), props());
+    w.set_primary(id);
+    w.add_xmp(id, "<x:xmpmeta/>");
+    let bytes = w.write_to_vec().unwrap();
+    let f = HeifFile::parse(&bytes).unwrap();
+    for loc in &f.meta().unwrap().locations {
+        for e in &loc.extents {
+            assert_ne!(e.length, 0, "item {}: no zero-length extent", loc.item_id);
+        }
+    }
+    let mut cover = HeifWriter::new();
+    let cid = cover.add_coded_item(*b"hvc1", Vec::new(), props());
+    cover.set_primary(cid);
+    assert!(matches!(cover.items()[0].body, ItemBody::Coded(ref d) if d.is_empty()));
+    let mut sw = oxideav_heif::writer::SequenceWriter::new(*b"hvc1", hvcc.clone(), 64, 64, 10);
+    sw.push_sample(data.clone(), 1, true);
+    sw.still = Some(cover);
+    sw.cover_sample = Some(0);
+    let seq = sw.write_to_vec().unwrap();
+    let f = HeifFile::parse(&seq).unwrap();
+    let loc = &f.meta().unwrap().locations;
+    assert!(loc
+        .iter()
+        .all(|l| l.extents.iter().all(|e| e.length == data.len() as u64)));
+    let _ = oxideav_heif::decode(&seq).unwrap();
 }

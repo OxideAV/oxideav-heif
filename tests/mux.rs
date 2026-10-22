@@ -986,3 +986,107 @@ fn metadata_tracks_round_trip_through_the_muxer() {
     }
     assert_eq!(i, 3);
 }
+
+/// `Muxer::set_metadata` (core 0.1.41): the sequence muxer keeps the
+/// `copyright` / `copyright:<lang>` pairs as `cprt` boxes and drops
+/// every other key (no ISOBMFF / HEIF carriage exists for free-form
+/// pairs); `carries_metadata_key` says so beforehand; a still stream
+/// (the encoder's whole file, written through) stores nothing.
+#[test]
+fn muxer_set_metadata_carries_copyright_as_cprt() {
+    let ctx = context();
+    let mut params = CodecParameters::video(CodecId::new("h265"));
+    params.width = Some(32);
+    params.height = Some(32);
+    params.pixel_format = Some(PixelFormat::Yuv420P);
+    params.options = oxideav_core::CodecOptions::new().set("mode", "pcm");
+    let mut enc = ctx.codecs.first_encoder(&params).unwrap();
+    let (mut vf, _) = frame(0).to_core().unwrap();
+    vf.pts = Some(0);
+    enc.send_frame(&Frame::Video(vf)).unwrap();
+    enc.flush().unwrap();
+    let packet = enc
+        .receive_packet()
+        .unwrap()
+        .with_duration(1)
+        .with_stream_index(0);
+    let stream = StreamInfo {
+        index: 0,
+        time_base: TimeBase::new(1, 10),
+        duration: Some(1),
+        start_time: Some(0),
+        params: enc.output_params().clone(),
+    };
+    let path = std::env::temp_dir().join(format!("oxideav-heif-cprt-{}.heic", std::process::id()));
+    let sink: Box<dyn oxideav_core::WriteSeek> = Box::new(std::fs::File::create(&path).unwrap());
+    let mut muxer = ctx
+        .containers
+        .open_muxer("heif", sink, std::slice::from_ref(&stream))
+        .unwrap();
+    assert!(muxer.carries_metadata_key("copyright"));
+    assert!(muxer.carries_metadata_key("copyright:jpn"));
+    assert!(!muxer.carries_metadata_key("copyright:en"));
+    assert!(!muxer.carries_metadata_key("title"));
+    let pairs = vec![
+        ("title".to_string(), "dropped".to_string()),
+        ("copyright".to_string(), "© Example".to_string()),
+        ("copyright:jpn".to_string(), "© 例".to_string()),
+    ];
+    muxer.set_metadata(&pairs).unwrap();
+    muxer.write_header().unwrap();
+    assert!(matches!(
+        muxer.set_metadata(&pairs),
+        Err(Error::InvalidData(_))
+    ));
+    muxer.write_packet(&packet).unwrap();
+    muxer.write_trailer().unwrap();
+    drop(muxer);
+    let bytes = std::fs::read(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    let demuxer = ctx
+        .containers
+        .open_demuxer("heif", Box::new(Cursor::new(bytes)), &ctx.codecs)
+        .unwrap();
+    let md: Vec<(String, String)> = demuxer
+        .metadata()
+        .iter()
+        .filter(|(k, _)| k.starts_with("copyright") || k == "title")
+        .cloned()
+        .collect();
+    assert_eq!(md, pairs[1..].to_vec());
+    // A still stream: nothing to store.
+    let still = StreamInfo {
+        index: 0,
+        time_base: TimeBase::new(1, 1),
+        duration: None,
+        start_time: None,
+        params: CodecParameters::video(CodecId::new("heif")),
+    };
+    let sink: Box<dyn oxideav_core::WriteSeek> = Box::new(Cursor::new(Vec::new()));
+    let mut muxer = ctx
+        .containers
+        .open_muxer("heif", sink, std::slice::from_ref(&still))
+        .unwrap();
+    assert!(!muxer.carries_metadata_key("copyright"));
+    assert!(matches!(
+        muxer.set_metadata(&pairs),
+        Err(Error::Unsupported(_))
+    ));
+}
+
+/// The still encoder declares the blob kinds it embeds (core 0.1.41
+/// `CodecCapabilities::embedded_blob_kinds`): ICC, Exif and XMP — the
+/// three the HEIF path carries (`colr` of type `prof`, `Exif` and
+/// `mime` items) — and nothing else.
+#[test]
+fn encoder_declares_its_embedded_blob_kinds() {
+    use oxideav_core::BlobKind;
+    let ctx = context();
+    let imp = &ctx.codecs.implementations(&CodecId::new("heif"))[0];
+    assert!(imp.caps.declares_embedded_blobs());
+    assert_eq!(
+        imp.caps.embedded_blob_kinds,
+        vec![BlobKind::ICC, BlobKind::EXIF, BlobKind::XMP]
+    );
+    assert!(!imp.caps.embeds_blob(&BlobKind::IPTC));
+}

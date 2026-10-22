@@ -667,6 +667,18 @@ impl HeifDemuxer {
         // through the ordinary decoder path. The raw tracks follow.
         let mut tracks = Vec::new();
         if let Some(mv) = &movie {
+            // The movie's copyright declarations (`udta/cprt`, 14496-12
+            // §8.10.2): `copyright` for the undetermined language,
+            // `copyright:<lang>` otherwise — the keys the muxer's
+            // `set_metadata` writes back.
+            for c in &mv.copyrights {
+                let key = if c.language == "und" {
+                    "copyright".to_string()
+                } else {
+                    format!("copyright:{}", c.language)
+                };
+                metadata.push((key, c.notice.clone()));
+            }
             for (ti, t) in mv.tracks.iter().enumerate() {
                 if !t.is_visual() || &t.handler == b"auxv" {
                     continue;

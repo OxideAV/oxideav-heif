@@ -52,6 +52,38 @@ fn limits() -> DecodeOptions {
         .with_strict(false)
 }
 
+/// What every file the writer emits satisfies: the `ipco` is a pool
+/// (no two entries are byte-identical; ISO/IEC 14496-12 §8.11.14), its
+/// `ipma` uses the 15-bit index form exactly when the pool holds more
+/// than 127 entries, and no `iloc` extent has length 0 (which would
+/// mean "to the end of the source", §8.11.3.2.4.3).
+fn written_invariants(bytes: &[u8]) -> HeifFile<Vec<u8>> {
+    let file = HeifFile::parse(bytes).expect("written file re-parses");
+    let meta = file.meta().expect("written file has a meta");
+    for (i, a) in meta.properties.iter().enumerate() {
+        for b in &meta.properties[..i] {
+            assert!(
+                (a.box_type, a.user_type, &a.body) != (b.box_type, b.user_type, &b.body),
+                "ipco entry {} duplicates an earlier one",
+                i + 1
+            );
+        }
+    }
+    let large = meta.properties.len() > 127;
+    for a in &meta.associations {
+        for e in &a.entries {
+            assert!(e.index as usize <= meta.properties.len());
+            assert!(large || e.index <= 127, "7-bit index form past 127");
+        }
+    }
+    for loc in &meta.locations {
+        for e in &loc.extents {
+            assert_ne!(e.length, 0, "item {}: zero-length extent", loc.item_id);
+        }
+    }
+    file
+}
+
 /// Re-mux `bytes` and compare the primaries when the source decodes.
 fn remux_oracle(bytes: &[u8]) {
     let Ok(w) = HeifWriter::from_files(&[bytes]) else {
@@ -60,7 +92,7 @@ fn remux_oracle(bytes: &[u8]) {
     let Ok(out) = w.write_to_vec() else {
         return;
     };
-    let dst = HeifFile::parse(&out).expect("re-muxed file re-parses");
+    let dst = written_invariants(&out);
     let opts = limits();
     let Ok(original) = decode_with(bytes, &opts) else {
         return;
@@ -215,7 +247,7 @@ fuzz_target!(|data: &[u8]| {
         }
     };
     let _ = b.rest();
-    let file = HeifFile::parse(&bytes).expect("written file re-parses");
+    let file = written_invariants(&bytes);
     let rep = check(&file, MiafProfile::Miaf).expect("checker runs");
     assert!(rep.is_conformant(), "written file: {:?}", rep.violations);
     assert!(file.file_type.has_brand(b"miaf"));

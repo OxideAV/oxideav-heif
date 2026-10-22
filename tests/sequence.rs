@@ -554,3 +554,69 @@ fn sequence_level_metadata_round_trips() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+/// `cprt` (ISO/IEC 14496-12 §8.10.2) is the one string carriage the
+/// base format defines at the presentation level: the sequence writer
+/// emits one per declaration in the movie `udta`, the parser reads
+/// them back, and the demuxer reports them as `copyright` (`und`) /
+/// `copyright:<lang>` pairs.
+#[test]
+fn copyright_declarations_round_trip_through_cprt() {
+    use std::io::Cursor;
+
+    use oxideav_core::RuntimeContext;
+    use oxideav_heif::encode::encode_hevc_picture;
+    use oxideav_heif::image::Chroma;
+    use oxideav_heif::sequence::Copyright;
+    use oxideav_heif::writer::SequenceWriter;
+    use oxideav_heif::{HeifFrame, HeifPixelFormat};
+
+    let pic = HeifFrame::zeroed(
+        32,
+        32,
+        HeifPixelFormat::new(Chroma::Yuv420, 8, false).unwrap(),
+    )
+    .unwrap();
+    let coded = encode_hevc_picture(&pic, "pcm", 0).unwrap();
+    let mut sw = SequenceWriter::new(*b"hvc1", coded.config.clone(), 32, 32, 10)
+        .with_copyright("und", "© 2026 Example")
+        .with_copyright("eng", "Copyright 2026 Example");
+    sw.push_sample(coded.data.clone(), 1, true);
+    let bytes = sw.write_to_vec().unwrap();
+    let f = HeifFile::parse(&bytes).unwrap();
+    let mv = parse_movie(&f).unwrap().expect("moov");
+    assert_eq!(
+        mv.copyrights,
+        vec![
+            Copyright::new("und", "© 2026 Example"),
+            Copyright::new("eng", "Copyright 2026 Example"),
+        ]
+    );
+    assert_eq!(
+        mv.copyrights[1].packed_language(),
+        Some((5 << 10) | (14 << 5) | 7)
+    );
+    let mut ctx = RuntimeContext::new();
+    oxideav_heif::register(&mut ctx);
+    let demuxer = ctx
+        .containers
+        .open_demuxer("heif", Box::new(Cursor::new(bytes)), &ctx.codecs)
+        .unwrap();
+    let md = demuxer.metadata();
+    assert!(md.contains(&("copyright".to_string(), "© 2026 Example".to_string())));
+    assert!(md.contains(&(
+        "copyright:eng".to_string(),
+        "Copyright 2026 Example".to_string()
+    )));
+    // A language that is not a three-letter lower-case code is refused
+    // at write time rather than packed into garbage.
+    let mut bad = SequenceWriter::new(*b"hvc1", coded.config.clone(), 32, 32, 10)
+        .with_copyright("en-US", "x");
+    bad.push_sample(coded.data.clone(), 1, true);
+    assert!(bad.write_to_vec().unwrap_err().to_string().contains("cprt"));
+    // No declarations: no udta at all.
+    let mut none = SequenceWriter::new(*b"hvc1", coded.config.clone(), 32, 32, 10);
+    none.push_sample(coded.data.clone(), 1, true);
+    let plain = none.write_to_vec().unwrap();
+    assert!(!plain.windows(4).any(|w| w == b"udta"));
+}

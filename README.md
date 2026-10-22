@@ -414,6 +414,28 @@ sequence muxer writes the stream's ICC profile as the sample entry's
 `HeifImage::into_video_frame` / `from_video_frame`
 (`blobs_of_metadata` / `metadata_of_blobs`) carry `Metadata` both ways.
 
+Core 0.1.41 (r479): the `"heif"` encoder declares
+`CodecCapabilities::embedded_blob_kinds = [ICC, EXIF, XMP]` — the
+three kinds the HEIF path embeds (a `colr` of type `prof`, an `Exif`
+item, an XMP `mime` item) — so a gateway can say which blobs survive
+a save before encoding; any other kind on the input is dropped. The
+sequence muxer implements `Muxer::set_metadata` /
+`carries_metadata_key` for the one string carriage the base format
+defines at the presentation level, the copyright declaration (`cprt`
+in the movie-level `udta`, ISO/IEC 14496-12 §8.10.2, one per
+language): the keys `copyright` (language `und`) and
+`copyright:<lang>` (an ISO 639-2/T three-letter code) are stored, in
+order; every other key is dropped, because neither ISO/IEC 14496-12
+nor 23008-12 defines a carriage for free-form string pairs (the
+timed-metadata `keys` table of 14496-12 §12.8 describes samples, not
+presentation text) — the muxer does not invent one. The demuxer
+reports the same keys from `Movie::copyrights`, so
+`mux.set_metadata(demux.metadata())` carries them through a re-mux;
+`SequenceWriter::with_copyright` / `sequence::Copyright` /
+`parse_cprt` are the standalone forms. A `"heif"` / `"avif"` still
+stream is written through as the encoder's file and has no movie
+box: `set_metadata` returns `Unsupported` and stores nothing.
+
 **Sequence-level metadata** (r478; HEIF §8.3, Annex A.2.2 / A.3,
 ISO/IEC 14496-12 §8.11.1 / §12.3): metadata true for a whole image
 sequence lives in the master track's `MetaBox` — an `Exif` item
@@ -526,7 +548,7 @@ and real-world producers, and the production defaults.
 | Entity groups | `altr` (display order), `ster` / `stem` (stereo, monoscopic fallback), `pymd` (pyramids), `rgpa` (region partitions), `brst` / `eqiv` surfaced; Amd 2:2026 §11.3.5 `unrg` (union of regions) / `corg` (compound region: main + the regions it logically includes) with `Meta::region_items_of` / `region_groups_of` (the `rgan` items with a `cdsc` to an image and the groups over them), writer helpers, `check` rules (`"HEIF-A2 11.3.5.x"`) |
 | MIAF | `MiafProfile` + `check`: §7 general requirements, §8 shared constraints, Annex A HEVC / AV1 codec limits, HEIF Annex L (`"HEIF L.2.3.1"` essential `vvcC`, `"HEIF L.2.4.3"` `vvs1` + `vvnC`, `"HEIF L.4.1.1"` the `vvic` essential-property set on the brand-carrying item), the HEIF Amd 1 `tmap` / `cfen` shalls (`"HEIF-A1 …"`), MIAF Amd 1:2025 §7.3.11.5 (`tmap` in an `altr` with a master image, `"MIAF-A1 …"`), Amd 2 `pixi` / `mif3` / `tili` rules (`"HEIF-A2 …"`) — typed `MiafViolation`s with clause numbers, should-level rules as `advisories`; MIAF Amd 1 Annex A practices: `Meta::display_order` (`altr` collapse), `Track::loop_behaviour` (`elst` `RepeatEdits`) |
 | Image sequences | `moov` / `trak` / `stbl` (`stts` `ctts` `stsc` `stsz` `stz2` `stco` `co64` `stss` `sbgp` `csgp` `sgpd` `tref` `elst`), top-level `prft` / `ssix`, visual sample entries (`hvcC` `av1C` `avcC` `lhvC` `vvcC` `ccst` `auxi` `colr` `clap` `pasp` `clli` `mdcv` `cclv` `amve`; QuickTime zero terminators tolerated), `elst` `RepeatEdits` + `tkhd` duration, §7.2.1 matrix → rotation / mirror; framework `Demuxer` with pts / dts / sync / seek |
-| Writer | `HeifWriter` (coded / grid / overlay / identity / `tmap` / `cfen` / `tili` / `cexg` items, thumbnails, alpha / depth, Exif / XMP (raw bodies, any encoding) / arbitrary `cdsc` items, item names, entity groups with flags and payloads (`pymd` pyramids, `stem` stereo with fallback), de-duplicated `ipco`, MIAF `mdat` order, `deti` data references, truthful brand selection — `miaf` only when the §7 / §8 checks pass on the header about to be written, the Annex A profile brands `MiHB` / `MiHA` / `MiHE` / `MA1B` / `MA1A` / `MiAB` only when the primary's coding family satisfies them (r477); `import_item` / `from_files` re-mux items and whole primaries between files byte for byte, `tili` items with their offset table and tile properties (r478) — every corpus file re-muxes to the same image (`tests/remux.rs`)); high-level `encode_still` (grid or `tili` tiling (`TileCarrier`, r478) / thumbnail / alpha / depth / gain map / Exif / XMP / ICC / transforms on the items or on an `iden`), `encode_overlay` (`iovl` over hidden layers with alpha, thumbnail of the composite); `SequenceWriter` (`msf1` / `hevc` / `avis` / `vvis`, brand override, `pict` track + `ccst`, HDR sample-entry boxes, `stco` / `co64` per §8.7.5, `stss` when not every sample is a sync sample, looping via `elst`, alpha track, cover-image `meta` that can alias a track sample, sequence-level Exif / XMP in the track `MetaBox` and timed `Exif` / `metx` metadata tracks (§8.3, r478), the same truthful `miaf` / profile pass on the assembled file; opens in every black-box reader on this machine) |
+| Writer | `HeifWriter` (coded / grid / overlay / identity / `tmap` / `cfen` / `tili` / `cexg` items, thumbnails, alpha / depth, Exif / XMP (raw bodies, any encoding) / arbitrary `cdsc` items, item names, entity groups with flags and payloads (`pymd` pyramids, `stem` stereo with fallback), the `ipco` as a pool — one entry per distinct property box, decoder configurations included, every item indexing it (r479); 15-bit `ipma` indices past 127 entries; no empty item body (r479), MIAF `mdat` order, `deti` data references, truthful brand selection — `miaf` only when the §7 / §8 checks pass on the header about to be written, the Annex A profile brands `MiHB` / `MiHA` / `MiHE` / `MA1B` / `MA1A` / `MiAB` only when the primary's coding family satisfies them (r477); `import_item` / `from_files` re-mux items and whole primaries between files byte for byte, `tili` items with their offset table and tile properties (r478) — every corpus file re-muxes to the same image (`tests/remux.rs`)); high-level `encode_still` (grid or `tili` tiling (`TileCarrier`, r478) / thumbnail / alpha / depth / gain map / Exif / XMP / ICC / transforms on the items or on an `iden`), `encode_overlay` (`iovl` over hidden layers with alpha, thumbnail of the composite); `SequenceWriter` (`msf1` / `hevc` / `avis` / `vvis`, brand override, `pict` track + `ccst`, HDR sample-entry boxes, `stco` / `co64` per §8.7.5, `stss` when not every sample is a sync sample, looping via `elst`, alpha track, cover-image `meta` that can alias a track sample, sequence-level Exif / XMP in the track `MetaBox` and timed `Exif` / `metx` metadata tracks (§8.3, r478), the same truthful `miaf` / profile pass on the assembled file; opens in every black-box reader on this machine) |
 | Gain maps | ISO 21496-1 + HEIF Amd 1:2025 §6.6.2.4 (the published text; "fully applied" = weight ±1.0): `ToneMapImage` body (`version` 0 + C.2 `GainMapMetadata`), `dimg` = [base, gain map] (count 2 enforced), the three `colr` placements and the `tmap` brand (§10.2.6) checked; `DecodedImage::gain_map` (decoded gain-map item + metadata + alternate `colr`), `apply_gain_map(h_target)` → linear RGB in the application space (Formulas 1–3, §6.2.2 resampling, Annex B primaries conversion, single↔multi-channel rules, limited-range clip); `ItemDecoder::tone_mapped()` → the reconstruction in the `tmap` item's `colr` at its `pixi` depth (alpha carried over); writer authors `tmap` items (`HeifWriter::add_tone_map`, `EncodeOptions::gain_map`) with the hidden map, the brand and the `altr` [tmap, base] fallback; matches a black-box tone-mapper within 1 code at every headroom (2 on the half-size map, 7 after a BT.2020→709 conversion of the 16-bit PQ reconstruction), and the tool tone-maps our authored file identically to its own |
 | Colour | `HeifImage::to_rgb8` / `to_rgba8` and `rgb::to_rgb` (16-bit): YCbCr → RGB(A) with the item `colr` matrix / range (H.273), identity (GBR), monochrome, alpha carried; the renderer step over the composed frame. Framework: the effective `nclx` rides as the core `ColorSignal` on streams and frames; identity-matrix 4:4:4 items are planar RGB (`Gbrp*` / `Gbrap*`) end to end |
 | Encoder (`registry`) | `encode_still` / `encode_still_owned` / `encode_still_into`: HEVC (lossless `pcm` or CABAC `intra` at a QP; 4:2:0 at 8 / 10 / 12 bits — deeper sources code Main 10 (`hevc_depth`), in-loop filters on by default (`hevc_filters`), VUI range + colour description, Main Still Picture, `rd` / `tiles` / `ctb` and the wavefront), AV1 stills (lossless or quality 0..=100, `speed`, native 8/10/12-bit 4:0:0–4:4:4, a size-derived tile layout, `av1C` from the codec configuration) or VVC items (oxideav-h266's IDR encoder at `qp` or lossless `pcm`, 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8 / 10 bits, any size — the encoder pads to 8 and crops with the SPS conformance window, an odd edge via `clap` (`VVC_ALIGNMENT` = 2), `vvcC` from the VPS / SPS / PPS with the PTL from the VPS, `vvc_options` tool knobs; no VUI — colour rides `colr` only) items, padding + `clap`, grid tiling (automatic 512-px tiles above 4 MP, MIAF 64-px floor; tiles coded in parallel under `threads`, bytes identical to serial), thumbnails, alpha (per-codec `auxC` URN, single-channel `pixi`, own parameter-set ids; AV1 alpha as a monochrome still), Exif / XMP / ICC, transforms as essential properties on the coded item; `"heif"` framework `Encoder` (frame in — planar YCbCr / grey / planar RGB (`Gbrp*`, coded identity-matrix 4:4:4 by AV1) or packed RGB / RGBA / BGR(A) / 16-bit / grey+alpha converted straight into the coding layout — file out; `set_execution_context` or the `threads` option; declared options `codec` (`hevc` / `av1` / `vvc` / `avc`) / `mode` / `qp` / `grid` / `thumbnail` / `range` / `quality` / `speed` / `rd` / `tiles` / `ctb` / `threads` / `depth` / `filters` / `chroma`); the `"heif"` muxer passes its whole-file packets through, so `oxideav convert in.png out.heic` writes a HEIC (see Production defaults) |
@@ -623,6 +645,53 @@ from the bitstream — renders our alpha exactly and our colour within
 its own colour management. Lossy AV1 (quality 60 / 30, with alpha)
 opens in all four readers and magick reproduces our decode within 1
 code.
+
+**Property pool** (r479): ISO/IEC 14496-12 §8.11.14 defines the
+`ipco` as an implicitly indexed list that every `ipma` row indexes
+into, so the writer interns each distinct property box once — by its
+serialized bytes, decoder configurations included — and every item
+carrying it (the tiles of a grid, a master and its thumbnail, the
+layers of an overlay, the cover of a sequence) references the same
+entry; a master and an alpha auxiliary keep separate `hvcC`s because
+their parameter-set ids differ (above), and two AV1 items coded
+alike — a grey master and its alpha — share one `av1C`. Until r478 a
+decoder configuration was written per coded item, so a grid's `ipco`
+grew with its tile count. Measured on this machine (`heifenc`,
+`sips` 316 / `heif-info` + `heif-convert` 1.23.4 / ImageMagick
+7.1.2-29 / ffmpeg 9.0.1; lossless HEVC and AV1):
+
+| layout | tiles | `ipco` entries r478 → r479 | `ipma` form | `sips` | `heif-info` / `heif-convert` | `magick` | `ffmpeg` |
+|---|---|---|---|---|---|---|---|
+| 4032 × 3024, 512-px grid (HEVC / AV1) | 48 | 52 → **5** | 7-bit both | opens | opens | opens | opens |
+| 4032 × 3024, 256-px grid (HEVC / AV1) | 192 | 196 → **5** | 15-bit → 7-bit | opens | refused ("maximum number of child boxes (100) in `ipco`") → **opens** | refused (same limit) → **opens** | opens |
+| 4096 × 4096, 128-px grid (HEVC / AV1) | 1 024 | 1 028 → **5** | 15-bit → 7-bit | opens | refused: `iloc` holds 1 025 items (limit 1 000) — before and after | refused: same | refused: 1 025 streams (limit 1 000) — before and after |
+| 640 × 480 HEVC + alpha + thumbnail | 1 + 2 | 9 (3 `hvcC`: master, alpha with SPS id 1, thumbnail at its own size) | 7-bit | opens | opens | opens | opens |
+| 320 × 240 grey AV1 + alpha (one `av1C`) | 1 + 1 | 6 → **5** | 7-bit | opens | opens | opens | opens |
+
+The 5 entries of a shared-configuration grid are the `hvcC` / `av1C`,
+the tile `ispe`, `pixi`, `colr` and the grid's `ispe`. The 100-box
+`ipco` ceiling of two readers is a property-count limit the pool
+clears at any tile count; the 1 000-item ceiling of three readers is
+an item-count limit the pool cannot move (a 1 024-tile grid opens in
+`sips` and in this crate only). The writer's own ceilings are 32 767
+`ipco` entries, 255 associations per item (both typed refusals) and
+the `ipma` form switches at 128 entries (verified on both sides of
+the boundary, `tests/writer.rs`). Every written file is checked by
+the `heif_writer` fuzz target for a duplicate-free pool, the right
+index form and no zero-length extent.
+
+**Degenerate items** (r479): an `iloc` extent of length 0 means "to
+the end of the source" (ISO/IEC 14496-12 §8.11.3.2.4.3), so an item
+written with an empty body would silently claim every byte after its
+offset. `HeifWriter` refuses — at write time, by body kind — an empty
+coded body, an empty constrained-extent tile, an empty metadata body
+(an empty XMP packet or raw Exif block), an empty `tmap` body and an
+empty `tili` payload; the only empty body that is ever laid out is
+the cover still's placeholder in a sequence file, whose extent is
+re-targeted at the aliased sample before the file is written. The
+reader resolves a foreign file's zero-length extent per the clause on
+all three construction methods (to the end of the file, the `idat`,
+or the source item).
 
 **Gain maps** (`tests/gainmap.rs`, `tests/fixtures/gainmap/`): four
 AVIF files from a black-box gain-map tool (monochrome, RGB, half-size

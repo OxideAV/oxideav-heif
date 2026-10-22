@@ -22,9 +22,10 @@ exclude = ["/tests", "/fuzz"]
 # container parser + composition layer (crate-local HeifFrame /
 # HeifPixelFormat / HeifError) and never references the framework or a
 # codec crate.
-# 0.1.40: metadata blobs on CodecParameters / VideoFrame (the ICC /
-# Exif / XMP carriage of the framework path).
-oxideav-core = { version = "0.1.40", optional = true }
+# 0.1.41: `CodecCapabilities::embedded_blob_kinds` (the still encoder
+# declares ICC / Exif / XMP) and the `Muxer::set_metadata` /
+# `carries_metadata_key` text hook (the sequence muxer's `cprt`).
+oxideav-core = { version = "0.1.41", optional = true }
 # A 0.0.x caret requirement is exact; the range keeps heif on the latest
 # h265 0.0 line (0.0.15: hostile-input hardening of the CABAC
 # binarizations and the parameter-set bounds the HEIF fuzzer reached).

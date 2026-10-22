@@ -14,7 +14,7 @@
 //! with only generic (`isom`, `qt  `, `mp42`) brands score 0 here and
 //! stay with MP4 / MOV.
 
-use oxideav_core::{CodecCapabilities, CodecId, CodecInfo, RuntimeContext};
+use oxideav_core::{BlobKind, CodecCapabilities, CodecId, CodecInfo, RuntimeContext};
 
 use crate::demux::{make_decoder, open, probe, CODEC_ID, CONTAINER_NAME};
 use crate::encode::make_encoder;
@@ -55,7 +55,12 @@ pub fn register_codecs(reg: &mut oxideav_core::CodecRegistry) {
         .with_intra_only(true)
         .with_lossy(true)
         .with_lossless(true)
-        .with_pixel_formats(crate::encode::ENCODER_PIXEL_FORMATS.to_vec());
+        .with_pixel_formats(crate::encode::ENCODER_PIXEL_FORMATS.to_vec())
+        // The still encoder embeds exactly these blob kinds (an ICC
+        // profile as a `colr` of type `prof`, Exif and XMP as `cdsc`
+        // metadata items of the primary); every other kind is dropped
+        // on the way in.
+        .with_embedded_blob_kinds(vec![BlobKind::ICC, BlobKind::EXIF, BlobKind::XMP]);
     // One codec id, `"heif"`: the `avif` id belongs to oxideav-avif (its
     // own still encoder); `.avif` files are written by that encoder
     // through this crate's muxer, which takes its still stream like a

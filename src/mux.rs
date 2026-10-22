@@ -75,8 +75,22 @@ pub struct HeifSequenceMuxer {
     /// The `Data` streams of codec id `exif` / `xmp` (HEIF §8.3 timed
     /// metadata).
     metadata_streams: Vec<MetadataStream>,
+    /// The `copyright` / `copyright:<lang>` pairs kept by
+    /// [`Muxer::set_metadata`], written as `cprt` boxes.
+    copyrights: Vec<crate::sequence::Copyright>,
     header_written: bool,
     finished: bool,
+}
+
+/// The `cprt` language a metadata key names: `copyright` is the
+/// undetermined language `und`, `copyright:<lang>` a three-letter
+/// lower-case ISO 639-2/T code; any other key is not carried.
+fn copyright_language(key: &str) -> Option<&str> {
+    if key == "copyright" {
+        return Some("und");
+    }
+    let lang = key.strip_prefix("copyright:")?;
+    (lang.len() == 3 && lang.bytes().all(|b| b.is_ascii_lowercase())).then_some(lang)
 }
 
 impl HeifSequenceMuxer {
@@ -163,6 +177,7 @@ impl HeifSequenceMuxer {
             samples: Vec::new(),
             still: Vec::new(),
             metadata_streams,
+            copyrights: Vec::new(),
             header_written: false,
             finished: false,
         })
@@ -350,6 +365,7 @@ impl HeifSequenceMuxer {
             };
         let timescale = self.stream.time_base.den().max(1) as u32;
         let mut sw = SequenceWriter::new(entry_type, config.clone(), w as u16, h as u16, timescale);
+        sw.copyrights = self.copyrights.clone();
         // The stream's metadata blobs (r476, core 0.1.40): the ICC
         // profile as the sample entry's `colr` (next to the nclx one,
         // as the still encoder writes them), Exif / XMP as items
@@ -467,6 +483,39 @@ impl Muxer for HeifSequenceMuxer {
         }
         self.push(packet)?;
         Ok(())
+    }
+
+    /// The sequence file's text metadata: `copyright` (and
+    /// `copyright:<lang>` for a notice in a given ISO 639-2/T language)
+    /// is stored as a `cprt` box of the movie-level `udta` (ISO/IEC
+    /// 14496-12 §8.10.2), one per language, in the given order; every
+    /// other key is dropped — neither 14496-12 nor 23008-12 defines a
+    /// carriage for free-form string pairs. A `"heif"` / `"avif"` still
+    /// stream is written through as the file the encoder produced and
+    /// has no movie box: nothing is stored and the call returns
+    /// `Unsupported`. Must precede `write_header`.
+    fn set_metadata(&mut self, metadata: &[(String, String)]) -> CoreResult<()> {
+        if self.header_written {
+            return Err(CoreError::invalid(
+                "heif muxer: set_metadata must precede write_header",
+            ));
+        }
+        if matches!(self.codec, Codec::Still) {
+            return Err(CoreError::unsupported(
+                "heif muxer: a still stream is written through as the encoder's file; it carries no cprt",
+            ));
+        }
+        self.copyrights = metadata
+            .iter()
+            .filter_map(|(k, v)| {
+                copyright_language(k).map(|lang| crate::sequence::Copyright::new(lang, v.as_str()))
+            })
+            .collect();
+        Ok(())
+    }
+
+    fn carries_metadata_key(&self, key: &str) -> bool {
+        !matches!(self.codec, Codec::Still) && copyright_language(key).is_some()
     }
 
     fn write_trailer(&mut self) -> CoreResult<()> {

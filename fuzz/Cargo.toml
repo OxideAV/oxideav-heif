@@ -61,7 +61,7 @@ path = ".."
 # The framework target registers the codec crates the still decoder
 # resolves through (published versions, as the crate's own CI does).
 [dependencies.oxideav-core]
-version = "0.1.40"
+version = "0.1.41"
 
 [dependencies.oxideav-h265]
 version = ">=0.0.15, <0.1"

@@ -16,7 +16,7 @@
 //!   iinf / infe v2|v3  (v3 when an id exceeds 16 bits)
 //!   iref v0|v1         dimg / thmb / auxl / cdsc / prem / base
 //!   iprp
-//!     ipco             property boxes (descriptive ones de-duplicated; one decoder configuration per coded item)
+//!     ipco             property boxes, one entry per distinct box (shared by every item carrying it)
 //!     ipma             one row per item, essential flags kept
 //!   iloc v1            cm 0 (mdat) for coded + metadata items,
 //!                      cm 1 (idat) for derived items
@@ -48,6 +48,7 @@ use crate::meta::{
 };
 use crate::miaf::{check, MiafProfile};
 use crate::props::{write::property_box, AuxC, Property, AUX_URN_ALPHA, AUX_URN_DEPTH};
+use std::collections::HashMap;
 
 #[doc(hidden)]
 /// How an item's body is stored.
@@ -1204,7 +1205,18 @@ impl HeifWriter {
     /// every item body written straight from the queued items (no
     /// assembled copy of the payload exists on this side).
     pub fn write_to<W: std::io::Write>(&self, out: &mut W) -> Result<()> {
-        self.validate()?;
+        self.write_to_inner(out, None)
+    }
+
+    /// `write_to` with `aliased` naming an item whose empty coded body
+    /// is a placeholder the caller re-points afterwards (the
+    /// [`SequenceWriter`] cover that aliases a track sample re-targets
+    /// its `iloc` extent at the sample). Every other item must carry
+    /// bytes: an `iloc` extent of length 0 means "to the end of the
+    /// source" (ISO/IEC 14496-12 §8.11.3.2.4.3), so an empty body
+    /// would be written as a claim over everything after it.
+    fn write_to_inner<W: std::io::Write>(&self, out: &mut W, aliased: Option<u32>) -> Result<()> {
+        self.validate(aliased)?;
         let primary = self.primary.expect("validated");
         let large_ids = self.items.iter().any(|i| i.id > 0xffff)
             || self
@@ -1212,30 +1224,29 @@ impl HeifWriter {
                 .iter()
                 .any(|(_, f, t)| *f > 0xffff || t.iter().any(|x| *x > 0xffff));
 
-        // ── ipco / ipma
+        // ── ipco / ipma. The `ipco` is a pool (ISO/IEC 14496-12
+        // §8.11.14: an implicitly indexed list that every `ipma` row
+        // indexes into), so each distinct property box is written once
+        // and every item carrying it — the tiles of a grid, a master
+        // and its thumbnail, the layers of an overlay — indexes the
+        // same entry. Interning is by serialized bytes: two records
+        // share an entry exactly when they would be byte-identical in
+        // the file, decoder configurations included (a grid of 1 024
+        // tiles coded alike carries one `hvcC` / `av1C`; a master and
+        // an alpha auxiliary with different parameter sets keep their
+        // own). Entries are 1-based.
         let mut ipco_boxes: Vec<Vec<u8>> = Vec::new();
+        let mut interned: HashMap<Vec<u8>, u16> = HashMap::new();
         let mut ipma_rows: Vec<(u32, Vec<(u16, bool)>)> = Vec::new();
-        let intern = |ipco_boxes: &mut Vec<Vec<u8>>, p: &Property| -> u16 {
+        let mut intern = |p: &Property| -> u16 {
             let bytes = property_box(p);
-            // Decoder configurations are never shared between
-            // items: Apple ImageIO refuses a file whose master and
-            // alpha auxiliary point at one `hvcC` entry (verified
-            // by re-muxing its own streams both ways), and every
-            // third-party producer writes one record per coded
-            // item. Everything else de-duplicates.
-            let shared = if p.is_decoder_config() {
-                None
-            } else {
-                ipco_boxes.iter().position(|b| *b == bytes)
-            };
-            let idx = match shared {
-                Some(i) => i,
-                None => {
-                    ipco_boxes.push(bytes);
-                    ipco_boxes.len() - 1
-                }
-            };
-            idx as u16 + 1
+            if let Some(&idx) = interned.get(&bytes) {
+                return idx;
+            }
+            ipco_boxes.push(bytes.clone());
+            let idx = ipco_boxes.len() as u16;
+            interned.insert(bytes, idx);
+            idx
         };
         for it in &self.items {
             let mut row = Vec::new();
@@ -1250,7 +1261,7 @@ impl HeifWriter {
                     *tile_item_type,
                     tile_properties
                         .iter()
-                        .map(|(p, e)| (*e, intern(&mut ipco_boxes, p)))
+                        .map(|(p, e)| (*e, intern(p)))
                         .collect(),
                 )),
                 _ => None,
@@ -1267,26 +1278,7 @@ impl HeifWriter {
                     }
                     _ => p,
                 };
-                let bytes = property_box(p);
-                // Decoder configurations are never shared between
-                // items: Apple ImageIO refuses a file whose master and
-                // alpha auxiliary point at one `hvcC` entry (verified
-                // by re-muxing its own streams both ways), and every
-                // third-party producer writes one record per coded
-                // item. Everything else de-duplicates.
-                let shared = if p.is_decoder_config() {
-                    None
-                } else {
-                    ipco_boxes.iter().position(|b| *b == bytes)
-                };
-                let idx = match shared {
-                    Some(i) => i,
-                    None => {
-                        ipco_boxes.push(bytes);
-                        ipco_boxes.len() - 1
-                    }
-                };
-                row.push((idx as u16 + 1, *essential));
+                row.push((intern(p), *essential));
             }
             if !row.is_empty() {
                 ipma_rows.push((it.id, row));
@@ -1621,7 +1613,7 @@ impl HeifWriter {
         out
     }
 
-    fn validate(&self) -> Result<()> {
+    fn validate(&self, aliased: Option<u32>) -> Result<()> {
         let primary = self
             .primary
             .ok_or_else(|| HeifError::invalid("writer: no primary item set"))?;
@@ -1666,6 +1658,45 @@ impl HeifWriter {
                 return Err(HeifError::invalid(format!(
                     "writer: coded item {} has no decoder configuration property",
                     it.id
+                )));
+            }
+            // `ipma` association_count is one byte.
+            let assoc = it.properties.len()
+                + match &it.body {
+                    ItemBody::Tiled {
+                        tile_properties, ..
+                    } => tile_properties.len(),
+                    _ => 0,
+                };
+            if it.properties.len() > 255 || assoc > 255 {
+                return Err(HeifError::exhausted(format!(
+                    "writer: item {} carries {} property associations (ipma holds at most 255)",
+                    it.id,
+                    it.properties.len()
+                )));
+            }
+            // No item is written with an empty body: its `iloc` extent
+            // would have extent_length 0, which a reader takes as "to
+            // the end of the source" (14496-12 §8.11.3.2.4.3) — the
+            // item would silently claim every byte after its offset.
+            let empty = match &it.body {
+                ItemBody::Coded(d) => d.is_empty() && aliased != Some(it.id),
+                ItemBody::Metadata(d) | ItemBody::ToneMap(d) => d.is_empty(),
+                ItemBody::CodedExtents(tiles) => {
+                    tiles.is_empty() || tiles.iter().any(|t| t.is_empty())
+                }
+                ItemBody::Tiled { data, .. } => data.is_empty(),
+                ItemBody::Grid(_)
+                | ItemBody::Overlay(_)
+                | ItemBody::Identity
+                | ItemBody::ColourFormatEnhancement(_) => false,
+            };
+            if empty {
+                return Err(HeifError::invalid(format!(
+                    "writer: item {} ({}) has an empty body — an iloc extent of length 0 \
+                     means \"to the end of the source\"",
+                    it.id,
+                    crate::boxes::fourcc_str(&it.item_type)
                 )));
             }
         }
@@ -1870,6 +1901,11 @@ pub struct SequenceWriter {
     /// Timed metadata tracks describing the master track (tracks after
     /// the alpha one, each with a `cdsc` reference to track 1).
     pub metadata_tracks: Vec<SequenceMetadataTrack>,
+    /// Copyright declarations for the whole presentation, written as
+    /// `cprt` boxes of the movie-level `udta` (ISO/IEC 14496-12
+    /// §8.10.2), one per language; each language must be a
+    /// three-letter lower-case code or the write is refused.
+    pub copyrights: Vec<crate::sequence::Copyright>,
 }
 impl SequenceWriter {}
 
@@ -1900,7 +1936,17 @@ impl SequenceWriter {
             exif: None,
             xmp: None,
             metadata_tracks: Vec::new(),
+            copyrights: Vec::new(),
         }
+    }
+
+    /// Add a copyright declaration (`cprt`, §8.10.2) for the whole
+    /// presentation; `language` is an ISO 639-2/T three-letter code
+    /// (`"und"` when undetermined).
+    pub fn with_copyright(mut self, language: &str, notice: &str) -> Self {
+        self.copyrights
+            .push(crate::sequence::Copyright::new(language, notice));
+        self
     }
 
     /// Set the sequence-level Exif payload (see [`SequenceWriter::exif`]).
@@ -2109,7 +2155,8 @@ impl SequenceWriter {
         // Optional still meta (a HeifWriter file minus its ftyp/mdat).
         let (still_meta, still_mdat) = match &still_writer {
             Some(w) => {
-                let bytes = w.write_to_vec()?;
+                let mut bytes = Vec::with_capacity(w.payload_len() as usize + 4096);
+                w.write_to_inner(&mut bytes, alias.map(|(primary, _)| primary))?;
                 let f = crate::file::HeifFile::parse_borrowed(&bytes)?;
                 let meta_h = f
                     .top_level
@@ -2201,9 +2248,26 @@ impl SequenceWriter {
             .as_ref()
             .map(|a| a.samples.iter().map(|s| s.data.len() as u64).sum())
             .unwrap_or(0);
+        // Movie-level user data: one `cprt` per declaration (§8.10.2).
+        let udta = if self.copyrights.is_empty() {
+            Vec::new()
+        } else {
+            let mut body = Vec::new();
+            for c in &self.copyrights {
+                let cprt = c.to_body().ok_or_else(|| {
+                    HeifError::invalid(format!(
+                        "sequence writer: cprt language {:?} is not a three-letter lower-case code",
+                        c.language
+                    ))
+                })?;
+                body.extend(full_boxed(b"cprt", 0, 0, &cprt));
+            }
+            boxed(b"udta", &body)
+        };
         let moov_for = |base: u64| -> Vec<u8> {
             let mut moov = Vec::new();
             moov.extend_from_slice(&mvhd);
+            moov.extend_from_slice(&udta);
             moov.extend(trak_box(&master, ts, base));
             if let Some(a) = &alpha {
                 moov.extend(trak_box(a, ts, base + master_len));
@@ -2800,15 +2864,26 @@ mod tests {
         assert_eq!(meta.auxiliaries_of(grid), vec![alpha]);
         assert_eq!(meta.metadata_of(grid), vec![exif, xmp]);
         assert!(meta.item(alpha).unwrap().is_hidden());
-        // Shared descriptive properties were de-duplicated (4 tiles
-        // share ispe/pixi/colr); every coded item keeps its own hvcC.
-        assert!(meta.properties.len() <= 13, "{}", meta.properties.len());
+        // The ipco is a pool: every distinct property box is written
+        // once. The 4 tiles, the alpha and the thumbnail carry the
+        // same hvcC bytes here, so the file holds exactly one; the
+        // tiles share ispe / pixi / colr, the thumbnail its own ispe,
+        // the alpha its auxC + pixi.
         let hvcc_count = meta
             .properties
             .iter()
             .filter(|p| &p.box_type == b"hvcC")
             .count();
-        assert_eq!(hvcc_count, 6, "4 tiles + alpha + thumbnail");
+        assert_eq!(hvcc_count, 1, "one shared hvcC");
+        assert!(meta.properties.len() <= 8, "{}", meta.properties.len());
+        for id in tiles.iter().chain([&alpha, &thumb]) {
+            assert!(
+                meta.properties_of(*id)
+                    .iter()
+                    .any(|(_, p, essential)| &p.box_type == b"hvcC" && *essential),
+                "item {id} references the shared hvcC as essential"
+            );
+        }
         assert_eq!(f.item_data(tiles[2]).unwrap().as_ref(), &[2u8; 16]);
         assert_eq!(f.item_data(grid).unwrap().len(), 8);
         assert_eq!(

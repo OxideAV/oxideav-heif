@@ -711,8 +711,16 @@ pub struct Movie {
     pub producer_reference_times: Vec<ProducerReferenceTime>,
     /// Top-level `ssix` boxes, in file order.
     pub subsegment_indexes: Vec<SubsegmentIndex>,
+    /// The movie-level copyright declarations (`moov/udta/cprt`,
+    /// ISO/IEC 14496-12 §8.10.2), in file order — one per language.
+    pub copyrights: Vec<Copyright>,
 }
 impl Movie {
+    /// `self` with its movie-level copyright declarations.
+    pub fn with_copyrights(mut self, copyrights: Vec<Copyright>) -> Self {
+        self.copyrights = copyrights;
+        self
+    }
     /// Every field as a positional argument, in declaration order
     /// (the struct is `#[non_exhaustive]`: build it here or from
     /// `Default` where one exists, then read / assign its public fields).
@@ -729,6 +737,7 @@ impl Movie {
             tracks,
             producer_reference_times,
             subsegment_indexes,
+            copyrights: Vec::new(),
         }
     }
 }
@@ -807,13 +816,91 @@ pub fn parse_movie<D: AsRef<[u8]>>(file: &HeifFile<D>) -> Result<Option<Movie>> 
             _ => {}
         }
     }
+    let copyrights = match find_box(moov, b"udta")? {
+        Some((_, udta)) => parse_udta_copyrights(udta)?,
+        None => Vec::new(),
+    };
     Ok(Some(Movie {
         timescale,
         duration,
         tracks,
         producer_reference_times,
         subsegment_indexes,
+        copyrights,
     }))
+}
+
+/// A copyright declaration (`cprt`, ISO/IEC 14496-12 §8.10.2): a
+/// notice in one language. Several may be present, one per language.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Copyright {
+    /// ISO 639-2/T code, three lower-case letters (`"und"` when the
+    /// language is undetermined).
+    pub language: String,
+    /// The notice.
+    pub notice: String,
+}
+impl Copyright {
+    /// Every field as a positional argument, in declaration order.
+    pub fn new(language: impl Into<String>, notice: impl Into<String>) -> Self {
+        Self {
+            language: language.into(),
+            notice: notice.into(),
+        }
+    }
+
+    /// The `cprt` language field: three five-bit letters (each the
+    /// ASCII value minus 0x60) after one pad bit; `None` unless the
+    /// code is exactly three lower-case ASCII letters.
+    pub fn packed_language(&self) -> Option<u16> {
+        let b = self.language.as_bytes();
+        if b.len() != 3 || !b.iter().all(|c| c.is_ascii_lowercase()) {
+            return None;
+        }
+        Some(((b[0] - 0x60) as u16) << 10 | ((b[1] - 0x60) as u16) << 5 | (b[2] - 0x60) as u16)
+    }
+
+    /// The `cprt` box body: packed language then the NUL-terminated
+    /// UTF-8 notice. `None` when the language is not a three-letter
+    /// lower-case code.
+    pub fn to_body(&self) -> Option<Vec<u8>> {
+        let mut b = self.packed_language()?.to_be_bytes().to_vec();
+        b.extend_from_slice(self.notice.as_bytes());
+        b.push(0);
+        Some(b)
+    }
+}
+
+/// Parse one `cprt` box payload (§8.10.2).
+pub fn parse_cprt(p: &[u8]) -> Result<Copyright> {
+    let (version, _flags, body) = parse_full_box(p)?;
+    if version != 0 {
+        return Err(HeifError::invalid(format!("cprt version {version}")));
+    }
+    let mut r = Reader::new(body);
+    let packed = r.u16("cprt language")?;
+    let language: String = [packed >> 10, packed >> 5, packed]
+        .iter()
+        .map(|v| (((v & 0x1f) as u8).wrapping_add(0x60)) as char)
+        .collect();
+    let rest = r.rest();
+    let end = rest.iter().position(|b| *b == 0).unwrap_or(rest.len());
+    let notice = String::from_utf8_lossy(&rest[..end]).into_owned();
+    Ok(Copyright { language, notice })
+}
+
+/// Every `cprt` child of a `udta` payload, in order; other children
+/// are skipped.
+pub fn parse_udta_copyrights(udta: &[u8]) -> Result<Vec<Copyright>> {
+    let mut out = Vec::new();
+    for h in iter_boxes(udta) {
+        let h = h?;
+        if &h.box_type == b"cprt" {
+            out.push(parse_cprt(payload(udta, &h))?);
+        }
+    }
+    Ok(out)
 }
 
 /// `prft` (§8.16.5.2).
