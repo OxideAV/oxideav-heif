@@ -20,8 +20,8 @@ use oxideav_core::{CodecId, CodecParameters, Decoder, Error as CoreError, Frame,
 use crate::error::HeifError;
 use crate::image::{Chroma, HeifFrame, HeifPixelFormat, Plane};
 use crate::vvcc::{
-    self, access_unit_annex_b, is_record_nal_type, is_vcl, nal_unit_type, SpsHead, VvcConfig,
-    VvcNalArray, NAL_AUD, NAL_EOB, NAL_EOS, NAL_SPS, NAL_SUFFIX_SEI, NAL_VPS,
+    self, NAL_AUD, NAL_EOB, NAL_EOS, NAL_SPS, NAL_SUFFIX_SEI, NAL_VPS, SpsHead, VvcConfig,
+    VvcNalArray, access_unit_annex_b, is_record_nal_type, is_vcl, nal_unit_type,
 };
 
 /// Codec id the VVC decoder is reached under.
@@ -90,7 +90,7 @@ impl Decoder for VvcItemDecoder {
             (None, false) => {
                 return Err(CoreError::invalid(
                     "h266: length-prefixed packet without a vvcC extradata",
-                ))
+                ));
             }
         };
         let mut pics = Vec::new();

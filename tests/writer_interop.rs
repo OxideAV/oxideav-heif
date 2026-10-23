@@ -27,9 +27,9 @@ use std::path::Path;
 use std::process::Command;
 
 use common::{have_binary, scratch_dir};
-use oxideav_heif::encode::{encode_still, to_yuv420_8, EncodeOptions, StillCodec};
+use oxideav_heif::encode::{EncodeOptions, StillCodec, encode_still, to_yuv420_8};
 use oxideav_heif::image::{Chroma, HeifFrame, HeifPixelFormat};
-use oxideav_heif::miaf::{check, MiafProfile};
+use oxideav_heif::miaf::{MiafProfile, check};
 use oxideav_heif::props::{Clap, Colr, CropRect, Imir, Irot, Property};
 use oxideav_heif::rgb::to_rgb;
 use oxideav_heif::{HeifFile, HeifWriter};
@@ -98,7 +98,7 @@ fn minimal_icc() -> Vec<u8> {
     p[16..20].copy_from_slice(b"RGB "); // data colour space
     p[20..24].copy_from_slice(b"XYZ "); // PCS
     p[36..40].copy_from_slice(b"acsp"); // profile file signature
-                                        // p[128..132] = tag count 0 (already zero).
+    // p[128..132] = tag count 0 (already zero).
     p
 }
 
@@ -404,7 +404,7 @@ fn dims(name: &str) -> (u32, u32) {
 
 #[test]
 fn every_written_shape_reparses_and_round_trips() {
-    use oxideav_heif::decode::{decode_primary, ItemDecoder};
+    use oxideav_heif::decode::{ItemDecoder, decode_primary};
     for (name, _ext, opts, gray, alpha) in cases() {
         let (w, h) = dims(name);
         let src = picture(w, h, gray, alpha);
@@ -442,7 +442,7 @@ fn every_written_shape_reparses_and_round_trips() {
 /// do; only the final YCbCr→RGB matrix differs between readers).
 #[test]
 fn third_party_readers_open_our_files() {
-    use oxideav_heif::decode::{decode_primary, ItemDecoder};
+    use oxideav_heif::decode::{ItemDecoder, decode_primary};
     let dir = scratch_dir("writer-interop");
     let readers: &[(&str, Render)] = &[
         ("sips", sips_png),
@@ -657,7 +657,7 @@ fn alpha_parameter_sets_differ_from_the_master() {
             opts.hevc_mode
         );
         // The alpha still decodes to the master's geometry, exactly.
-        use oxideav_heif::decode::{decode_primary, ItemDecoder};
+        use oxideav_heif::decode::{ItemDecoder, decode_primary};
         let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
         assert_eq!((img.width(), img.height()), (96, 80));
         if opts.hevc_mode == "pcm" {
@@ -700,7 +700,7 @@ fn apple_imageio_renders_the_alpha_plane_exactly() {
         eprintln!("SKIP: sips + magick needed");
         return;
     }
-    use oxideav_heif::decode::{decode_primary, ItemDecoder};
+    use oxideav_heif::decode::{ItemDecoder, decode_primary};
     let dir = scratch_dir("apple-alpha");
     for (name, opts) in [
         ("pcm", pcm()),
@@ -753,8 +753,8 @@ fn apple_imageio_renders_the_alpha_plane_exactly() {
 /// as the pixel oracle, as above).
 #[test]
 fn overlay_and_collection_files_open_in_third_party_readers() {
-    use oxideav_heif::decode::{decode_primary, ItemDecoder};
-    use oxideav_heif::encode::{encode_overlay, OverlayLayer, OverlaySpec};
+    use oxideav_heif::decode::{ItemDecoder, decode_primary};
+    use oxideav_heif::encode::{OverlayLayer, OverlaySpec, encode_overlay};
     let dir = scratch_dir("writer-interop-derived");
     let overlay = OverlaySpec::new(
         96,

@@ -26,9 +26,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use oxideav_heif::decode::{decode_primary, ItemDecoder};
-use oxideav_heif::encode::{encode_still, EncodeOptions, StillCodec};
 use oxideav_heif::HeifFile;
+use oxideav_heif::decode::{ItemDecoder, decode_primary};
+use oxideav_heif::encode::{EncodeOptions, StillCodec, encode_still};
 
 fn fnv1a64(planes: &[oxideav_heif::Plane]) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
@@ -110,7 +110,9 @@ fn main() {
         i += 1;
     }
     println!("threads: {threads}");
-    println!("| File | Size | Layout | Items | Decode (median of {runs}) | Peak RSS (decode) | Encode HEVC default | Encode AV1 default | Output FNV-1a |");
+    println!(
+        "| File | Size | Layout | Items | Decode (median of {runs}) | Peak RSS (decode) | Encode HEVC default | Encode AV1 default | Output FNV-1a |"
+    );
     println!("|---|---|---|---|---|---|---|---|---|");
     for path in files {
         let bytes = std::fs::read(&path).expect("read");

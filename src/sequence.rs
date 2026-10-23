@@ -9,7 +9,7 @@
 //! turns into packets.
 
 use crate::av1c::Av1Config;
-use crate::boxes::{find_box, fourcc_str, iter_boxes, parse_full_box, payload, FourCc, Reader};
+use crate::boxes::{FourCc, Reader, find_box, fourcc_str, iter_boxes, parse_full_box, payload};
 use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
 use crate::hvcc::HevcConfig;
@@ -1293,31 +1293,31 @@ fn parse_trak(trak: &[u8], file_len: u64) -> Result<Track> {
     }
     let mut edits = Vec::new();
     let mut repeat_edits = false;
-    if let Some((_, edts)) = find_box(trak, b"edts")? {
-        if let Some((_, elst)) = find_box(edts, b"elst")? {
-            let (v, f, body) = parse_full_box(elst)?;
-            repeat_edits = f & 1 == 1;
-            let mut r = Reader::new(body);
-            let n = r.u32("elst entry_count")? as usize;
-            for _ in 0..n {
-                let (segment_duration, media_time) = if v == 1 {
-                    (
-                        r.u64("elst segment_duration")?,
-                        r.u64("elst media_time")? as i64,
-                    )
-                } else {
-                    (
-                        r.u32("elst segment_duration")? as u64,
-                        r.u32("elst media_time")? as i32 as i64,
-                    )
-                };
-                let media_rate = r.i32("elst media_rate")?;
-                edits.push(Edit {
-                    segment_duration,
-                    media_time,
-                    media_rate,
-                });
-            }
+    if let Some((_, edts)) = find_box(trak, b"edts")?
+        && let Some((_, elst)) = find_box(edts, b"elst")?
+    {
+        let (v, f, body) = parse_full_box(elst)?;
+        repeat_edits = f & 1 == 1;
+        let mut r = Reader::new(body);
+        let n = r.u32("elst entry_count")? as usize;
+        for _ in 0..n {
+            let (segment_duration, media_time) = if v == 1 {
+                (
+                    r.u64("elst segment_duration")?,
+                    r.u64("elst media_time")? as i64,
+                )
+            } else {
+                (
+                    r.u32("elst segment_duration")? as u64,
+                    r.u32("elst media_time")? as i32 as i64,
+                )
+            };
+            let media_rate = r.i32("elst media_rate")?;
+            edits.push(Edit {
+                segment_duration,
+                media_time,
+                media_rate,
+            });
         }
     }
     Ok(Track {
@@ -1710,7 +1710,7 @@ fn parse_sample_table(stbl: &[u8], file_len: u64) -> Result<Vec<Sample>> {
         if durations.len() + count > MAX_SAMPLES {
             return Err(HeifError::exhausted("stts expands past the sample cap"));
         }
-        durations.extend(std::iter::repeat(delta).take(count));
+        durations.extend(std::iter::repeat_n(delta, count));
     }
     // Composition offsets.
     let mut cts_offsets: Vec<i64> = Vec::new();
@@ -1731,7 +1731,7 @@ fn parse_sample_table(stbl: &[u8], file_len: u64) -> Result<Vec<Sample>> {
             if cts_offsets.len() + count > MAX_SAMPLES {
                 return Err(HeifError::exhausted("ctts expands past the sample cap"));
             }
-            cts_offsets.extend(std::iter::repeat(off).take(count));
+            cts_offsets.extend(std::iter::repeat_n(off, count));
         }
     }
     // Sync samples.

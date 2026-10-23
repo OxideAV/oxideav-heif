@@ -16,12 +16,12 @@ mod common;
 use std::io::Cursor;
 use std::path::PathBuf;
 
-use common::png::{read_png, Png};
+use common::png::{Png, read_png};
 use common::{fnv1a64, interop_root};
 use oxideav_core::{Frame, RuntimeContext};
-use oxideav_heif::decode::{decode_item, decode_primary, ItemDecoder};
+use oxideav_heif::decode::{ItemDecoder, decode_item, decode_primary};
 use oxideav_heif::image::Chroma;
-use oxideav_heif::miaf::{check, MiafProfile};
+use oxideav_heif::miaf::{MiafProfile, check};
 use oxideav_heif::rgb::to_rgb;
 use oxideav_heif::{HeifFile, HeifFrame};
 
@@ -324,11 +324,12 @@ fn producer_structures_are_surfaced() {
     assert_eq!(&primary.item_type, b"grid");
     let tiles = meta.derivation_inputs(primary.id);
     assert_eq!(tiles.len(), 4, "2x2 tiles of 512");
-    assert!(meta
-        .items
-        .iter()
-        .filter(|i| tiles.contains(&i.id))
-        .all(|i| i.is_hidden()));
+    assert!(
+        meta.items
+            .iter()
+            .filter(|i| tiles.contains(&i.id))
+            .all(|i| i.is_hidden())
+    );
     let node = oxideav_heif::derived::build_primary_graph(&f).unwrap();
     assert_eq!(node.output_size().unwrap(), (1024, 768));
     assert!(check(&f, MiafProfile::Miaf).unwrap().is_conformant());

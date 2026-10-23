@@ -11,10 +11,10 @@ use oxideav_core::{
     CodecId, CodecOptions, CodecParameters, Encoder, ExecutionContext, Frame, PixelFormat,
     VideoFrame, VideoPlane,
 };
-use oxideav_heif::decode::{decode_primary, ItemDecoder};
+use oxideav_heif::decode::{ItemDecoder, decode_primary};
 use oxideav_heif::encode::{
-    encode_still, encode_still_owned, packed_to_planar, packed_to_planar_for, to_yuv420,
-    EncodeOptions, StillCodec, GRID_AUTO_MIN_PIXELS, GRID_AUTO_TILE,
+    EncodeOptions, GRID_AUTO_MIN_PIXELS, GRID_AUTO_TILE, StillCodec, encode_still,
+    encode_still_owned, packed_to_planar, packed_to_planar_for, to_yuv420,
 };
 use oxideav_heif::image::{Chroma, HeifFrame, HeifPixelFormat};
 use oxideav_heif::props::Colr;
@@ -503,13 +503,14 @@ fn automatic_grid_above_four_megapixels() {
     );
     let single = encode_still(&picture(2048, 2048, 8, Chroma::Yuv420, false), &opts).unwrap();
     let f = HeifFile::parse(&single).unwrap();
-    assert!(f
-        .meta
-        .as_ref()
-        .unwrap()
-        .items
-        .iter()
-        .all(|i| i.item_type != *b"grid"));
+    assert!(
+        f.meta
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .all(|i| i.item_type != *b"grid")
+    );
 }
 
 #[test]

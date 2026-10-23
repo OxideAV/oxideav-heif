@@ -539,7 +539,7 @@ impl GridCanvas {
             if bps == 1 {
                 blank.planes[a].data.fill(max as u8);
             } else {
-                for px in blank.planes[a].data.chunks_exact_mut(2) {
+                for px in blank.planes[a].data.as_chunks_mut::<2>().0 {
                     px.copy_from_slice(&max.to_le_bytes());
                 }
             }
@@ -780,7 +780,7 @@ pub fn composite_overlay(
                     };
                     let idx = cy as usize * pw as usize + cx as usize;
                     let vi = colour[p][idx]; // pre-multiplied by canvas opacity
-                                             // Straight: vu = m·α + vi·(1 − α); pre-multiplied: vu = m + vi·(1 − α).
+                    // Straight: vu = m·α + vi·(1 − α); pre-multiplied: vu = m + vi·(1 − α).
                     let m_term = if inp.premultiplied { m * max } else { m * a };
                     colour[p][idx] = (m_term + (vi * (max - a) + max / 2) / max).min(max * max);
                 }
@@ -945,7 +945,7 @@ fn cfen_role(c: u8, rgb: bool, i: usize, packed: bool) -> Result<CfenRole> {
         0 => {
             return Err(HeifError::invalid(format!(
                 "cfen input {i}: channel_id 0 (shall not be 0)"
-            )))
+            )));
         }
         1 => CfenRole::Ignored,
         2..=4 => CfenRole::Plane(match (rgb, c) {
@@ -958,17 +958,17 @@ fn cfen_role(c: u8, rgb: bool, i: usize, packed: bool) -> Result<CfenRole> {
         6 => {
             return Err(HeifError::unsupported(format!(
                 "cfen input {i}: {what} 6 (depth) has no plane in the output picture"
-            )))
+            )));
         }
         7 => {
             return Err(HeifError::unsupported(format!(
                 "cfen input {i}: {what} 7 (K) — Amd 2 Table 2's CMYK column names no colr signalling that selects it (nclx has no CMYK matrix)"
-            )))
+            )));
         }
         c => {
             return Err(HeifError::unsupported(format!(
                 "cfen input {i}: {what} {c} (reserved)"
-            )))
+            )));
         }
     })
 }
@@ -1159,16 +1159,16 @@ pub fn plan_colour_format_enhancement_regions(
         _ => {
             return Err(HeifError::unsupported(
                 "cfen: only one of the two chroma channels",
-            ))
+            ));
         }
     };
     let alpha = roles.iter().find(|(r, _)| *r == CfenRole::Alpha);
-    if let Some((_, size)) = alpha {
-        if *size != (w, h) {
-            return Err(HeifError::unsupported(
-                "cfen: alpha plane not at the output size",
-            ));
-        }
+    if let Some((_, size)) = alpha
+        && *size != (w, h)
+    {
+        return Err(HeifError::unsupported(
+            "cfen: alpha plane not at the output size",
+        ));
     }
     let format = HeifPixelFormat::new(chroma, depth, alpha.is_some())?;
     let alpha_index = format.alpha_plane();
@@ -1216,7 +1216,7 @@ pub fn plan_colour_format_enhancement(
             _ => {
                 return Err(HeifError::unsupported(format!(
                     "cfen input {i}: packed channels (plan_colour_format_enhancement_regions carries the layout)"
-                )))
+                )));
             }
         }
     }

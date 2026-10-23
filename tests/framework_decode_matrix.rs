@@ -29,7 +29,7 @@ use std::time::Duration;
 use oxideav_core::{
     Decoder, Error, ExecutionContext, Frame as CoreFrame, RuntimeContext, StreamInfo, TimeBase,
 };
-use oxideav_heif::{decode_all_with, info, ColorInfo, DecodeOptions, Frame, HeifImage};
+use oxideav_heif::{ColorInfo, DecodeOptions, Frame, HeifImage, decode_all_with, info};
 
 fn context() -> RuntimeContext {
     let mut ctx = RuntimeContext::new();
@@ -527,10 +527,10 @@ fn compare(ctx: &RuntimeContext, path: &Path) -> Vec<String> {
     }
     // The composed primary still is stream 0 whenever there is one
     // (the gateway's `primary()`); the tracks follow it.
-    if let Some(first) = stills.first() {
-        if first.index != 0 {
-            issues.push(format!("the first still stream is stream {}", first.index));
-        }
+    if let Some(first) = stills.first()
+        && first.index != 0
+    {
+        issues.push(format!("the first still stream is stream {}", first.index));
     }
     match (info(&bytes), stills.first()) {
         (Ok(i), Some(s)) if !items.is_empty() => {

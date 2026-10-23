@@ -4,10 +4,10 @@
 
 use std::borrow::Cow;
 
-use crate::boxes::{fourcc_str, iter_boxes, payload, walk_boxes, BoxHeader, FourCc, WalkEntry};
+use crate::boxes::{BoxHeader, FourCc, WalkEntry, fourcc_str, iter_boxes, payload, walk_boxes};
 use crate::error::{HeifError, Result};
 use crate::ftyp::FileType;
-use crate::meta::{reference, ItemInfo, ItemLocation, Meta};
+use crate::meta::{ItemInfo, ItemLocation, Meta, reference};
 
 /// Upper bound on the concatenated size of one item's data.
 pub const MAX_ITEM_BYTES: u64 = 1 << 30;
@@ -114,31 +114,31 @@ impl<D: AsRef<[u8]>> HeifFile<D> {
         }
         let file_type = file_type
             .ok_or_else(|| HeifError::invalid("no ftyp box (ISO/IEC 23008-12 §10 requires one)"))?;
-        if let Some(first) = top_level.first() {
-            if !matches!(&first.box_type, b"ftyp" | b"styp") {
-                return Err(HeifError::invalid(format!(
-                    "first box is '{}' — ftyp shall be first (ISO/IEC 14496-12 §4.3)",
-                    fourcc_str(&first.box_type)
-                )));
-            }
+        if let Some(first) = top_level.first()
+            && !matches!(&first.box_type, b"ftyp" | b"styp")
+        {
+            return Err(HeifError::invalid(format!(
+                "first box is '{}' — ftyp shall be first (ISO/IEC 14496-12 §4.3)",
+                fourcc_str(&first.box_type)
+            )));
         }
         // Amd 2:2026 O.1: "When a parser encounters a MinimizedImageBox,
         // it shall expand it to a MetaBox and a MediaDataBox".
-        if meta.is_none() {
-            if let Some(h) = top_level.iter().find(|h| &h.box_type == b"mini") {
-                let mini = crate::mini::MinimizedImage::parse(payload(bytes, h))?;
-                let eq = mini.equivalent_file(&file_type)?;
-                let inner = HeifFile::from_data(eq.as_slice())?;
-                let (file_type, meta, top_level) = (inner.file_type, inner.meta, inner.top_level);
-                return Ok(Self {
-                    data,
-                    equivalent: Some(eq),
-                    file_type,
-                    meta,
-                    top_level,
-                    minimized: Some(mini),
-                });
-            }
+        if meta.is_none()
+            && let Some(h) = top_level.iter().find(|h| &h.box_type == b"mini")
+        {
+            let mini = crate::mini::MinimizedImage::parse(payload(bytes, h))?;
+            let eq = mini.equivalent_file(&file_type)?;
+            let inner = HeifFile::from_data(eq.as_slice())?;
+            let (file_type, meta, top_level) = (inner.file_type, inner.meta, inner.top_level);
+            return Ok(Self {
+                data,
+                equivalent: Some(eq),
+                file_type,
+                meta,
+                top_level,
+                minimized: Some(mini),
+            });
         }
         Ok(Self {
             data,
@@ -245,7 +245,7 @@ impl<D: AsRef<[u8]>> HeifFile<D> {
             m => {
                 return Err(HeifError::unsupported(format!(
                     "item {item_id}: per-extent access to construction method {m} data"
-                )))
+                )));
             }
         };
         let spans = self.spans_in(loc, source.len())?;

@@ -10,7 +10,7 @@ use oxideav_core::{
     VideoPlane,
 };
 use oxideav_heif::rgb::to_rgb;
-use oxideav_heif::{decode_primary, HeifFile, ItemDecoder};
+use oxideav_heif::{HeifFile, ItemDecoder, decode_primary};
 
 fn context() -> RuntimeContext {
     let mut ctx = RuntimeContext::new();

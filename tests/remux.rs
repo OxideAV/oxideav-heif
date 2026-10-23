@@ -13,8 +13,8 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use oxideav_heif::miaf::{check, MiafProfile};
-use oxideav_heif::{decode_with, info, DecodeOptions, HeifFile, HeifWriter};
+use oxideav_heif::miaf::{MiafProfile, check};
+use oxideav_heif::{DecodeOptions, HeifFile, HeifWriter, decode_with, info};
 
 fn is_heif_name(p: &Path) -> bool {
     let ext = p

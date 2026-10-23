@@ -5,11 +5,11 @@
 mod common;
 
 use common::{
-    all_bundles, assert_trace_subset_eq, fixture_bytes, fixture_root, read_trace, TraceEvent,
+    TraceEvent, all_bundles, assert_trace_subset_eq, fixture_bytes, fixture_root, read_trace,
 };
-use oxideav_heif::derived::{build_primary_graph, ImageKind};
+use oxideav_heif::derived::{ImageKind, build_primary_graph};
 use oxideav_heif::meta::ITEM_TYPE_HVC1;
-use oxideav_heif::miaf::{check, MiafProfile};
+use oxideav_heif::miaf::{MiafProfile, check};
 use oxideav_heif::props::{AuxKind, Colr};
 use oxideav_heif::{HeifFile, ItemProperties};
 

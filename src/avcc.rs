@@ -185,20 +185,20 @@ impl AvcConfig {
             v.extend_from_slice(&(p.len() as u16).to_be_bytes());
             v.extend_from_slice(p);
         }
-        if Self::has_extension_trailer(self.profile_idc) {
-            if let (Some(c), Some(l), Some(ch)) = (
+        if Self::has_extension_trailer(self.profile_idc)
+            && let (Some(c), Some(l), Some(ch)) = (
                 self.chroma_format,
                 self.bit_depth_luma_minus8,
                 self.bit_depth_chroma_minus8,
-            ) {
-                v.push(0xfc | (c & 0x03));
-                v.push(0xf8 | (l & 0x07));
-                v.push(0xf8 | (ch & 0x07));
-                v.push(self.sps_ext.len().min(255) as u8);
-                for e in self.sps_ext.iter().take(255) {
-                    v.extend_from_slice(&(e.len() as u16).to_be_bytes());
-                    v.extend_from_slice(e);
-                }
+            )
+        {
+            v.push(0xfc | (c & 0x03));
+            v.push(0xf8 | (l & 0x07));
+            v.push(0xf8 | (ch & 0x07));
+            v.push(self.sps_ext.len().min(255) as u8);
+            for e in self.sps_ext.iter().take(255) {
+                v.extend_from_slice(&(e.len() as u16).to_be_bytes());
+                v.extend_from_slice(e);
             }
         }
         v

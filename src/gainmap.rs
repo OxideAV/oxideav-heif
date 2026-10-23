@@ -281,11 +281,7 @@ impl GainMapMetadata {
     /// [`GainMapMetadata::weight`] at `H_alternate`.
     pub fn fully_applied_weight(&self) -> f64 {
         let span = self.alternate_hdr_headroom.value() - self.base_hdr_headroom.value();
-        if span == 0.0 {
-            0.0
-        } else {
-            span.signum()
-        }
+        if span == 0.0 { 0.0 } else { span.signum() }
     }
 }
 
@@ -339,7 +335,7 @@ pub fn transfer_to_linear(v: f64, transfer: u16) -> Result<f64> {
         other => {
             return Err(HeifError::unsupported(format!(
                 "transfer_characteristics {other} linearisation"
-            )))
+            )));
         }
     })
 }
@@ -393,7 +389,7 @@ pub fn linear_to_transfer(l: f64, transfer: u16) -> Result<f64> {
         other => {
             return Err(HeifError::unsupported(format!(
                 "transfer_characteristics {other} encoding"
-            )))
+            )));
         }
     })
 }
@@ -420,7 +416,7 @@ pub fn primaries_chromaticities(primaries: u16) -> Result<[(f64, f64); 4]> {
         other => {
             return Err(HeifError::unsupported(format!(
                 "colour_primaries {other} conversion"
-            )))
+            )));
         }
     })
 }
@@ -534,7 +530,7 @@ impl LinearRgbImage {
         let m = primaries_conversion(self.primaries, primaries)?;
         let max = ((1u32 << bit_depth) - 1) as f64;
         let mut data = Vec::with_capacity(self.data.len());
-        for px in self.data.chunks_exact(3) {
+        for px in self.data.as_chunks::<3>().0 {
             let rgb = [px[0] as f64, px[1] as f64, px[2] as f64];
             for row in &m {
                 let l = row[0] * rgb[0] + row[1] * rgb[1] + row[2] * rgb[2];
@@ -946,7 +942,7 @@ mod tests {
             }
         }
         let none = apply_gain_map(&base, Some(&colr), &gain, None, None, &m, 0.0).unwrap();
-        for (i, px) in none.data.chunks_exact(3).enumerate() {
+        for (i, px) in none.data.as_chunks::<3>().0.iter().enumerate() {
             let b = base.sample(0, i as u32 % w, i as u32 / w) as f64 / 255.0;
             assert!((px[0] as f64 - b).abs() < 1e-6);
         }

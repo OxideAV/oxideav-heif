@@ -27,7 +27,7 @@
 
 use std::time::Instant;
 
-use oxideav_heif::encode::{encode_still, EncodeOptions, StillCodec};
+use oxideav_heif::encode::{EncodeOptions, StillCodec, encode_still};
 use oxideav_heif::image::{Chroma, HeifFrame, HeifPixelFormat};
 use oxideav_heif::props::Colr;
 
@@ -45,7 +45,7 @@ mod usage {
         maxrss: i64,
         rest: [i64; 13],
     }
-    extern "C" {
+    unsafe extern "C" {
         fn getrusage(who: i32, usage: *mut Rusage) -> i32;
     }
     /// `(cpu seconds, peak RSS in bytes)` of this process.

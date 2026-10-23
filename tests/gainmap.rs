@@ -10,10 +10,10 @@ mod common;
 use std::path::PathBuf;
 
 use common::png::read_png;
-use oxideav_heif::decode::{decode_item, decode_primary, ItemDecoder};
+use oxideav_heif::HeifFile;
+use oxideav_heif::decode::{ItemDecoder, decode_item, decode_primary};
 use oxideav_heif::gainmap::Rational;
 use oxideav_heif::rgb::to_rgb;
-use oxideav_heif::HeifFile;
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gainmap")
@@ -248,7 +248,7 @@ fn tmap_item_decodes_to_base_or_to_the_normative_reconstruction() {
 /// checker enforces (brand, input pair, colr placements, version).
 #[test]
 fn oracle_files_pass_the_tmap_clause_checks() {
-    use oxideav_heif::miaf::{check, MiafProfile};
+    use oxideav_heif::miaf::{MiafProfile, check};
     for v in VARIANTS {
         let f = load(&format!("{v}.avif"));
         assert!(f.file_type.has_brand(b"tmap"), "{v}");
@@ -303,8 +303,8 @@ fn oracle_files_pass_the_tmap_clause_checks() {
 /// in the third-party readers present.
 #[test]
 fn writer_authors_a_tmap_the_black_box_tool_tone_maps_identically() {
-    use oxideav_heif::encode::{encode_still, EncodeOptions, GainMapSpec, StillCodec};
-    use oxideav_heif::miaf::{check, MiafProfile};
+    use oxideav_heif::encode::{EncodeOptions, GainMapSpec, StillCodec, encode_still};
+    use oxideav_heif::miaf::{MiafProfile, check};
     use oxideav_heif::props::Colr;
     let src = load("gm_rgb.avif");
     let base = decode_primary(&src, ItemDecoder::direct()).unwrap();
@@ -480,9 +480,9 @@ fn files_without_a_gain_map_carry_none() {
 fn gain_map_follows_the_primary_transforms() {
     use oxideav_heif::compose::apply_irot;
     use oxideav_heif::encode::{
-        encode_still, EncodeOptions, GainMapSpec, StillCodec, TransformCarrier,
+        EncodeOptions, GainMapSpec, StillCodec, TransformCarrier, encode_still,
     };
-    use oxideav_heif::miaf::{check, MiafProfile};
+    use oxideav_heif::miaf::{MiafProfile, check};
     use oxideav_heif::props::{Colr, Irot, Property};
     let src = load("gm_rgb.avif");
     let base = decode_primary(&src, ItemDecoder::direct()).unwrap();

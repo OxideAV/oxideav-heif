@@ -42,10 +42,10 @@ use std::process::Command;
 use common::png::read_png;
 use common::pngw::write_png;
 use common::{apply_exif_orientation, have_binary, imageio_report, scratch_dir};
-use oxideav_heif::decode::{decode_primary, ItemDecoder};
+use oxideav_heif::decode::{ItemDecoder, decode_primary};
 use oxideav_heif::encode::{
-    encode_overlay, encode_still, EncodeOptions, OverlayLayer, OverlaySpec, StillCodec,
-    TileCarrier, TransformCarrier,
+    EncodeOptions, OverlayLayer, OverlaySpec, StillCodec, TileCarrier, TransformCarrier,
+    encode_overlay, encode_still,
 };
 use oxideav_heif::image::{Chroma, HeifFrame, HeifPixelFormat};
 use oxideav_heif::props::{Clap, CropRect, Imir, Irot, Property};
@@ -1002,7 +1002,7 @@ fn frame_from_source(w: u32, h: u32, channels: usize, depth: u8) -> HeifFrame {
     let mut f = HeifFrame::zeroed(
         w,
         h,
-        HeifPixelFormat::new(chroma, depth, channels % 2 == 0).unwrap(),
+        HeifPixelFormat::new(chroma, depth, channels.is_multiple_of(2)).unwrap(),
     )
     .unwrap();
     let max = ((1u32 << depth) - 1) as f64;
@@ -1032,7 +1032,7 @@ fn frame_from_source(w: u32, h: u32, channels: usize, depth: u8) -> HeifFrame {
                         .clamp(0.0, max) as u16,
                 );
             }
-            if channels % 2 == 0 {
+            if channels.is_multiple_of(2) {
                 f.set_sample(f.format.alpha_plane().unwrap(), x, y, s[i + channels - 1]);
             }
         }

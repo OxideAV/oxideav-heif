@@ -6,7 +6,7 @@
 mod common;
 
 use common::{all_bundles, fixture_bytes, fixture_root, interop_root};
-use oxideav_heif::{info, probe, HeifError, PixelFormat};
+use oxideav_heif::{HeifError, PixelFormat, info, probe};
 
 #[test]
 fn probe_accepts_every_fixture_and_rejects_junk() {
@@ -93,9 +93,9 @@ mod registry {
 
     use common::png::Png;
     use oxideav_heif::{
+        ColorInfo, ColorRange, DecodeOptions, EncodeOptions, Frame, HeifImage, Metadata, Plane,
         decode, decode_all, decode_from, decode_rgb8, decode_rgba8, decode_with, encode,
-        encode_all, encode_rgb8, encode_rgba8, encode_to, ColorInfo, ColorRange, DecodeOptions,
-        EncodeOptions, Frame, HeifImage, Metadata, Plane,
+        encode_all, encode_rgb8, encode_rgba8, encode_to,
     };
 
     const MEAN_TOL: f64 = 1.5;
@@ -168,7 +168,13 @@ mod registry {
             // The RGB path is the RGBA path minus alpha.
             let rgb = decode_rgb8(&bytes).unwrap();
             assert_eq!(rgb.data.len(), (img.width * img.height * 3) as usize);
-            for (p3, p4) in rgb.data.chunks_exact(3).zip(img.data.chunks_exact(4)) {
+            for (p3, p4) in rgb
+                .data
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(img.data.as_chunks::<4>().0)
+            {
                 assert_eq!(p3, &p4[..3], "{bundle}");
             }
             // The native image carries the header's layout and metadata.
@@ -336,7 +342,11 @@ mod registry {
     }
 
     fn rgb_of(rgba: &[u8]) -> Vec<u8> {
-        rgba.chunks_exact(4).flat_map(|p| p[..3].to_vec()).collect()
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|p| p[..3].to_vec())
+            .collect()
     }
 
     #[test]
@@ -568,7 +578,14 @@ mod registry {
             assert_eq!((got.image.width, got.image.height), (w, h));
             assert!(got.image.format.has_alpha(), "{:?}", got.image.format);
             assert_eq!(got.delay, Some(Duration::from_millis(100)));
-            let a: Vec<u8> = got.image.to_rgba8().chunks_exact(4).map(|p| p[3]).collect();
+            let a: Vec<u8> = got
+                .image
+                .to_rgba8()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| p[3])
+                .collect();
             assert!(
                 a.iter().step_by(2).all(|&v| v >= 250),
                 "alpha even pixels opaque"

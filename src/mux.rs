@@ -26,7 +26,7 @@ use crate::av1c::Av1Config;
 use crate::avcc::AvcConfig;
 use crate::encode::{avc_item_from_annex_b, avc_sample_from_annex_b, hevc_item_from_annex_b};
 use crate::error::{HeifError, Result};
-use crate::hvcc::{join_length_prefixed, split_length_prefixed, HevcConfig};
+use crate::hvcc::{HevcConfig, join_length_prefixed, split_length_prefixed};
 use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_AVC1, ITEM_TYPE_HVC1};
 use crate::props::{Colr, Ispe, Pixi, Property};
 use crate::sequence::MetadataTrackKind;
@@ -113,7 +113,7 @@ impl HeifSequenceMuxer {
             other => {
                 return Err(HeifError::unsupported(format!(
                     "heif muxer: codec '{other}' (heif / avif still, h265 / av1 / h266 / h264 sequences supported)"
-                )))
+                )));
             }
         };
         let mut hvcc = None;
@@ -303,7 +303,7 @@ impl HeifSequenceMuxer {
                 [] => {
                     return Err(HeifError::invalid(
                         "heif muxer: no still packet was written",
-                    ))
+                    ));
                 }
                 // One picture: the encoder's file, through unchanged.
                 [one] => one.clone(),

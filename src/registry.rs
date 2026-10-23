@@ -16,7 +16,7 @@
 
 use oxideav_core::{BlobKind, CodecCapabilities, CodecId, CodecInfo, RuntimeContext};
 
-use crate::demux::{make_decoder, open, probe, CODEC_ID, CONTAINER_NAME};
+use crate::demux::{CODEC_ID, CONTAINER_NAME, make_decoder, open, probe};
 use crate::encode::make_encoder;
 use crate::mux::open_muxer;
 

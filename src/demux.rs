@@ -45,12 +45,12 @@ use oxideav_core::{
 };
 
 use crate::decode;
-use crate::derived::{build_graph, build_primary_graph, ImageKind, ImageNode};
+use crate::derived::{ImageKind, ImageNode, build_graph, build_primary_graph};
 use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
 use crate::image::{Chroma, HeifPixelFormat};
 use crate::props::Property;
-use crate::sequence::{parse_movie, sample_bytes, Movie, Track};
+use crate::sequence::{Movie, Track, parse_movie, sample_bytes};
 
 /// Container name the demuxer is registered under.
 pub const CONTAINER_NAME: &str = "heif";
@@ -108,10 +108,10 @@ pub fn core_pixel_format_for(
     fmt: HeifPixelFormat,
     colr: &crate::props::Colr,
 ) -> Option<PixelFormat> {
-    if crate::image::core_bridge::identity_matrix(colr) {
-        if let Some(gbr) = fmt.to_core_gbr() {
-            return Some(gbr);
-        }
+    if crate::image::core_bridge::identity_matrix(colr)
+        && let Some(gbr) = fmt.to_core_gbr()
+    {
+        return Some(gbr);
     }
     let full = match colr {
         crate::props::Colr::Nclx { full_range, .. } => *full_range,
@@ -147,23 +147,24 @@ fn still_layers<D: AsRef<[u8]>>(
     node: &ImageNode,
 ) -> Vec<oxideav_core::LayerInfo> {
     use oxideav_core::LayerInfo;
-    if node.item.item_type == crate::meta::ITEM_TYPE_LHV1 && node.properties.lsel().is_none() {
-        if let Some(o) = node.properties.oinf() {
-            let mut out = o.output_layers(node.properties.tols().unwrap_or(0));
-            out.sort_unstable();
-            out.dedup();
-            if out.len() > 1 {
-                return out
-                    .into_iter()
-                    .map(|l| {
-                        let mut info = LayerInfo::new(l as u16);
-                        if l != 0 {
-                            info = info.with_depends_on(vec![0u16]);
-                        }
-                        info
-                    })
-                    .collect();
-            }
+    if node.item.item_type == crate::meta::ITEM_TYPE_LHV1
+        && node.properties.lsel().is_none()
+        && let Some(o) = node.properties.oinf()
+    {
+        let mut out = o.output_layers(node.properties.tols().unwrap_or(0));
+        out.sort_unstable();
+        out.dedup();
+        if out.len() > 1 {
+            return out
+                .into_iter()
+                .map(|l| {
+                    let mut info = LayerInfo::new(l as u16);
+                    if l != 0 {
+                        info = info.with_depends_on(vec![0u16]);
+                    }
+                    info
+                })
+                .collect();
         }
     }
     if let Some((left, right)) = stereo_pair_of(file, node.item.id) {
@@ -588,75 +589,73 @@ impl HeifDemuxer {
             .and_then(|m| m.handler.as_ref())
             .map(|h| &h.handler_type == b"pict")
             .unwrap_or(false);
-        if has_pict_meta {
-            if let Ok(node) = build_primary_graph(&file) {
-                metadata.push(("primary_item_id".into(), node.item.id.to_string()));
-                metadata.push((
-                    "primary_item_type".into(),
-                    crate::boxes::fourcc_str(&node.item.item_type),
-                ));
-                // Every displayable item is a packet; the ones after the
-                // primary need the `pitm` patched to name them, so
-                // without a patchable `pitm` (or an id too wide for
-                // it) the stream is the primary alone.
-                pitm_field = pitm_field_of(&file);
-                let mut groups = still_groups(&file, &node);
-                match pitm_field {
-                    Some((_, width)) => {
-                        for g in &mut groups {
-                            g.items.retain(|&id| {
-                                id == node.item.id || width == 4 || u16::try_from(id).is_ok()
-                            });
-                        }
-                        groups.retain(|g| !g.items.is_empty());
+        if has_pict_meta && let Ok(node) = build_primary_graph(&file) {
+            metadata.push(("primary_item_id".into(), node.item.id.to_string()));
+            metadata.push((
+                "primary_item_type".into(),
+                crate::boxes::fourcc_str(&node.item.item_type),
+            ));
+            // Every displayable item is a packet; the ones after the
+            // primary need the `pitm` patched to name them, so
+            // without a patchable `pitm` (or an id too wide for
+            // it) the stream is the primary alone.
+            pitm_field = pitm_field_of(&file);
+            let mut groups = still_groups(&file, &node);
+            match pitm_field {
+                Some((_, width)) => {
+                    for g in &mut groups {
+                        g.items.retain(|&id| {
+                            id == node.item.id || width == 4 || u16::try_from(id).is_ok()
+                        });
                     }
-                    None => {
-                        // Only the pitm itself can be named.
-                        groups.retain(|g| g.items.contains(&node.item.id));
-                        for g in &mut groups {
-                            g.items.retain(|&id| id == node.item.id);
-                        }
+                    groups.retain(|g| !g.items.is_empty());
+                }
+                None => {
+                    // Only the pitm itself can be named.
+                    groups.retain(|g| g.items.contains(&node.item.id));
+                    for g in &mut groups {
+                        g.items.retain(|&id| id == node.item.id);
                     }
                 }
-                if groups.is_empty() {
-                    let predicted = predict_output(&node).ok();
-                    groups.push(StillGroup {
-                        items: vec![node.item.id],
-                        layout: predicted.map(|p| p.0),
-                        size: predicted.map(|p| p.1),
-                        colour: output_colour(&node),
-                        first: node.clone(),
-                    });
-                }
-                for (gi, g) in groups.iter().enumerate() {
-                    let mut params = CodecParameters::video(CodecId::new(CODEC_ID))
-                        .with_color_signal(crate::image::core_bridge::color_signal_of(&g.colour));
-                    match (g.layout, g.size) {
-                        (Some(fmt), Some((w, h))) => {
+            }
+            if groups.is_empty() {
+                let predicted = predict_output(&node).ok();
+                groups.push(StillGroup {
+                    items: vec![node.item.id],
+                    layout: predicted.map(|p| p.0),
+                    size: predicted.map(|p| p.1),
+                    colour: output_colour(&node),
+                    first: node.clone(),
+                });
+            }
+            for (gi, g) in groups.iter().enumerate() {
+                let mut params = CodecParameters::video(CodecId::new(CODEC_ID))
+                    .with_color_signal(crate::image::core_bridge::color_signal_of(&g.colour));
+                match (g.layout, g.size) {
+                    (Some(fmt), Some((w, h))) => {
+                        params.width = Some(w);
+                        params.height = Some(h);
+                        params.pixel_format = core_pixel_format_for(fmt, &g.colour);
+                    }
+                    _ => {
+                        if let Ok((w, h)) = g.first.output_size() {
                             params.width = Some(w);
                             params.height = Some(h);
-                            params.pixel_format = core_pixel_format_for(fmt, &g.colour);
-                        }
-                        _ => {
-                            if let Ok((w, h)) = g.first.output_size() {
-                                params.width = Some(w);
-                                params.height = Some(h);
-                            }
                         }
                     }
-                    if gi == 0 {
-                        let layers = still_layers(&file, &g.first);
-                        if !layers.is_empty() {
-                            params = params.with_layers(layers);
-                        }
-                    }
-                    // The stream's metadata blobs (r476, core 0.1.40):
-                    // the first item's ICC profile / Exif / XMP — what
-                    // `info()` reports for the primary; every packet's
-                    // frame carries its own item's as per-frame blobs.
-                    params = params.with_blobs(item_blobs(&file, &g.first));
-                    pending_stills.push((params, g.items.clone()));
                 }
+                if gi == 0 {
+                    let layers = still_layers(&file, &g.first);
+                    if !layers.is_empty() {
+                        params = params.with_layers(layers);
+                    }
+                }
+                // The stream's metadata blobs (r476, core 0.1.40):
+                // the first item's ICC profile / Exif / XMP — what
+                // `info()` reports for the primary; every packet's
+                // frame carries its own item's as per-frame blobs.
+                params = params.with_blobs(item_blobs(&file, &g.first));
+                pending_stills.push((params, g.items.clone()));
             }
         }
         // Track streams take the indices after the stills.
@@ -1362,8 +1361,7 @@ impl oxideav_core::CodecOptionsStruct for HeifDecoderOptions {
             name: "base_layer_fallback",
             kind: oxideav_core::OptionKind::Bool,
             default: oxideav_core::OptionValue::Bool(false),
-            help:
-                "Decode the base layer of a layered item whose enhancement layers cannot be decoded",
+            help: "Decode the base layer of a layered item whose enhancement layers cannot be decoded",
         },
         oxideav_core::OptionField {
             name: "reference_white",
@@ -1387,7 +1385,7 @@ impl oxideav_core::CodecOptionsStruct for HeifDecoderOptions {
             other => {
                 return Err(CoreError::invalid(format!(
                     "heif: unknown decoder option '{other}'"
-                )))
+                )));
             }
         }
         Ok(())

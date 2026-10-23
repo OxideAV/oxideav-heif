@@ -5,7 +5,7 @@
 //! `styp` (segment type, §8.16.2) has the same body layout and is
 //! accepted by the same parser for fragmented image sequences.
 
-use crate::boxes::{fourcc_str, FourCc, Reader};
+use crate::boxes::{FourCc, Reader, fourcc_str};
 use crate::error::{HeifError, Result};
 
 // ───────── structural brands (HEIF §10) ─────────

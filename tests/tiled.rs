@@ -12,14 +12,14 @@ use std::io::Cursor;
 use oxideav_core::{
     CodecId, CodecOptions, CodecParameters, Encoder, ExecutionContext, Frame, RuntimeContext,
 };
-use oxideav_heif::compose::{crop, GridCanvas};
-use oxideav_heif::decode::{decode_primary, ItemDecoder};
+use oxideav_heif::compose::{GridCanvas, crop};
+use oxideav_heif::decode::{ItemDecoder, decode_primary};
 use oxideav_heif::derived::GridDescriptor;
 use oxideav_heif::encode::{
-    encode_hevc_picture, encode_still, pad_frame, EncodeOptions, StillCodec, TileCarrier,
+    EncodeOptions, StillCodec, TileCarrier, encode_hevc_picture, encode_still, pad_frame,
 };
 use oxideav_heif::image::Chroma;
-use oxideav_heif::miaf::{check, MiafProfile};
+use oxideav_heif::miaf::{MiafProfile, check};
 use oxideav_heif::props::{Colr, Pixi, Property};
 use oxideav_heif::{HeifFile, HeifFrame, HeifPixelFormat, HeifWriter};
 
@@ -201,9 +201,10 @@ fn tiled_item_edge_cases() {
     );
     // Tile count mismatch in the writer.
     let mut w = HeifWriter::new();
-    assert!(w
-        .add_tiled_item(96, 80, 32, 32, *b"hvc1", vec![None; 5], vec![], vec![])
-        .is_err());
+    assert!(
+        w.add_tiled_item(96, 80, 32, 32, *b"hvc1", vec![None; 5], vec![], vec![])
+            .is_err()
+    );
 }
 
 /// A coded item whose `iloc` extents are the tiles of a `cexg` grid
@@ -263,9 +264,10 @@ fn constrained_extents_item_composes_its_extents() {
     m.properties[cexg_index].body[4..6].copy_from_slice(&2u16.to_be_bytes());
     let err = decode_primary(&broken, ItemDecoder::direct()).unwrap_err();
     assert!(err.to_string().contains("extents"), "{err}");
-    assert!(w
-        .add_constrained_extents_item(*b"hvc1", 2, 2, 64, 64, vec![Vec::new(); 3], vec![])
-        .is_err());
+    assert!(
+        w.add_constrained_extents_item(*b"hvc1", 2, 2, 64, 64, vec![Vec::new(); 3], vec![])
+            .is_err()
+    );
 }
 
 /// `cfen` (HEIF Amd 1:2025 §6.6.2.5): three monochrome coded items — Y,
@@ -774,12 +776,14 @@ fn packed_colour_format_enhancement_refusals() {
     .unwrap_err();
     assert!(e.to_string().contains("packed_channel_id values"), "{e}");
     let mut w = HeifWriter::new();
-    assert!(w
-        .add_colour_format_enhancement_inputs(&[(1, packed(2, 1, 0, 0, &[3]))], vec![])
-        .is_err());
-    assert!(w
-        .add_colour_format_enhancement_inputs(&[(1, packed(9, 1, 0, 0, &[3; 9]))], vec![])
-        .is_err());
+    assert!(
+        w.add_colour_format_enhancement_inputs(&[(1, packed(2, 1, 0, 0, &[3]))], vec![])
+            .is_err()
+    );
+    assert!(
+        w.add_colour_format_enhancement_inputs(&[(1, packed(9, 1, 0, 0, &[3; 9]))], vec![])
+            .is_err()
+    );
 }
 
 /// A picture with an alpha plane for the high-level encoder.

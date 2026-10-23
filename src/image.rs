@@ -57,11 +57,7 @@ impl Chroma {
 
     /// Number of colour planes (1 or 3).
     pub fn colour_planes(&self) -> usize {
-        if *self == Chroma::Mono {
-            1
-        } else {
-            3
-        }
+        if *self == Chroma::Mono { 1 } else { 3 }
     }
 
     /// Chroma plane size for a `width × height` luma plane.
@@ -100,11 +96,7 @@ impl HeifPixelFormat {
 
     /// Bytes per sample (1 or 2).
     pub fn bytes_per_sample(&self) -> usize {
-        if self.bit_depth > 8 {
-            2
-        } else {
-            1
-        }
+        if self.bit_depth > 8 { 2 } else { 1 }
     }
 
     /// Maximum sample value.
@@ -199,7 +191,7 @@ impl HeifFrame {
                 if bps == 1 {
                     data.fill(value as u8);
                 } else {
-                    for px in data.chunks_exact_mut(2) {
+                    for px in data.as_chunks_mut::<2>().0 {
                         px.copy_from_slice(&value.to_le_bytes());
                     }
                 }

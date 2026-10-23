@@ -6,9 +6,9 @@
 
 mod common;
 
-use common::png::{read_png, Png};
+use common::png::{Png, read_png};
 use common::{all_bundles, fixture_bytes, fixture_root};
-use oxideav_heif::decode::{decode_item, decode_primary, ItemDecoder};
+use oxideav_heif::decode::{ItemDecoder, decode_item, decode_primary};
 use oxideav_heif::image::Chroma;
 use oxideav_heif::props::Colr;
 use oxideav_heif::{HeifFile, HeifFrame};

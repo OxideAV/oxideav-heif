@@ -33,8 +33,8 @@
 //! Coded payloads come from the caller; with the `registry` feature
 //! the `encode` module produces them through the oxideav encoders.
 
-use crate::boxes::write::{boxed, full_boxed, push_box};
 use crate::boxes::FourCc;
+use crate::boxes::write::{boxed, full_boxed, push_box};
 use crate::derived::{GridDescriptor, OverlayDescriptor};
 use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
@@ -43,11 +43,11 @@ use crate::ftyp::{
     BRAND_MIF1, BRAND_MSF1, BRAND_TMAP, BRAND_VVIC, BRAND_VVIS,
 };
 use crate::meta::{
-    reference, ITEM_TYPE_AV01, ITEM_TYPE_EXIF, ITEM_TYPE_GRID, ITEM_TYPE_HVC1, ITEM_TYPE_IDEN,
-    ITEM_TYPE_IOVL, ITEM_TYPE_MIME, ITEM_TYPE_VVC1,
+    ITEM_TYPE_AV01, ITEM_TYPE_EXIF, ITEM_TYPE_GRID, ITEM_TYPE_HVC1, ITEM_TYPE_IDEN, ITEM_TYPE_IOVL,
+    ITEM_TYPE_MIME, ITEM_TYPE_VVC1, reference,
 };
-use crate::miaf::{check, MiafProfile};
-use crate::props::{write::property_box, AuxC, Property, AUX_URN_ALPHA, AUX_URN_DEPTH};
+use crate::miaf::{MiafProfile, check};
+use crate::props::{AUX_URN_ALPHA, AUX_URN_DEPTH, AuxC, Property, write::property_box};
 use std::collections::HashMap;
 
 #[doc(hidden)]
@@ -3154,18 +3154,20 @@ mod tests {
             full_range: true,
         };
         // Wrong argument shapes are refused.
-        assert!(w
-            .add_tone_map(
+        assert!(
+            w.add_tone_map(
                 base,
                 gain,
                 &meta_in,
                 Property::Irot(crate::props::Irot { angle: 0 }),
                 vec![]
             )
-            .is_err());
-        assert!(w
-            .add_tone_map(base, 99, &meta_in, Property::Colr(alt.clone()), vec![])
-            .is_err());
+            .is_err()
+        );
+        assert!(
+            w.add_tone_map(base, 99, &meta_in, Property::Colr(alt.clone()), vec![])
+                .is_err()
+        );
         let tmap = w
             .add_tone_map(base, gain, &meta_in, Property::Colr(alt.clone()), vec![])
             .unwrap();
@@ -3187,10 +3189,12 @@ mod tests {
         let props = crate::props::ItemProperties::resolve(m, tmap).unwrap();
         assert_eq!(props.ispe().map(|i| (i.width, i.height)), Some((64, 48)));
         assert_eq!(props.nclx(), Some(&alt));
-        assert!(props
-            .entries
-            .iter()
-            .any(|e| matches!(e.property, Property::Colr(_)) && e.essential));
+        assert!(
+            props
+                .entries
+                .iter()
+                .any(|e| matches!(e.property, Property::Colr(_)) && e.essential)
+        );
         let g = &m.entity_groups[0];
         assert_eq!(
             (g.grouping_type, g.entity_ids.clone()),

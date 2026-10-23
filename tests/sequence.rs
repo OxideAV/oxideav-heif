@@ -6,8 +6,8 @@
 mod common;
 
 use common::{fixture_bytes, fixture_root};
-use oxideav_heif::sequence::{parse_movie, sample_bytes};
 use oxideav_heif::HeifFile;
+use oxideav_heif::sequence::{parse_movie, sample_bytes};
 
 #[test]
 fn sequence_bundle_sample_table() {
@@ -98,19 +98,19 @@ fn sequence_frames_decode_and_match_oracles() {
         .args(["-f", "rawvideo"])
         .arg(&out)
         .status();
-    if let Ok(st) = st {
-        if st.success() {
-            let raw = std::fs::read(&out).unwrap();
-            let _ = std::fs::remove_file(&out);
-            let mut ours = Vec::new();
-            for v in &frames {
-                for p in v.image_planes() {
-                    ours.extend_from_slice(&p.data);
-                }
+    if let Ok(st) = st
+        && st.success()
+    {
+        let raw = std::fs::read(&out).unwrap();
+        let _ = std::fs::remove_file(&out);
+        let mut ours = Vec::new();
+        for v in &frames {
+            for p in v.image_planes() {
+                ours.extend_from_slice(&p.data);
             }
-            assert_eq!(ours.len(), raw.len(), "three 96x96 4:2:0 frames");
-            assert_eq!(ours.iter().zip(&raw).filter(|(a, b)| a != b).count(), 0);
         }
+        assert_eq!(ours.len(), raw.len(), "three 96x96 4:2:0 frames");
+        assert_eq!(ours.iter().zip(&raw).filter(|(a, b)| a != b).count(), 0);
     }
     // Per-frame PNG oracles (nearest-chroma RGB, tolerance as in e2e).
     for (i, v) in frames.iter().enumerate() {
@@ -196,10 +196,11 @@ fn apple_alpha_sequence_composes_alpha_through_the_demuxer() {
     assert!(streams[1].params.pixel_format.unwrap().has_alpha());
     assert_eq!(streams[2].params.codec_id.as_str(), "h265");
     assert_eq!(streams[3].params.codec_id.as_str(), "h265");
-    assert!(d
-        .metadata()
-        .iter()
-        .any(|(k, v)| k == "track:1:alpha_track" && v == "2"));
+    assert!(
+        d.metadata()
+            .iter()
+            .any(|(k, v)| k == "track:1:alpha_track" && v == "2")
+    );
     let mut composed = None;
     let mut raw_master = None;
     let mut raw_alpha = None;

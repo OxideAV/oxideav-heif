@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- edition 2024, MSRV 1.95
+
 ### Added
 
 - **The `ipco` is a pool** (round 479; ISO/IEC 14496-12 §8.11.14): `HeifWriter` interns every distinct property box once, by its serialized bytes — decoder configurations (`hvcC` / `av1C` / `avcC` / `vvcC` / `lhvC`) included, which were written once per coded item until 0.0.13 — and every item carrying it indexes the same entry. A 12 MP 256-px grid goes from 196 `ipco` entries to 5 (192 tiles share one record), a 1 024-tile grid from 1 028 to 5; the two black-box readers that refused the 192-tile file at their 100-child-box `ipco` limit open it, the 1 024-tile file stays behind their 1 000-item `iloc` / stream limits (measured table in the README). A master and its alpha keep their own `hvcC` (different parameter-set ids), a grey AV1 master and its alpha share one `av1C` — every shape still opens in `sips` / `heif-info` / `heif-convert` / `magick` / `ffmpeg`. `tests/writer.rs::ipco_is_a_pool_shared_by_every_item` (1 024 tiles, re-mux keeps the pool), the `heif_writer` fuzz target asserts a duplicate-free pool on every written file; the conformance matrix gains the 285-tile HEVC / AV1 rows (exact in every renderer that refused them before) and the 1 024-tile row (a measurement: the readers' 1 000-item limit).

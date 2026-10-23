@@ -27,9 +27,9 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use oxideav_core::ExecutionContext;
-use oxideav_heif::decode::{decode_primary, ItemDecoder};
-use oxideav_heif::encode::{encode_still, EncodeOptions, StillCodec};
 use oxideav_heif::HeifFile;
+use oxideav_heif::decode::{ItemDecoder, decode_primary};
+use oxideav_heif::encode::{EncodeOptions, StillCodec, encode_still};
 
 fn median(mut v: Vec<Duration>) -> Duration {
     v.sort();
@@ -72,13 +72,13 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
             let p = e.path();
             if p.is_dir() {
                 out.extend(walk(&p));
-            } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                if matches!(
+            } else if let Some(ext) = p.extension().and_then(|e| e.to_str())
+                && matches!(
                     ext.to_ascii_lowercase().as_str(),
                     "heic" | "heif" | "avif" | "hif" | "heics" | "avifs" | "avis"
-                ) {
-                    out.push(p);
-                }
+                )
+            {
+                out.push(p);
             }
         }
     }
@@ -128,7 +128,9 @@ fn fmt_enc(v: Option<(f64, usize)>) -> String {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: heifsoak [--threads 1,4,8] [--runs N] [--no-encode] [--all-encodes] [--csv out.csv] <file|dir>...");
+        eprintln!(
+            "usage: heifsoak [--threads 1,4,8] [--runs N] [--no-encode] [--all-encodes] [--csv out.csv] <file|dir>..."
+        );
         std::process::exit(2);
     }
     if args[0] == "--child" {
@@ -274,30 +276,28 @@ fn main() {
                 );
             }
             row.rss_mib = peak_rss(&exe, path, threads);
-            if encode {
-                if let Some(img) = &img {
-                    let base = EncodeOptions::default().with_threads(Some(threads));
+            if encode && let Some(img) = &img {
+                let base = EncodeOptions::default().with_threads(Some(threads));
+                let s = Instant::now();
+                if let Ok(out) = encode_still(&img.frame, &base) {
+                    row.hevc = Some((s.elapsed().as_secs_f64(), out.len()));
+                }
+                let big = img.width() as u64 * img.height() as u64 > 4_000_000;
+                if !big || all_encodes {
+                    let o = base
+                        .clone()
+                        .with_codec(StillCodec::Av1)
+                        .with_av1_quality(Some(60));
                     let s = Instant::now();
-                    if let Ok(out) = encode_still(&img.frame, &base) {
-                        row.hevc = Some((s.elapsed().as_secs_f64(), out.len()));
+                    if let Ok(out) = encode_still(&img.frame, &o) {
+                        row.av1 = Some((s.elapsed().as_secs_f64(), out.len()));
                     }
-                    let big = img.width() as u64 * img.height() as u64 > 4_000_000;
-                    if !big || all_encodes {
-                        let o = base
-                            .clone()
-                            .with_codec(StillCodec::Av1)
-                            .with_av1_quality(Some(60));
-                        let s = Instant::now();
-                        if let Ok(out) = encode_still(&img.frame, &o) {
-                            row.av1 = Some((s.elapsed().as_secs_f64(), out.len()));
-                        }
-                    }
-                    if primary_type == Some(*b"avc1") {
-                        let o = base.clone().with_codec(StillCodec::Avc);
-                        let s = Instant::now();
-                        if let Ok(out) = encode_still(&img.frame, &o) {
-                            row.avc = Some((s.elapsed().as_secs_f64(), out.len()));
-                        }
+                }
+                if primary_type == Some(*b"avc1") {
+                    let o = base.clone().with_codec(StillCodec::Avc);
+                    let s = Instant::now();
+                    if let Ok(out) = encode_still(&img.frame, &o) {
+                        row.avc = Some((s.elapsed().as_secs_f64(), out.len()));
                     }
                 }
             }
@@ -324,7 +324,9 @@ fn main() {
             rows.len(),
             started.elapsed().as_secs_f64()
         );
-        println!("| File | Size | Layout | Decode | Peak RSS | Encode HEVC | Encode AV1 | Encode AVC | Note |");
+        println!(
+            "| File | Size | Layout | Decode | Peak RSS | Encode HEVC | Encode AV1 | Encode AVC | Note |"
+        );
         println!("|---|---|---|---|---|---|---|---|---|");
         for r in &rows {
             println!(

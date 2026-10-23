@@ -101,18 +101,18 @@ pub mod mux;
 pub mod registry;
 
 pub use api::{
-    info, info_of, probe, ColorInfo, ColorRange, DecodeOptions, Frame, HeifImage, ImageInfo,
-    Metadata, Palette, PixelFormat, RgbImage, RgbaImage,
+    ColorInfo, ColorRange, DecodeOptions, Frame, HeifImage, ImageInfo, Metadata, Palette,
+    PixelFormat, RgbImage, RgbaImage, info, info_of, probe,
 };
 pub use av1c::Av1Config;
 pub use avcc::AvcConfig;
 pub use derived::{
-    build_graph, build_primary_graph, GridDescriptor, ImageKind, ImageNode, OverlayDescriptor,
+    GridDescriptor, ImageKind, ImageNode, OverlayDescriptor, build_graph, build_primary_graph,
 };
 pub use error::{Error, HeifError, Result};
 pub use file::{HeifFile, HeifFileRef};
 pub use ftyp::{BrandClass, FileType};
-pub use gainmap::{apply_gain_map, GainMapMetadata, LinearRgbImage};
+pub use gainmap::{GainMapMetadata, LinearRgbImage, apply_gain_map};
 pub use hvcc::HevcConfig;
 #[allow(deprecated)]
 pub use image::HeifPlane;
@@ -131,16 +131,16 @@ pub use api_registry::{
     encode_rgb8, encode_rgba8, encode_to, metadata_of_blobs,
 };
 #[cfg(feature = "registry")]
-pub use decode::{decode_item, decode_primary, DecodedImage, ItemDecoder};
+pub use decode::{DecodedImage, ItemDecoder, decode_item, decode_primary};
 #[cfg(feature = "registry")]
-pub use demux::{make_decoder, HeifCodec, HeifDecoderOptions, HeifDemuxer};
+pub use demux::{HeifCodec, HeifDecoderOptions, HeifDemuxer, make_decoder};
 #[cfg(feature = "registry")]
 pub use encode::{
-    encode_still, encode_still_minimized, make_encoder, EncodeOptions, HeifEncoder,
-    HeifEncoderOptions, StillCodec,
+    EncodeOptions, HeifEncoder, HeifEncoderOptions, StillCodec, encode_still,
+    encode_still_minimized, make_encoder,
 };
 #[cfg(feature = "registry")]
-pub use mux::{open_muxer, HeifSequenceMuxer};
+pub use mux::{HeifSequenceMuxer, open_muxer};
 pub use props::{
     AuxC, AuxKind, Clap, Colr, CropRect, Imir, Irot, Ispe, ItemProperties, Pasp, Pixi, Property,
     PropertyEntry,
@@ -150,7 +150,7 @@ pub use props::{
 pub use registry::__oxideav_entry;
 #[cfg(feature = "registry")]
 pub use registry::{register, register_codecs, register_containers};
-pub use rgb::{to_rgb, RgbImage16};
+pub use rgb::{RgbImage16, to_rgb};
 pub use sequence::{Movie, Sample, SampleEntry, Track};
 pub use vvcc::{CompactVvcConfig, VvcConfig, VvcPtlRecord};
 pub use writer::{HeifWriter, SequenceAlphaTrack, SequenceWriter};

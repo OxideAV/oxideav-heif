@@ -13,7 +13,7 @@
 //! PNG so a reader's rendering can be compared against what was
 //! encoded. `--framework` goes through the registry `"heif"` encoder.
 
-use oxideav_heif::encode::{encode_still, EncodeOptions, StillCodec};
+use oxideav_heif::encode::{EncodeOptions, StillCodec, encode_still};
 use oxideav_heif::image::{Chroma, HeifFrame, HeifPixelFormat};
 use oxideav_heif::props::{Clap, CropRect, Imir, Irot, Property};
 
@@ -304,7 +304,7 @@ fn tiny_icc() -> Vec<u8> {
     let mut data = Vec::new();
     let base = 128 + 4 + elements.len() * 12;
     for (sig, body) in &elements {
-        while (base + data.len()) % 4 != 0 {
+        while !(base + data.len()).is_multiple_of(4) {
             data.push(0);
         }
         table.extend_from_slice(sig);

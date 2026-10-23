@@ -17,22 +17,22 @@ use oxideav_core::{
 };
 
 use crate::api::{
-    sequence_tracks, ColorInfo, ColorRange, DecodeOptions, Frame, HeifImage, Metadata, PixelFormat,
-    RgbImage, RgbaImage,
+    ColorInfo, ColorRange, DecodeOptions, Frame, HeifImage, Metadata, PixelFormat, RgbImage,
+    RgbaImage, sequence_tracks,
 };
 use crate::compose::{apply_clap, attach_alpha};
-use crate::decode::{decode_item, frame_from_planes, DecodedImage, ItemDecoder, ToneMapOutput};
+use crate::decode::{DecodedImage, ItemDecoder, ToneMapOutput, decode_item, frame_from_planes};
 use crate::derived::build_graph;
 use crate::encode::{
-    coded_depth, encode_sequence, encode_still_into, encode_still_owned, packed_bytes_to_planar,
-    EncodeOptions, SequenceInput, StillCodec,
+    EncodeOptions, SequenceInput, StillCodec, coded_depth, encode_sequence, encode_still_into,
+    encode_still_owned, packed_bytes_to_planar,
 };
 use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
 use crate::image::{Chroma, HeifFrame, HeifPixelFormat, Plane};
 use crate::layout::entry_layout;
 use crate::props::Colr;
-use crate::sequence::{parse_movie, sample_bytes, MetadataTrackKind, Movie, SampleEntry, Track};
+use crate::sequence::{MetadataTrackKind, Movie, SampleEntry, Track, parse_movie, sample_bytes};
 use crate::writer::HeifWriter;
 
 // ---------------------------------------------------------------------
@@ -205,10 +205,10 @@ pub fn decode_all_with(bytes: &[u8], opts: &DecodeOptions) -> Result<Vec<Frame>>
         // The primary comes first even when the display order leaves
         // it out (a thumbnail named by `pitm`, conformance C005): the
         // viewer's own picture, then the other masters.
-        if let Some(p) = primary {
-            if !entries.iter().any(|e| e.contains(&p)) {
-                entries.insert(0, vec![p]);
-            }
+        if let Some(p) = primary
+            && !entries.iter().any(|e| e.contains(&p))
+        {
+            entries.insert(0, vec![p]);
         }
         for alternatives in entries {
             let mut decoded = false;
@@ -226,10 +226,8 @@ pub fn decode_all_with(bytes: &[u8], opts: &DecodeOptions) -> Result<Vec<Frame>>
                     }
                 }
             }
-            if !decoded {
-                if let Some(e) = first_err {
-                    return Err(e);
-                }
+            if !decoded && let Some(e) = first_err {
+                return Err(e);
             }
         }
     }
@@ -270,7 +268,7 @@ fn track_params(entry: &SampleEntry, layout: HeifPixelFormat) -> Result<CodecPar
             return Err(HeifError::unsupported(format!(
                 "sample entry type {}",
                 crate::boxes::fourcc_str(other)
-            )))
+            )));
         }
     };
     let mut params = CodecParameters::video(CodecId::new(id));
@@ -315,7 +313,7 @@ fn decode_samples<D: AsRef<[u8]>>(
                 return Err(HeifError::invalid(format!(
                     "track {}: decode failed: {e}",
                     track.track_id
-                )))
+                )));
             }
         }
     };
@@ -498,10 +496,10 @@ pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
     if frames.is_empty() {
         return Err(HeifError::invalid("encode_all needs at least one frame"));
     }
-    if let [single] = frames {
-        if single.delay.is_none() {
-            return encode(&single.image, opts);
-        }
+    if let [single] = frames
+        && single.delay.is_none()
+    {
+        return encode(&single.image, opts);
     }
     let mut still: Option<HeifWriter> = None;
     for f in frames.iter().filter(|f| f.delay.is_none()) {
@@ -896,8 +894,8 @@ pub(crate) fn effective_options(
 impl From<PixelFormat> for oxideav_core::PixelFormat {
     /// One to one by name.
     fn from(f: PixelFormat) -> Self {
-        use oxideav_core::PixelFormat as C;
         use PixelFormat::*;
+        use oxideav_core::PixelFormat as C;
         match f {
             Gray8 => C::Gray8,
             Gray10Le => C::Gray10Le,
@@ -949,8 +947,8 @@ impl TryFrom<oxideav_core::PixelFormat> for PixelFormat {
     /// [`ColorInfo`]). `Unsupported` for layouts this crate has no
     /// variant for.
     fn try_from(f: oxideav_core::PixelFormat) -> Result<Self> {
-        use oxideav_core::PixelFormat as C;
         use PixelFormat::*;
+        use oxideav_core::PixelFormat as C;
         Ok(match f {
             C::Gray8 => Gray8,
             C::Gray10Le => Gray10Le,
@@ -993,7 +991,7 @@ impl TryFrom<oxideav_core::PixelFormat> for PixelFormat {
             other => {
                 return Err(HeifError::unsupported(format!(
                     "framework pixel format {other:?} has no HEIF image layout"
-                )))
+                )));
             }
         })
     }

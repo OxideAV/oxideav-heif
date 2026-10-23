@@ -16,7 +16,7 @@
 
 use crate::av1c::Av1Config;
 use crate::avcc::AvcConfig;
-use crate::boxes::{fourcc_str, parse_full_box, FourCc, Reader};
+use crate::boxes::{FourCc, Reader, fourcc_str, parse_full_box};
 use crate::error::{HeifError, Result};
 use crate::hvcc::HevcConfig;
 use crate::lhvc::{LhevcConfig, OperatingPoints};
@@ -236,7 +236,7 @@ impl Clap {
             if d == 0 || off_d == 0 {
                 return Err(HeifError::invalid(format!("clap: zero {name} denominator")));
             }
-            if n % d != 0 {
+            if !n.is_multiple_of(d) {
                 return Err(HeifError::unsupported(format!(
                     "clap: fractional clean aperture {name} {n}/{d}"
                 )));
@@ -2026,7 +2026,7 @@ fn parse_cclv(b: &[u8]) -> Result<Cclv> {
             return Err(HeifError::invalid(format!(
                 "cclv: body is {} bytes, inconsistent with its flags",
                 b.len()
-            )))
+            )));
         }
     };
     let mut r = Reader::new(body);
@@ -2827,7 +2827,9 @@ mod tests {
         assert_eq!(mdcv.len(), 8 + 24);
         assert_eq!(
             &mdcv[8..],
-            &[0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8, 0, 0, 0, 9, 0, 0, 0, 10]
+            &[
+                0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8, 0, 0, 0, 9, 0, 0, 0, 10
+            ]
         );
         let cclv = write::property_box(&Property::Cclv(Cclv {
             cancel: false,
@@ -2898,12 +2900,14 @@ mod tests {
         // Out of range.
         assert!(Clap::integer(65, 1, 0, 0).resolve(64, 64).is_err());
         assert!(Clap::integer(1, 1, 100, 0).resolve(64, 64).is_err());
-        assert!(Clap {
-            width_d: 0,
-            ..Clap::integer(1, 1, 0, 0)
-        }
-        .resolve(4, 4)
-        .is_err());
+        assert!(
+            Clap {
+                width_d: 0,
+                ..Clap::integer(1, 1, 0, 0)
+            }
+            .resolve(4, 4)
+            .is_err()
+        );
     }
 
     #[test]

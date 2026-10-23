@@ -183,10 +183,10 @@ pub fn assert_trace_subset_eq(
 /// `true` when `bin` runs (`--version` / `-version` / `--help`).
 pub fn have_binary(bin: &str) -> bool {
     for flag in ["--version", "-version", "--help"] {
-        if let Ok(out) = std::process::Command::new(bin).arg(flag).output() {
-            if out.status.success() {
-                return true;
-            }
+        if let Ok(out) = std::process::Command::new(bin).arg(flag).output()
+            && out.status.success()
+        {
+            return true;
         }
     }
     false

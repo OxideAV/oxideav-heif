@@ -414,15 +414,17 @@ mod tests {
             }
         }
         assert!(out.sample(0, 0, 0) > out.sample(0, 0, 1), "Cr high → red");
-        assert!(to_rgb(
-            &frame_of(Chroma::Yuv444, 8, [1, 2, 3]),
-            Some(&Colr::Nclx {
-                primaries: 1,
-                transfer: 1,
-                matrix: 14,
-                full_range: true
-            })
-        )
-        .is_err());
+        assert!(
+            to_rgb(
+                &frame_of(Chroma::Yuv444, 8, [1, 2, 3]),
+                Some(&Colr::Nclx {
+                    primaries: 1,
+                    transfer: 1,
+                    matrix: 14,
+                    full_range: true
+                })
+            )
+            .is_err()
+        );
     }
 }

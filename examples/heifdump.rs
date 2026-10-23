@@ -18,14 +18,16 @@
 
 use std::io::Cursor;
 
-use oxideav_heif::decode::{decode_item, decode_primary, ItemDecoder};
+use oxideav_heif::decode::{ItemDecoder, decode_item, decode_primary};
 use oxideav_heif::rgb::to_rgb;
 use oxideav_heif::{HeifFile, HeifFrame};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: heifdump <file> [--png out.png] [--raw out.yuv] [--item ID] [--framework] [--tree]");
+        eprintln!(
+            "usage: heifdump <file> [--png out.png] [--raw out.yuv] [--item ID] [--framework] [--tree]"
+        );
         std::process::exit(2);
     }
     let mut png = None;

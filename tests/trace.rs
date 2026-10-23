@@ -10,10 +10,10 @@
 mod common;
 
 use common::{
-    all_bundles, assert_trace_subset_eq, fixture_bytes, fixture_root, read_trace, TraceEvent,
+    TraceEvent, all_bundles, assert_trace_subset_eq, fixture_bytes, fixture_root, read_trace,
 };
-use oxideav_heif::boxes::{fourcc_str, iter_boxes, parse_full_box, payload, FourCc};
 use oxideav_heif::HeifFile;
+use oxideav_heif::boxes::{FourCc, fourcc_str, iter_boxes, parse_full_box, payload};
 
 /// Containers the corpus trace descends into.
 const DESCEND: &[&[u8; 4]] = &[
@@ -208,9 +208,11 @@ fn derived_payloads_and_metadata_items_resolve() {
     let xmp_id = meta.metadata_of(1)[0];
     assert!(meta.item(xmp_id).unwrap().is_xmp());
     let xmp = f.item_data(xmp_id).unwrap();
-    assert!(std::str::from_utf8(&xmp)
-        .unwrap()
-        .contains("OxideAV HEIF test"));
+    assert!(
+        std::str::from_utf8(&xmp)
+            .unwrap()
+            .contains("OxideAV HEIF test")
+    );
 
     let f = HeifFile::from_vec(fixture_bytes(&root, "single-image-with-thumbnail")).unwrap();
     let meta = f.meta().unwrap();

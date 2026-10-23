@@ -6,15 +6,15 @@
 //! (Annex A). Checks are structural — they never decode pixels — and
 //! are the same on the standalone and registry builds.
 
-use crate::boxes::{fourcc_str, FourCc};
-use crate::derived::{build_graph, ImageKind, ImageNode};
+use crate::boxes::{FourCc, fourcc_str};
+use crate::derived::{ImageKind, ImageNode, build_graph};
 use crate::error::Result;
 use crate::file::HeifFile;
 use crate::ftyp::{
     BRAND_MA1A, BRAND_MA1B, BRAND_MIAB, BRAND_MIAF, BRAND_MIF1, BRAND_MIHA, BRAND_MIHB, BRAND_MIHE,
     BRAND_MSF1, BRAND_TMAP,
 };
-use crate::meta::{reference, ITEM_TYPE_AV01, ITEM_TYPE_HVC1, ITEM_TYPE_IDEN, ITEM_TYPE_TMAP};
+use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_HVC1, ITEM_TYPE_IDEN, ITEM_TYPE_TMAP, reference};
 use crate::props::{AuxKind, Colr, Property};
 
 /// A MIAF profile (Annex A) or the plain `miaf` brand.
@@ -269,32 +269,32 @@ fn check_tone_maps<D: AsRef<[u8]>>(
         }
         let (base, gain) = (inputs[0], inputs[1]);
         let props_of = |i: u32| crate::props::ItemProperties::resolve(meta, i).ok();
-        if let Some(p) = props_of(base) {
-            if p.colrs().is_empty() {
-                rep.push(
-                    "HEIF-A1 6.6.2.4.1",
-                    Some(base),
-                    "tmap base input image has no colr property",
-                );
-            }
+        if let Some(p) = props_of(base)
+            && p.colrs().is_empty()
+        {
+            rep.push(
+                "HEIF-A1 6.6.2.4.1",
+                Some(base),
+                "tmap base input image has no colr property",
+            );
         }
-        if let Some(p) = props_of(gain) {
-            if !is_nclx_unspecified(p.nclx()) {
-                rep.push(
+        if let Some(p) = props_of(gain)
+            && !is_nclx_unspecified(p.nclx())
+        {
+            rep.push(
                     "HEIF-A1 6.6.2.4.1",
                     Some(gain),
                     "tmap gain map input image needs an nclx colr with colour_primaries = transfer_characteristics = 2",
                 );
-            }
         }
-        if let Some(p) = props_of(id) {
-            if p.colrs().is_empty() {
-                rep.push(
-                    "HEIF-A1 6.6.2.4.1",
-                    Some(id),
-                    "tmap derived image item has no colr property",
-                );
-            }
+        if let Some(p) = props_of(id)
+            && p.colrs().is_empty()
+        {
+            rep.push(
+                "HEIF-A1 6.6.2.4.1",
+                Some(id),
+                "tmap derived image item has no colr property",
+            );
         }
         match file.item_data(id) {
             Ok(body) => match body.first() {
@@ -324,14 +324,14 @@ fn check_tone_maps<D: AsRef<[u8]>>(
                 "gain map input image should be hidden (infe flags & 1)",
             );
         }
-        if let Some(p) = props_of(id) {
-            if p.pixi().is_none() {
-                rep.advise(
-                    "HEIF-A1 6.6.2.4.1",
-                    Some(id),
-                    "tmap derived image item should carry a pixi property (colour-resolution hint)",
-                );
-            }
+        if let Some(p) = props_of(id)
+            && p.pixi().is_none()
+        {
+            rep.advise(
+                "HEIF-A1 6.6.2.4.1",
+                Some(id),
+                "tmap derived image item should carry a pixi property (colour-resolution hint)",
+            );
         }
         // MIAF Amd 1 §7.3.11.5: "All input images of a tone-map image
         // item should have the same rotation and mirroring
@@ -344,9 +344,10 @@ fn check_tone_maps<D: AsRef<[u8]>>(
                 )
             })
         };
-        if let (Some(a), Some(b)) = (orientation(base), orientation(gain)) {
-            if a != b {
-                rep.advise(
+        if let (Some(a), Some(b)) = (orientation(base), orientation(gain))
+            && a != b
+        {
+            rep.advise(
                     "MIAF-A1 7.3.11.5",
                     Some(id),
                     format!(
@@ -354,7 +355,6 @@ fn check_tone_maps<D: AsRef<[u8]>>(
                         a.0, b.0, a.1, b.1
                     ),
                 );
-            }
         }
         // MIAF Amd 1 §7.3.11.5: "If a tone-map derived item is present
         // in a MIAF file, it shall be contained in an alternative
@@ -582,27 +582,27 @@ pub fn check<D: AsRef<[u8]>>(file: &HeifFile<D>, profile: MiafProfile) -> Result
             rep.push("7.3.6.3", Some(id), "no ispe property");
         }
         // HEIF Amd 2:2026 §6.5.6.3: bits_per_channel shall not be 0.
-        if let Some(px) = props.pixi() {
-            if px.bits_per_channel.contains(&0) {
-                rep.push(
-                    "HEIF-A2 6.5.6.3",
-                    Some(id),
-                    format!(
-                        "pixi bits_per_channel {:?} contains 0 (shall not be 0)",
-                        px.bits_per_channel
-                    ),
-                );
-            }
+        if let Some(px) = props.pixi()
+            && px.bits_per_channel.contains(&0)
+        {
+            rep.push(
+                "HEIF-A2 6.5.6.3",
+                Some(id),
+                format!(
+                    "pixi bits_per_channel {:?} contains 0 (shall not be 0)",
+                    px.bits_per_channel
+                ),
+            );
         }
         // §7.3.6.5 square pixels.
-        if let Some(p) = props.pasp() {
-            if !p.is_square() {
-                rep.push(
-                    "7.3.6.5",
-                    Some(id),
-                    format!("pasp {}:{} (shall be 1:1)", p.h_spacing, p.v_spacing),
-                );
-            }
+        if let Some(p) = props.pasp()
+            && !p.is_square()
+        {
+            rep.push(
+                "7.3.6.5",
+                Some(id),
+                format!("pasp {}:{} (shall be 1:1)", p.h_spacing, p.v_spacing),
+            );
         }
         // §7.3.9 transformative: essential, from {clap, irot, imir}, ordered.
         let mut last_rank = 0u8;
@@ -665,16 +665,15 @@ pub fn check<D: AsRef<[u8]>>(file: &HeifFile<D>, profile: MiafProfile) -> Result
         }
         // §7.3.5.2 alpha with CICP: full range.
         if let Some(a) = props.auxc() {
-            if a.kind() == AuxKind::Alpha {
-                if let Some(Colr::Nclx { full_range, .. }) = props.nclx() {
-                    if !full_range {
-                        rep.push(
-                            "7.3.5.2",
-                            Some(id),
-                            "alpha auxiliary carries CICP with full_range_flag 0",
-                        );
-                    }
-                }
+            if a.kind() == AuxKind::Alpha
+                && let Some(Colr::Nclx { full_range, .. }) = props.nclx()
+                && !full_range
+            {
+                rep.push(
+                    "7.3.5.2",
+                    Some(id),
+                    "alpha auxiliary carries CICP with full_range_flag 0",
+                );
             }
             if !meta.references_from(id, &reference::AUXL).is_empty()
                 && meta.references_from(id, &reference::THMB).len() > 1
@@ -703,32 +702,31 @@ pub fn check<D: AsRef<[u8]>>(file: &HeifFile<D>, profile: MiafProfile) -> Result
                 ),
             );
         }
-        if icc_count == 1 && nclx_count == 1 {
-            if let Some(Colr::Nclx {
+        if icc_count == 1
+            && nclx_count == 1
+            && let Some(Colr::Nclx {
                 primaries,
                 transfer,
                 ..
             }) = props.nclx()
-            {
-                if *primaries != 2 || *transfer != 2 {
-                    rep.push(
+            && (*primaries != 2 || *transfer != 2)
+        {
+            rep.push(
                         "HEIF 6.5.5",
                         Some(id),
                         "nclx paired with an ICC profile shall use colour_primaries = transfer_characteristics = 2",
                     );
-                }
-            }
         }
         // Metadata bodies in mdat (§7.2.1.13).
         for m in meta.metadata_of(id) {
-            if let Some(loc) = meta.location(m) {
-                if loc.construction_method != 0 {
-                    rep.push(
-                        "7.2.1.13",
-                        Some(m),
-                        "Exif / XMP metadata item is not stored in a MediaDataBox",
-                    );
-                }
+            if let Some(loc) = meta.location(m)
+                && loc.construction_method != 0
+            {
+                rep.push(
+                    "7.2.1.13",
+                    Some(m),
+                    "Exif / XMP metadata item is not stored in a MediaDataBox",
+                );
             }
         }
         // Codec profile constraints.

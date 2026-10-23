@@ -26,7 +26,7 @@ use crate::av1c::Av1Config;
 use crate::derived::GridDescriptor;
 use crate::error::{HeifError, Result};
 use crate::hvcc::{
-    join_length_prefixed, split_length_prefixed, HevcConfig, NalArray, NAL_PPS, NAL_SPS, NAL_VPS,
+    HevcConfig, NAL_PPS, NAL_SPS, NAL_VPS, NalArray, join_length_prefixed, split_length_prefixed,
 };
 use crate::image::{Chroma, HeifFrame, HeifPixelFormat};
 use crate::meta::{ITEM_TYPE_AV01, ITEM_TYPE_AVC1, ITEM_TYPE_HVC1, ITEM_TYPE_VVC1};
@@ -690,7 +690,7 @@ impl EncodeOptions {
             Some(d) if d > VVC_MAX_DEPTH => {
                 return Err(HeifError::unsupported(format!(
                     "VVC items code 8 – {VVC_MAX_DEPTH}-bit pictures (depth {d})"
-                )))
+                )));
             }
             d => coded_depth(source.bit_depth, d)?.min(VVC_MAX_DEPTH),
         };
@@ -728,7 +728,7 @@ pub fn coded_depth(source_depth: u8, depth: Option<u8>) -> Result<u8> {
         Some(other) => {
             return Err(HeifError::unsupported(format!(
                 "coded depth {other} (8, 10 or 12)"
-            )))
+            )));
         }
         None => match source_depth {
             ..=8 => 8,
@@ -1173,7 +1173,7 @@ fn hevc_input_format(f: HeifPixelFormat) -> Result<oxideav_core::PixelFormat> {
             return Err(HeifError::unsupported(format!(
                 "HEVC item encoding: no coded layout for {:?} {}-bit",
                 f.chroma, f.bit_depth
-            )))
+            )));
         }
     })
 }
@@ -1275,7 +1275,7 @@ fn avc_encoder_setup(
                 fmt.chroma, fmt.bit_depth
             ))
         })?;
-    if width % 16 != 0 || height % 16 != 0 {
+    if !width.is_multiple_of(16) || !height.is_multiple_of(16) {
         return Err(HeifError::invalid(format!(
             "AVC item encoding: {width}x{height} is not macroblock-aligned (pad to 16)"
         )));
@@ -1500,7 +1500,7 @@ pub fn encode_av1_picture(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Cod
 /// budget.
 pub fn encode_av1_picture_owned(frame: HeifFrame, opts: &EncodeOptions) -> Result<CodedPicture> {
     use oxideav_av1::encoder::{
-        encode_still_yuv, still::auto_tile_layout, ChromaFormat, StillOptions, StillSpeed, YuvFrame,
+        ChromaFormat, StillOptions, StillSpeed, YuvFrame, encode_still_yuv, still::auto_tile_layout,
     };
     if !matches!(frame.format.bit_depth, 8 | 10 | 12) {
         return Err(HeifError::unsupported(format!(
@@ -1532,7 +1532,9 @@ pub fn encode_av1_picture_owned(frame: HeifFrame, opts: &EncodeOptions) -> Resul
                 v.extend(row.iter().map(|b| *b as u16));
             } else {
                 v.extend(
-                    row.chunks_exact(2)
+                    row.as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|c| u16::from_le_bytes([c[0], c[1]])),
                 );
             }
@@ -1647,7 +1649,7 @@ fn vvc_encoder_config(
             other => {
                 return Err(HeifError::invalid(format!(
                     "unknown VVC encoder option '{other}'"
-                )))
+                )));
             }
         }
     }
@@ -1688,7 +1690,7 @@ pub fn encode_vvc_picture_owned(frame: HeifFrame, opts: &EncodeOptions) -> Resul
             fmt.bit_depth
         )));
     }
-    if frame.width % VVC_ALIGNMENT != 0 || frame.height % VVC_ALIGNMENT != 0 {
+    if !frame.width.is_multiple_of(VVC_ALIGNMENT) || !frame.height.is_multiple_of(VVC_ALIGNMENT) {
         return Err(HeifError::invalid(format!(
             "VVC item encoding: {}x{} is not a multiple of {VVC_ALIGNMENT} (pad with clap)",
             frame.width, frame.height
@@ -1719,7 +1721,7 @@ pub fn encode_vvc_picture_owned(frame: HeifFrame, opts: &EncodeOptions) -> Resul
                     *o = *s as u16;
                 }
             } else {
-                for (o, s) in out.iter_mut().zip(row.chunks_exact(2)) {
+                for (o, s) in out.iter_mut().zip(row.as_chunks::<2>().0) {
                     *o = u16::from_le_bytes([s[0], s[1]]);
                 }
             }
@@ -1877,7 +1879,7 @@ fn validate_transforms(opts: &EncodeOptions) -> Result<()> {
                 return Err(HeifError::unsupported(format!(
                     "transforms: '{}' is not a transformative property this encoder writes (clap / irot / imir)",
                     crate::boxes::fourcc_str(&other.box_type())
-                )))
+                )));
             }
         };
         if rank <= last {
@@ -2664,14 +2666,16 @@ fn encode_tiles_with(
             let next = &next;
             let tile_opts = &tile_opts;
             let tile_at = &tile_at;
-            s.spawn(move || loop {
-                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if i >= n {
-                    break;
-                }
-                let coded = tile_at(i).and_then(|t| encode_picture(t, tile_opts));
-                if tx.send((i, coded)).is_err() {
-                    break;
+            s.spawn(move || {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    let coded = tile_at(i).and_then(|t| encode_picture(t, tile_opts));
+                    if tx.send((i, coded)).is_err() {
+                        break;
+                    }
                 }
             });
         }
@@ -3182,7 +3186,7 @@ pub fn encode_still_minimized(frame: &HeifFrame, opts: &EncodeOptions) -> Result
     let (colour_w, colour_h, coded_depth) = (colour.width, colour.height, colour.format.bit_depth);
     let a = alignment(opts);
     let exact = |f: &HeifFrame, what: &str| -> Result<()> {
-        if f.width % a != 0 || f.height % a != 0 {
+        if !f.width.is_multiple_of(a) || !f.height.is_multiple_of(a) {
             return Err(HeifError::unsupported(format!(
                 "low-overhead file: the {what} is {}x{}, not a multiple of the {a}-pixel coding block (the MinimizedImageBox carries no clap)",
                 f.width, f.height
@@ -3405,7 +3409,7 @@ fn exif_orientation(transforms: &[Property]) -> Result<u8> {
                 return Err(HeifError::unsupported(format!(
                     "low-overhead file: transform '{}' (or its order) has no Exif orientation",
                     crate::boxes::fourcc_str(&other.box_type())
-                )))
+                )));
             }
         }
     }
@@ -3421,7 +3425,7 @@ fn exif_orientation(transforms: &[Property]) -> Result<u8> {
         (a, m) => {
             return Err(HeifError::unsupported(format!(
                 "low-overhead file: irot {a} + imir {m:?} is not one of the O.4.6 orientations"
-            )))
+            )));
         }
     };
     Ok(o)
@@ -3502,7 +3506,7 @@ fn packed_layout(pf: oxideav_core::PixelFormat) -> Result<(usize, [usize; 4], bo
         other => {
             return Err(HeifError::unsupported(format!(
                 "framework pixel format {other:?} is neither planar YCbCr / grey nor packed RGB(A)"
-            )))
+            )));
         }
     })
 }
@@ -3586,13 +3590,7 @@ pub(crate) fn packed_bytes_to_planar(
         }
     };
     // 16-bit scale for the H.273 conversion.
-    let to16 = |v: u16| -> u16 {
-        if wide {
-            v
-        } else {
-            (v as u32 * 257) as u16
-        }
-    };
+    let to16 = |v: u16| -> u16 { if wide { v } else { (v as u32 * 257) as u16 } };
     // Alpha to the target depth (round to nearest; replicate upwards).
     let alpha_to = |v: u16| -> u16 {
         let v = v as u32;
@@ -4107,7 +4105,7 @@ impl oxideav_core::CodecOptionsStruct for HeifEncoderOptions {
             other => {
                 return Err(CoreError::invalid(format!(
                     "heif: unknown option '{other}'"
-                )))
+                )));
             }
         }
         Ok(())
@@ -4137,7 +4135,7 @@ impl HeifEncoderOptions {
             other => {
                 return Err(CoreError::invalid(format!(
                     "heif: unknown codec option '{other}'"
-                )))
+                )));
             }
         };
         let quality_steers = codec != StillCodec::Av1 && !self.qp_given && self.quality_given;
@@ -4164,7 +4162,7 @@ impl HeifEncoderOptions {
             other => {
                 return Err(CoreError::invalid(format!(
                     "heif: tiling '{other}' (grid or tili)"
-                )))
+                )));
             }
         };
         let threads = match self.threads.trim() {
@@ -4191,7 +4189,7 @@ impl HeifEncoderOptions {
             other => {
                 return Err(CoreError::invalid(format!(
                     "heif: imir '{other}' (none / vertical / horizontal)"
-                )))
+                )));
             }
         }
         let mut opts = EncodeOptions {
@@ -4212,7 +4210,7 @@ impl HeifEncoderOptions {
                 other => {
                     return Err(CoreError::invalid(format!(
                         "heif: ctb {other} (16, 32 or 64; 0 = automatic)"
-                    )))
+                    )));
                 }
             },
             threads,
@@ -4222,7 +4220,7 @@ impl HeifEncoderOptions {
                 other => {
                     return Err(CoreError::invalid(format!(
                         "heif: depth {other} (8, 10 or 12; 0 = follow the source)"
-                    )))
+                    )));
                 }
             },
             hevc_filters: Some(self.filters != "off"),

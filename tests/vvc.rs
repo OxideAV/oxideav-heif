@@ -8,9 +8,9 @@
 mod common;
 
 use oxideav_core::{CodecId, CodecParameters, Frame, RuntimeContext};
-use oxideav_heif::decode::{decode_primary, ItemDecoder};
+use oxideav_heif::decode::{ItemDecoder, decode_primary};
 use oxideav_heif::meta::ITEM_TYPE_VVC1;
-use oxideav_heif::miaf::{check, MiafProfile};
+use oxideav_heif::miaf::{MiafProfile, check};
 use oxideav_heif::props::{Colr, Ispe, Pixi, Property};
 use oxideav_heif::vvcdec::vvc_item_from_annex_b;
 use oxideav_heif::{HeifFile, HeifWriter, PixelFormat};
@@ -199,7 +199,7 @@ fn vvc_items_match_a_black_box_decoder() {
 
 // ───────────────────────── encode ─────────────────────────
 
-use oxideav_heif::encode::{encode_still, encode_still_minimized, EncodeOptions, StillCodec};
+use oxideav_heif::encode::{EncodeOptions, StillCodec, encode_still, encode_still_minimized};
 use oxideav_heif::{HeifFrame, HeifPixelFormat};
 
 /// A gentle 8-bit 4:2:0 picture (gradients + a mild texture): the
@@ -520,8 +520,10 @@ fn vvc_alpha_grid_overlay_and_gain_map() {
     let back = oxideav_heif::decode_rgba8(&bytes).unwrap();
     assert_eq!((back.width, back.height), (w, h));
     let alpha_err: f64 = rgba
-        .chunks_exact(4)
-        .zip(back.data.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(back.data.as_chunks::<4>().0)
         .map(|(a, b)| (a[3] as f64 - b[3] as f64).abs())
         .sum::<f64>()
         / (w * h) as f64;
@@ -539,10 +541,11 @@ fn vvc_alpha_grid_overlay_and_gain_map() {
     let root = oxideav_heif::build_primary_graph(&f).unwrap();
     assert!(matches!(root.kind, oxideav_heif::ImageKind::Grid(_)));
     assert_eq!(root.inputs.len(), 4);
-    assert!(root
-        .inputs
-        .iter()
-        .all(|i| i.item.item_type == ITEM_TYPE_VVC1));
+    assert!(
+        root.inputs
+            .iter()
+            .all(|i| i.item.item_type == ITEM_TYPE_VVC1)
+    );
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     let p = psnr_y(&src, &img.frame.tight());
     assert!(p >= 30.0, "grid PSNR_Y {p:.2}");

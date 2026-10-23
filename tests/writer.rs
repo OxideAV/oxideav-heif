@@ -7,10 +7,10 @@
 mod common;
 
 use oxideav_core::{CodecId, CodecParameters, Frame, PixelFormat, RuntimeContext};
-use oxideav_heif::decode::{decode_item, decode_primary, ItemDecoder};
-use oxideav_heif::encode::{encode_still, EncodeOptions, StillCodec};
+use oxideav_heif::decode::{ItemDecoder, decode_item, decode_primary};
+use oxideav_heif::encode::{EncodeOptions, StillCodec, encode_still};
 use oxideav_heif::image::Chroma;
-use oxideav_heif::miaf::{check, MiafProfile};
+use oxideav_heif::miaf::{MiafProfile, check};
 use oxideav_heif::props::{Imir, Irot, Property};
 use oxideav_heif::{HeifFile, HeifFrame, HeifPixelFormat, HeifWriter};
 
@@ -942,9 +942,9 @@ fn depth_map_round_trips_as_an_auxiliary() {
 /// thumbnail of the composed canvas when asked.
 #[test]
 fn overlay_round_trips_against_the_compositor() {
-    use oxideav_heif::compose::{composite_overlay, OverlayInput};
+    use oxideav_heif::compose::{OverlayInput, composite_overlay};
     use oxideav_heif::derived::OverlayDescriptor;
-    use oxideav_heif::encode::{encode_overlay, OverlayLayer, OverlaySpec, TransformCarrier};
+    use oxideav_heif::encode::{OverlayLayer, OverlaySpec, TransformCarrier, encode_overlay};
     let a = picture(32, 24);
     let b = picture_with_alpha(16, 16);
     let spec = OverlaySpec::new(
@@ -1191,9 +1191,9 @@ fn clap_folds_with_the_padding_and_stays_off_the_companions() {
 /// compositor's own result on the source layers.
 #[test]
 fn overlay_composes_layers_of_mixed_chroma_after_their_transforms() {
-    use oxideav_heif::compose::{composite_overlay, OverlayInput};
+    use oxideav_heif::compose::{OverlayInput, composite_overlay};
     use oxideav_heif::derived::OverlayDescriptor;
-    use oxideav_heif::encode::{encode_overlay, OverlayLayer, OverlaySpec};
+    use oxideav_heif::encode::{OverlayLayer, OverlaySpec, encode_overlay};
     let odd = picture_with_alpha(3, 15);
     let odd2 = picture_with_alpha(7, 15);
     let even = picture_with_alpha(14, 12);
@@ -1460,9 +1460,10 @@ fn empty_item_bodies_are_refused_at_write_time() {
     let seq = sw.write_to_vec().unwrap();
     let f = HeifFile::parse(&seq).unwrap();
     let loc = &f.meta().unwrap().locations;
-    assert!(loc
-        .iter()
-        .all(|l| l.extents.iter().all(|e| e.length == data.len() as u64)));
+    assert!(
+        loc.iter()
+            .all(|l| l.extents.iter().all(|e| e.length == data.len() as u64))
+    );
     let _ = oxideav_heif::decode(&seq).unwrap();
 }
 

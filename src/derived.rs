@@ -8,12 +8,12 @@
 //! composition lives in the `compose` module; this module is pure
 //! container structure and is part of the standalone surface.
 
-use crate::boxes::{fourcc_str, FourCc, Reader};
+use crate::boxes::{FourCc, Reader, fourcc_str};
 use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
 use crate::meta::{
-    reference, ItemInfo, Meta, ITEM_TYPE_CFEN, ITEM_TYPE_GRID, ITEM_TYPE_IDEN, ITEM_TYPE_IOVL,
-    ITEM_TYPE_TILI, ITEM_TYPE_TMAP,
+    ITEM_TYPE_CFEN, ITEM_TYPE_GRID, ITEM_TYPE_IDEN, ITEM_TYPE_IOVL, ITEM_TYPE_TILI, ITEM_TYPE_TMAP,
+    ItemInfo, Meta, reference,
 };
 use crate::props::{AuxKind, ItemProperties};
 

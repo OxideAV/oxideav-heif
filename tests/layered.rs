@@ -11,13 +11,13 @@ mod common;
 use std::io::Cursor;
 
 use oxideav_core::{Frame, RuntimeContext};
-use oxideav_heif::decode::{decode_item, decode_primary, ItemDecoder};
+use oxideav_heif::decode::{ItemDecoder, decode_item, decode_primary};
 use oxideav_heif::lhvc::{
     LayerDependency, LhevcConfig, OperatingPoint, OperatingPointLayer, OperatingPointPtl,
     OperatingPoints,
 };
 use oxideav_heif::meta::ITEM_TYPE_LHV1;
-use oxideav_heif::miaf::{check, MiafProfile};
+use oxideav_heif::miaf::{MiafProfile, check};
 use oxideav_heif::props::{Colr, Ispe, Lsel, Pixi, Property};
 use oxideav_heif::{HeifFile, HeifFrame, HeifWriter, HevcConfig};
 

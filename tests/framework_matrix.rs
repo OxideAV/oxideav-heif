@@ -32,7 +32,7 @@ use oxideav_core::{
     CodecId, CodecOptions, CodecParameters, Frame, PixelFormat as Pf, RuntimeContext, TimeBase,
     VideoFrame, VideoPlane,
 };
-use oxideav_heif::encode::{coded_depth, EncodeOptions, HeifEncoderOptions};
+use oxideav_heif::encode::{EncodeOptions, HeifEncoderOptions, coded_depth};
 use oxideav_heif::image::{Chroma, HeifFrame, HeifPixelFormat, Plane};
 use oxideav_heif::{ColorInfo, HeifFile, HeifImage, PixelFormat as Hp};
 
@@ -217,13 +217,7 @@ fn ycbcra16(x: u32, y: u32, w: u32, h: u32) -> [u16; 4] {
 /// *truth* image whose `to_rgba8` is the expected decode (built
 /// planar 16-bit RGB for the packed-16 / grey+alpha layouts).
 fn source(l: Layout, w: u32, h: u32) -> (VideoFrame, Option<HeifImage>, HeifImage) {
-    let to_depth = |v: u16, d: u8| -> u16 {
-        if d == 16 {
-            v
-        } else {
-            v >> (16 - d)
-        }
-    };
+    let to_depth = |v: u16, d: u8| -> u16 { if d == 16 { v } else { v >> (16 - d) } };
     if let Some((bpp, order)) = l.packed {
         let wide = l.depth == 16;
         let stride = w as usize * bpp + 7; // padded rows
@@ -310,11 +304,7 @@ fn source(l: Layout, w: u32, h: u32) -> (VideoFrame, Option<HeifImage>, HeifImag
                     [g, b, r, a][p]
                 } else if l.chroma == Chroma::Mono {
                     let [y_, _, _, a] = ycbcra16(x, y, w, h);
-                    if p == 0 {
-                        y_
-                    } else {
-                        a
-                    }
+                    if p == 0 { y_ } else { a }
                 } else {
                     ycbcra16(x, y, w, h)[p]
                 };
@@ -1550,20 +1540,22 @@ fn framework_encoder_refuses_bad_parameters() {
     }
     // Geometry / layout.
     let mut p = CodecParameters::video(CodecId::new("heif"));
-    assert!(ctx
-        .codecs
-        .first_encoder(&p)
-        .unwrap()
-        .send_frame(&Frame::Video(src.clone()))
-        .is_err());
+    assert!(
+        ctx.codecs
+            .first_encoder(&p)
+            .unwrap()
+            .send_frame(&Frame::Video(src.clone()))
+            .is_err()
+    );
     p.width = Some(8);
     p.height = Some(8);
-    assert!(ctx
-        .codecs
-        .first_encoder(&p)
-        .unwrap()
-        .send_frame(&Frame::Video(src.clone()))
-        .is_err());
+    assert!(
+        ctx.codecs
+            .first_encoder(&p)
+            .unwrap()
+            .send_frame(&Frame::Video(src.clone()))
+            .is_err()
+    );
     for pf in [
         Pf::Nv12,
         Pf::Pal8,
@@ -1600,13 +1592,14 @@ fn framework_encoder_refuses_bad_parameters() {
     assert!(enc.send_frame(&Frame::Video(short)).is_err(), "short rows");
     // Audio frames.
     let mut enc = ctx.codecs.first_encoder(&p).unwrap();
-    assert!(enc
-        .send_frame(&Frame::Audio(oxideav_core::AudioFrame {
+    assert!(
+        enc.send_frame(&Frame::Audio(oxideav_core::AudioFrame {
             samples: 0,
             pts: None,
             data: vec![]
         }))
-        .is_err());
+        .is_err()
+    );
 }
 
 /// The automatic grid: a picture above 4 MP is tiled (512-px tiles)

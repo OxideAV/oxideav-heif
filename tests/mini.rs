@@ -7,10 +7,10 @@
 
 mod common;
 
-use oxideav_heif::decode::{decode_primary, ItemDecoder};
-use oxideav_heif::encode::{encode_still, encode_still_minimized, EncodeOptions, StillCodec};
+use oxideav_heif::decode::{ItemDecoder, decode_primary};
+use oxideav_heif::encode::{EncodeOptions, StillCodec, encode_still, encode_still_minimized};
 use oxideav_heif::image::Chroma;
-use oxideav_heif::miaf::{check, MiafProfile};
+use oxideav_heif::miaf::{MiafProfile, check};
 use oxideav_heif::mini::MinimizedImage;
 use oxideav_heif::props::{Imir, Irot, Property};
 use oxideav_heif::{HeifFile, HeifFrame, HeifPixelFormat};

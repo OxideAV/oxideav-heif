@@ -622,7 +622,9 @@ mod tests {
         let types: Vec<String> = w.iter().map(|e| fourcc_str(&e.header.box_type)).collect();
         assert_eq!(
             types,
-            ["ftyp", "meta", "hdlr", "moov", "trak", "mdia", "minf", "stbl", "stts"]
+            [
+                "ftyp", "meta", "hdlr", "moov", "trak", "mdia", "minf", "stbl", "stts"
+            ]
         );
         assert_eq!(w[2].depth, 1);
         assert_eq!(w[8].depth, 5);

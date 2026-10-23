@@ -23,8 +23,8 @@
 //! nor its syntax); such files are refused with a typed
 //! [`HeifError::Unsupported`].
 
-use crate::boxes::write::{boxed, full_boxed};
 use crate::boxes::FourCc;
+use crate::boxes::write::{boxed, full_boxed};
 use crate::error::{HeifError, Result};
 use crate::ftyp::FileType;
 
@@ -359,7 +359,7 @@ impl Bits<'_> {
     }
 
     fn bytes(&mut self, n: usize, what: &str) -> Result<Vec<u8>> {
-        if self.pos % 8 == 0 {
+        if self.pos.is_multiple_of(8) {
             let start = self.pos / 8;
             let end = start
                 .checked_add(n)
@@ -394,7 +394,7 @@ struct BitWriter {
 impl BitWriter {
     fn put(&mut self, n: u32, v: u32) {
         for i in (0..n).rev() {
-            if self.bits % 8 == 0 {
+            if self.bits.is_multiple_of(8) {
                 self.out.push(0);
             }
             let bit = ((v >> i) & 1) as u8;
@@ -409,7 +409,7 @@ impl BitWriter {
     }
 
     fn bytes(&mut self, b: &[u8]) {
-        if self.bits % 8 == 0 {
+        if self.bits.is_multiple_of(8) {
             self.out.extend_from_slice(b);
             self.bits += b.len() * 8;
         } else {
@@ -448,7 +448,7 @@ fn write_format(w: &mut BitWriter, f: SampleFormat) -> Result<()> {
                 _ => {
                     return Err(HeifError::invalid(format!(
                         "mini: float samples of {bits} bits"
-                    )))
+                    )));
                 }
             };
             w.put(2, l);
@@ -461,7 +461,7 @@ fn write_format(w: &mut BitWriter, f: SampleFormat) -> Result<()> {
         SampleFormat::Integer { bits } => {
             return Err(HeifError::invalid(format!(
                 "mini: integer samples of {bits} bits (8..=16)"
-            )))
+            )));
         }
     }
     Ok(())
@@ -745,10 +745,11 @@ impl MinimizedImage {
         } else {
             None
         };
-        if let Some(g) = gain_map.as_mut() {
-            if gm_data_size > 0 && gm_cc_size > 0 {
-                g.codec_config = Some(b.bytes(gm_cc_size, "gainmap_item_codec_config")?);
-            }
+        if let Some(g) = gain_map.as_mut()
+            && gm_data_size > 0
+            && gm_cc_size > 0
+        {
+            g.codec_config = Some(b.bytes(gm_cc_size, "gainmap_item_codec_config")?);
         }
         let icc = if icc_flag {
             Some(b.bytes(icc_size, "icc_data")?)
@@ -1494,10 +1495,10 @@ impl MinimizedImage {
         if let (Some(_), Some(c)) = (alpha_cc, &self.alpha_codec_config) {
             w.bytes(c);
         }
-        if let (Some(_), Some(g)) = (gm_cc, gm) {
-            if let Some(c) = &g.codec_config {
-                w.bytes(c);
-            }
+        if let (Some(_), Some(g)) = (gm_cc, gm)
+            && let Some(c) = &g.codec_config
+        {
+            w.bytes(c);
         }
         if let Some(v) = &self.icc {
             w.bytes(v);
@@ -1561,7 +1562,7 @@ fn pixi_box(main_components: u8, alpha: bool, chroma: MiniChroma, format: Sample
     let bits = format.bits();
     let cf = format.is_float() as u8;
     let mut b = vec![n];
-    b.extend(std::iter::repeat(bits).take(n as usize));
+    b.extend(std::iter::repeat_n(bits, n as usize));
     // channel_idc(3) reserved(1) component_format(2) subsampling_flag(1)
     // channel_label_flag(1), then subsampling_type(4) location(4).
     let rec = |idc: u8, st: u8, sl: u8, out: &mut Vec<u8>| {

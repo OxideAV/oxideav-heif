@@ -9,10 +9,10 @@ use std::path::Path;
 use std::process::Command;
 
 use common::{all_bundles, fixture_bytes, fixture_root};
+use oxideav_heif::HeifFile;
 use oxideav_heif::decode::ItemDecoder;
 use oxideav_heif::derived::build_primary_graph;
 use oxideav_heif::image::Chroma;
-use oxideav_heif::HeifFile;
 
 /// Decode the primary coded item of `bundle` (no composition).
 fn decode_primary_coded(root: &Path, bundle: &str) -> oxideav_heif::HeifFrame {
@@ -144,9 +144,11 @@ fn registry_path_decodes_through_a_codec_registry() {
     assert_eq!(via_registry, direct);
     // An empty registry cannot decode.
     let empty = oxideav_core::CodecRegistry::new();
-    assert!(ItemDecoder::with_registry(&empty)
-        .decode_coded(&f, &node)
-        .is_err());
+    assert!(
+        ItemDecoder::with_registry(&empty)
+            .decode_coded(&f, &node)
+            .is_err()
+    );
 }
 
 /// Parallel grid-tile decode is byte-identical to the serial decode for

@@ -13,14 +13,14 @@
 
 use std::time::Duration;
 
-use crate::derived::{build_primary_graph, ImageKind, ImageNode};
+use crate::derived::{ImageKind, ImageNode, build_primary_graph};
 use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
 use crate::image::{Chroma, HeifFrame, HeifPixelFormat, Plane};
 use crate::layout::{entry_layout, predict_output};
 use crate::meta::{ITEM_TYPE_DEXF, ITEM_TYPE_EXIF, ITEM_TYPE_TMAP};
 use crate::props::Colr;
-use crate::sequence::{parse_movie, Movie, Track};
+use crate::sequence::{Movie, Track, parse_movie};
 
 /// `true` when `bytes` start with an `ftyp` box declaring a HEIF-family
 /// brand (`heic`, `heix`, `mif1`, `msf1`, `miaf`, `avif`, `mif3`, …).
@@ -304,8 +304,9 @@ impl PixelFormat {
         use Chroma::*;
         use PixelFormat::*;
         let (c, d, a) = (layout.chroma, layout.bit_depth, layout.has_alpha);
-        if planar_rgb && c == Yuv444 {
-            if let Some(f) = match (d, a) {
+        if planar_rgb
+            && c == Yuv444
+            && let Some(f) = match (d, a) {
                 (8, false) => Some(Gbrp8),
                 (8, true) => Some(Gbrap8),
                 (10, false) => Some(Gbrp10Le),
@@ -317,9 +318,9 @@ impl PixelFormat {
                 (16, false) => Some(Gbrp16Le),
                 (16, true) => Some(Gbrap16Le),
                 _ => None,
-            } {
-                return Some(f);
             }
+        {
+            return Some(f);
         }
         Some(match (c, d, a) {
             (Mono, 8, false) => Gray8,
@@ -1292,12 +1293,12 @@ impl DecodeOptions {
 
     /// Check an input size against [`DecodeOptions::max_bytes`].
     pub fn check_input(&self, len: usize) -> Result<()> {
-        if let Some(max) = self.max_bytes {
-            if len as u64 > max {
-                return Err(HeifError::limit(format!(
-                    "{len}-byte input exceeds max_bytes {max}"
-                )));
-            }
+        if let Some(max) = self.max_bytes
+            && len as u64 > max
+        {
+            return Err(HeifError::limit(format!(
+                "{len}-byte input exceeds max_bytes {max}"
+            )));
         }
         Ok(())
     }
@@ -1311,12 +1312,12 @@ impl DecodeOptions {
                 self.max_width, self.max_height
             )));
         }
-        if let Some(max) = self.max_pixels {
-            if width as u64 * height as u64 > max {
-                return Err(HeifError::limit(format!(
-                    "{width}x{height} exceeds max_pixels {max}"
-                )));
-            }
+        if let Some(max) = self.max_pixels
+            && width as u64 * height as u64 > max
+        {
+            return Err(HeifError::limit(format!(
+                "{width}x{height} exceeds max_pixels {max}"
+            )));
         }
         Ok(())
     }

@@ -17,15 +17,15 @@ use std::path::Path;
 use std::process::Command;
 
 use common::{have_binary, scratch_dir};
-use oxideav_heif::decode::{decode_primary, ItemDecoder};
-use oxideav_heif::encode::{avc_item_from_annex_b, encode_still, EncodeOptions};
+use oxideav_heif::decode::{ItemDecoder, decode_primary};
+use oxideav_heif::encode::{EncodeOptions, avc_item_from_annex_b, encode_still};
 use oxideav_heif::image::{Chroma, HeifFrame, HeifPixelFormat};
 use oxideav_heif::lhvc::{
     LayerDependency, LhevcConfig, OperatingPoint, OperatingPointLayer, OperatingPointPtl,
     OperatingPoints,
 };
 use oxideav_heif::meta::{ITEM_TYPE_AVC1, ITEM_TYPE_LHV1};
-use oxideav_heif::miaf::{check, MiafProfile};
+use oxideav_heif::miaf::{MiafProfile, check};
 use oxideav_heif::props::{Colr, Ispe, Pixi, Property};
 use oxideav_heif::{HeifError, HeifFile, HeifWriter};
 
@@ -393,7 +393,7 @@ fn psnr8(a: &[u8], b: &[u8]) -> f64 {
 /// plays back; the `"heif"` muxer takes an `"h264"` Annex B stream.
 #[test]
 fn avc1_items_written_by_this_crate_decode_in_both_decoders() {
-    use oxideav_heif::encode::{encode_still_minimized, StillCodec};
+    use oxideav_heif::encode::{StillCodec, encode_still_minimized};
     let dir = scratch_dir("avc_write");
     let ffmpeg = have_binary("ffmpeg");
     struct Case {

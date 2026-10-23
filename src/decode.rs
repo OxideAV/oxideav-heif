@@ -26,9 +26,9 @@ use std::collections::HashMap;
 
 use crate::av1c::Av1Config;
 use crate::compose::{
-    apply_transforms_owned, attach_alpha, composite_overlay, GridCanvas, OverlayInput,
+    GridCanvas, OverlayInput, apply_transforms_owned, attach_alpha, composite_overlay,
 };
-use crate::derived::{build_graph, ImageKind, ImageNode};
+use crate::derived::{ImageKind, ImageNode, build_graph};
 use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
 use crate::hvcc::HevcConfig;
@@ -427,13 +427,13 @@ impl LayeredPlan {
         output_layers.sort_unstable();
         output_layers.dedup();
         let layer = props.lsel().map(|l| l.layer_id);
-        if let Some(l) = layer {
-            if !output_layers.iter().any(|o| *o as u16 == l) {
-                return Err(HeifError::invalid(format!(
-                    "item {}: lsel layer {l} is not an output layer of output layer set {tols} ({output_layers:?})",
-                    node.item.id
-                )));
-            }
+        if let Some(l) = layer
+            && !output_layers.iter().any(|o| *o as u16 == l)
+        {
+            return Err(HeifError::invalid(format!(
+                "item {}: lsel layer {l} is not an output layer of output layer set {tols} ({output_layers:?})",
+                node.item.id
+            )));
         }
         let extradata = props.hvcc().map(|h| {
             let mut x = h.raw.clone();
@@ -658,7 +658,7 @@ pub(crate) fn frame_from_planes(
     }
     let (dec_w, dec_h) = {
         let y = &vf.planes[0];
-        if y.stride == 0 || y.stride % bps != 0 || y.data.is_empty() {
+        if y.stride == 0 || !y.stride.is_multiple_of(bps) || y.data.is_empty() {
             return Err(HeifError::invalid(format!(
                 "item {item_id}: luma plane stride {} incompatible with {}-byte samples",
                 y.stride, bps
@@ -940,14 +940,14 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
             }
             return Ok(f);
         }
-        if let Some(cexg) = node.properties.cexg() {
-            if cexg.tile_count() > 1 {
-                let f = self.reconstruct_constrained_extents(node, cexg)?;
-                if left > 0 {
-                    self.cache.insert(id, f.clone());
-                }
-                return Ok(f);
+        if let Some(cexg) = node.properties.cexg()
+            && cexg.tile_count() > 1
+        {
+            let f = self.reconstruct_constrained_extents(node, cexg)?;
+            if left > 0 {
+                self.cache.insert(id, f.clone());
             }
+            return Ok(f);
         }
         self.count_decode(1)?;
         let f = if node.depth_in_chain == 0 && is_multi_output_layered(node) {
@@ -1281,7 +1281,7 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         canvas: &mut GridCanvas,
     ) -> Result<()> {
         use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::{mpsc, Mutex};
+        use std::sync::{Mutex, mpsc};
         let workers =
             ExecutionContext::with_threads(self.decoder.threads).effective_workers(jobs.len());
         if workers == 1 {
@@ -1301,17 +1301,19 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
             for _ in 0..workers {
                 let tx = tx.clone();
                 let (queue, abort) = (&queue, &abort);
-                scope.spawn(move || loop {
-                    if abort.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let next = queue.lock().map(|mut q| q.next()).unwrap_or(None);
-                    let Some((i, job)) = next else {
-                        break;
-                    };
-                    let r = decoder.make(&job.params).and_then(|d| job.run(d));
-                    if tx.send((i, r)).is_err() {
-                        break;
+                scope.spawn(move || {
+                    loop {
+                        if abort.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let next = queue.lock().map(|mut q| q.next()).unwrap_or(None);
+                        let Some((i, job)) = next else {
+                            break;
+                        };
+                        let r = decoder.make(&job.params).and_then(|d| job.run(d));
+                        if tx.send((i, r)).is_err() {
+                            break;
+                        }
                     }
                 });
             }
@@ -1372,12 +1374,11 @@ pub fn decode_item<D: AsRef<[u8]>>(
     if let Some(d) = &node.depth {
         count_coded_uses(d, &mut uses);
     }
-    if let Some((_, _, inputs)) = gain_map_target(file, &node)? {
-        if let Some(g) = inputs.get(1) {
-            if let Ok(gain_node) = build_graph(file, *g) {
-                count_coded_uses(&gain_node, &mut uses);
-            }
-        }
+    if let Some((_, _, inputs)) = gain_map_target(file, &node)?
+        && let Some(g) = inputs.get(1)
+        && let Ok(gain_node) = build_graph(file, *g)
+    {
+        count_coded_uses(&gain_node, &mut uses);
     }
     let mut session = Session {
         file,

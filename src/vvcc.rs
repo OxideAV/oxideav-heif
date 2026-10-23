@@ -902,7 +902,7 @@ fn parse_ptl(
         br.align();
         // The run starts two bits before a byte boundary only when the
         // PTL itself is byte-aligned (it is, in the SPS and the VPS).
-        if flags_bit % 8 != 0 {
+        if !flags_bit.is_multiple_of(8) {
             return Err(HeifError::invalid(
                 "VVC profile_tier_level not byte aligned",
             ));

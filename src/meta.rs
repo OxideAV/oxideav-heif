@@ -25,7 +25,7 @@
 //! the `props` module.
 
 use crate::boxes::{
-    fourcc_str, iter_boxes, parse_box_header, parse_full_box, payload, FourCc, Reader,
+    FourCc, Reader, fourcc_str, iter_boxes, parse_box_header, parse_full_box, payload,
 };
 use crate::error::{HeifError, Result};
 
@@ -1173,7 +1173,7 @@ fn parse_infe(p: &[u8]) -> Result<ItemInfo> {
         v => {
             return Err(HeifError::unsupported(format!(
                 "infe version {v} (HEIF requires 2 or 3)"
-            )))
+            )));
         }
     };
     let name = r.cstr("infe item_name")?;
@@ -1401,12 +1401,12 @@ fn parse_ipma(p: &[u8], seen: &mut Vec<(u8, u32)>) -> Result<Vec<ItemPropertyAss
             r.u32("ipma item_ID")?
         };
         // §9.3.1: ordered by increasing item_ID, at most one row per item.
-        if let Some(prev) = last_id {
-            if item_id <= prev {
-                return Err(HeifError::invalid(format!(
-                    "ipma rows not strictly increasing (item {item_id} after {prev})"
-                )));
-            }
+        if let Some(prev) = last_id
+            && item_id <= prev
+        {
+            return Err(HeifError::invalid(format!(
+                "ipma rows not strictly increasing (item {item_id} after {prev})"
+            )));
         }
         last_id = Some(item_id);
         let n = r.u8("ipma association_count")? as usize;

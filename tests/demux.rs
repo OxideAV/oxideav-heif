@@ -348,7 +348,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use oxideav_core::{Decoder, Demuxer, StreamInfo, TimeBase};
-use oxideav_heif::{decode_all, HeifDemuxer, HeifImage};
+use oxideav_heif::{HeifDemuxer, HeifImage, decode_all};
 
 /// Every packet of `stream` through the decoder the registry resolves
 /// for it: the frames as `HeifImage`s labelled by the stream
