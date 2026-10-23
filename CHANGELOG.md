@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.14](https://github.com/OxideAV/oxideav-heif/compare/v0.0.13...v0.0.14) - 2026-10-23
+
+### Other
+
+- edition 2024, MSRV 1.95
+- r479 fuzz record — heif_writer 9 min / 58 364 runs with the pool, index-form and extent invariants, heif_sequence 5 min / 1.22 M runs with the udta / cprt walk; no finding
+- degenerate derived items refused — add_grid bounds the layout to 1..=256 rows / columns (a zero-row grid underflowed the rows_minus_one byte, a 257-row one wrapped it) and a non-zero canvas, add_overlay needs one or more inputs and a canvas (HEIF §6.6.2.2 / §6.6.2.3); README + CHANGELOG
+- track-level cprt both ways — Track::copyrights parsed from trak/udta (§8.10.2: a cprt in a track applies to that track), SequenceWriter::with_track_copyright writes it on the picture track, the demuxer reports track:<id>:copyright[:<lang>]; the cprt sequence file is asserted to open in heif-info / ffprobe / sips; heifdump prints the property pool (entries, rows, associations, ipma index form)
+- conformance matrix measures the property pool — 285-tile HEVC / AV1 grids (exact in heif-convert / magick / ffmpeg, which refused the 289-entry ipco before; opens in heif-info and sips) and a 1 024-tile grid (a measurement: the readers' 1 000-item iloc / stream ceiling, gated on sips + this crate); README matrix rows + CHANGELOG
+- the ipco is a pool — every distinct property box interned once (decoder configurations included: a 12 MP 256-px grid goes from 196 entries to 5, a 1 024-tile grid from 1 028 to 5; the two readers refusing the 192-tile file at their 100-box ipco limit open it, measured table in the README), 15-bit ipma indices verified on both sides of 127 + a typed refusal above 255 associations; no degenerate items (an empty body is refused by kind at write time — a 0-length iloc extent means "to the end of the source", 14496-12 §8.11.3.2.4.3; the cover-alias placeholder is the one carve-out); core 0.1.41 (encoder embedded_blob_kinds = ICC / Exif / XMP; sequence muxer set_metadata / carries_metadata_key carry `copyright` / `copyright:<lang>` as moov/udta/cprt, the demuxer reports them from Movie::copyrights); heif_writer fuzz asserts a duplicate-free pool, the right index form and no zero-length extent on every written file (9 min, no finding)
+
 ### Changed
 
 - edition 2024, MSRV 1.95
