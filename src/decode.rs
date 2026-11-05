@@ -1007,6 +1007,22 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
                 canvas.finish()
             }
             ImageKind::Tiled(t) => self.reconstruct_tiled(node, t),
+            ImageKind::PixelTransform(t) => {
+                let mut frames = Vec::with_capacity(node.inputs.len());
+                for i in &node.inputs {
+                    frames.push(self.output(i)?.without_alpha());
+                }
+                // §6.6.2.6.1: clamped to the item's pixi depth (lenient:
+                // the deepest input without one).
+                let depth = node
+                    .properties
+                    .pixi()
+                    .and_then(|p| p.bits_per_channel.first().copied())
+                    .unwrap_or_else(|| {
+                        frames.iter().map(|f| f.format.bit_depth).max().unwrap_or(8)
+                    });
+                crate::pixel_transform::compose(t, &frames, depth, node.properties.nclx())
+            }
             ImageKind::ColourFormatEnhancement(c) => {
                 let mut frames = Vec::with_capacity(node.inputs.len());
                 for i in &node.inputs {

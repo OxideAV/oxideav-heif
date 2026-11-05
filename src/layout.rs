@@ -151,6 +151,28 @@ pub fn predict_output(node: &ImageNode) -> Result<(HeifPixelFormat, (u32, u32))>
                 .ok_or_else(|| HeifError::invalid("derived item without inputs"))?;
             predict_output(first)?
         }
+        ImageKind::PixelTransform(_) => {
+            // §6.6.2.6.1: the inputs' chroma layout, the item's pixi
+            // depth (the decoder's fallback: the deepest input), no
+            // alpha channel (an alpha auxiliary attaches as usual).
+            let mut depth = 0;
+            let mut chroma = None;
+            for i in &node.inputs {
+                let (f, _) = predict_output(i)?;
+                depth = depth.max(f.bit_depth);
+                chroma.get_or_insert(f.chroma);
+            }
+            let chroma = chroma.ok_or_else(|| HeifError::invalid("sato without inputs"))?;
+            let depth = node
+                .properties
+                .pixi()
+                .and_then(|p| p.bits_per_channel.first().copied())
+                .unwrap_or(depth);
+            (
+                HeifPixelFormat::new(chroma, depth, false)?,
+                node.reconstructed_size()?,
+            )
+        }
         ImageKind::ColourFormatEnhancement(c) => {
             let mut geometry = Vec::with_capacity(node.inputs.len());
             for i in &node.inputs {

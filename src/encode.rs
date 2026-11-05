@@ -2765,6 +2765,127 @@ fn encode_tiled_item(
     )
 }
 
+/// Encode a deep picture (9..=16 bits) losslessly as a `sato` pixel
+/// transform (HEIF 4th edition WD §6.6.2.6, the Annex J.9.1 suffix
+/// extension): two hidden lossless 8-bit coded items — the bits above
+/// the low byte and the low byte — and a primary `sato` item computing
+/// `256 × in₁ + in₂` at a 32-bit intermediate precision, its `pixi` the
+/// source depth. `opts.codec` picks HEVC (`pcm`, the picture in 4:2:0
+/// as [`coded_layout`] gives it) or AV1 (lossless, the source's chroma);
+/// the colour (`colr`, ICC) goes on all three items, as §6.6.2.6.1
+/// requires, and a non-aligned size is padded with a `clap` on each
+/// input. A picture with alpha, or another codec, is a typed refusal.
+/// Readers of the 2025 text and older do not implement the item type
+/// (see the README).
+pub fn encode_pixel_transform_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> {
+    use crate::pixel_transform::{PixelToken, PixelTransform};
+    frame.validate()?;
+    let depth = frame.format.bit_depth;
+    if !(9..=16).contains(&depth) {
+        return Err(HeifError::invalid(format!(
+            "sato carrier: a {depth}-bit picture (9..=16; shallower pictures code directly)"
+        )));
+    }
+    if frame.format.has_alpha {
+        return Err(HeifError::unsupported(
+            "sato carrier: pictures with alpha are not carried",
+        ));
+    }
+    let chroma = match opts.codec {
+        StillCodec::Hevc => coded_layout(frame.format, opts)?.chroma,
+        StillCodec::Av1 => frame.format.chroma,
+        other => {
+            return Err(HeifError::unsupported(format!(
+                "sato carrier: codec {other:?} (HEVC or AV1)"
+            )));
+        }
+    };
+    let src = to_layout(frame, chroma, depth)?;
+    let split = |shift: u32, mask: u32| -> Result<HeifFrame> {
+        let fmt = HeifPixelFormat::new(chroma, 8, false)?;
+        let mut f = HeifFrame::zeroed(src.width, src.height, fmt)?;
+        for p in 0..chroma.colour_planes() {
+            let (w, h) = f.plane_dims(p);
+            for y in 0..h {
+                for x in 0..w {
+                    f.set_sample(
+                        p,
+                        x,
+                        y,
+                        ((src.sample(p, x, y) as u32 >> shift) & mask) as u16,
+                    );
+                }
+            }
+        }
+        pad_owned(f, alignment(opts))
+    };
+    let lossless = EncodeOptions {
+        av1_quality: None,
+        ..opts.clone()
+    };
+    let code = |f: &HeifFrame| -> Result<CodedPicture> {
+        match opts.codec {
+            StillCodec::Hevc => encode_hevc_picture(f, "pcm", 0),
+            _ => encode_av1_picture(f, &lossless),
+        }
+    };
+    let vis = (src.width, src.height);
+    let icc = opts.icc_profile.as_deref();
+    let mut w = HeifWriter::new();
+    let mut inputs = Vec::with_capacity(2);
+    for (shift, mask) in [(8, 0xff), (0, 0xff)] {
+        let pic = code(&split(shift, mask)?)?;
+        let mut props = coded_props(&pic, &opts.colr, icc);
+        props.extend(clap_for(&pic, vis));
+        let item_type = pic.item_type;
+        let id = w.add_coded_item(item_type, pic.data, props);
+        w.set_hidden(id, true);
+        inputs.push(id);
+    }
+    let transform = PixelTransform::new(
+        2,
+        vec![
+            PixelToken::Constant(256),
+            PixelToken::Input(1),
+            PixelToken::Product,
+            PixelToken::Input(2),
+            PixelToken::Sum,
+        ],
+        2,
+    )?;
+    let mut props = vec![
+        (
+            Property::Ispe(Ispe {
+                width: vis.0,
+                height: vis.1,
+            }),
+            false,
+        ),
+        (
+            Property::Pixi(Pixi {
+                bits_per_channel: vec![depth; chroma.colour_planes()],
+            }),
+            false,
+        ),
+        (
+            Property::Colr(nclx_for_icc(&opts.colr, icc.is_some())),
+            false,
+        ),
+    ];
+    if let Some(icc) = icc {
+        props.push((
+            Property::Colr(Colr::Icc {
+                restricted: false,
+                profile: icc.to_vec(),
+            }),
+            false,
+        ));
+    }
+    let id = w.add_pixel_transform(&inputs, transform, props)?;
+    w.set_primary(id);
+    w.write_to_vec()
+}
+
 /// Encode `frame` (any planar layout; converted to the codec's coding
 /// layout — 4:2:0 at the coded depth for HEVC, its own layout for AV1) into a complete HEIF file per
 /// `opts`. Returns the file bytes.

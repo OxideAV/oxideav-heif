@@ -78,6 +78,7 @@ pub mod lhvc;
 pub mod meta;
 pub mod miaf;
 pub mod mini;
+pub mod pixel_transform;
 pub mod props;
 pub mod rgb;
 pub mod sequence;

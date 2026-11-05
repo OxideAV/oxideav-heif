@@ -71,6 +71,9 @@ pub const ITEM_TYPE_TILI: FourCc = *b"tili";
 /// Colour format enhancement derived image item (HEIF Amd 1:2025
 /// §6.6.2.5).
 pub const ITEM_TYPE_CFEN: FourCc = *b"cfen";
+/// Pixel transform derived image item (HEIF 4th edition WD
+/// §6.6.2.6).
+pub const ITEM_TYPE_SATO: FourCc = *b"sato";
 /// Exif metadata item (Annex A.2).
 pub const ITEM_TYPE_EXIF: FourCc = *b"Exif";
 /// Deflate-compressed Exif metadata item (HEIF Amd 2:2026 A.2.1).
@@ -303,6 +306,7 @@ impl ItemInfo {
                 | ITEM_TYPE_TMAP
                 | ITEM_TYPE_TILI
                 | ITEM_TYPE_CFEN
+                | ITEM_TYPE_SATO
         )
     }
 

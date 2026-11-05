@@ -120,6 +120,22 @@ fuzz_target!(|data: &[u8]| {
             }
         }
     }
+    // sato PixelTransform body (4th edition WD §6.6.2.6): parse →
+    // serialize → parse, then evaluate at the intermediate precision on
+    // input samples taken from the body (saturating, never panicking).
+    let n_inputs = (sel % 33) as usize;
+    if let Ok(t) = oxideav_heif::pixel_transform::PixelTransform::parse(body, n_inputs) {
+        let again =
+            oxideav_heif::pixel_transform::PixelTransform::parse(&t.to_bytes(), n_inputs).unwrap();
+        assert_eq!(again, t, "sato must round-trip");
+        let samples: Vec<i64> = (0..n_inputs)
+            .map(|k| *body.get(k).unwrap_or(&0) as i64 * 257 - 30000)
+            .collect();
+        let mut stack = Vec::new();
+        let v = t.evaluate(&samples, &mut stack);
+        let n = t.num_bits();
+        assert!(n == 64 || (v >= -(1i64 << (n - 1)) && v < (1i64 << (n - 1))));
+    }
     // cfen body (Amd 1 §6.6.2.5.2): parse → serialize → parse; then the
     // Amd 2 §6.6.2.5.3 region planner over input geometry taken from
     // the tail of the input — every region it plans lies inside its

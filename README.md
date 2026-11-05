@@ -543,7 +543,7 @@ and real-world producers, and the production defaults.
 | `meta` tree | `hdlr`, `pitm` v0/v1, `iinf` v0/v1 + `infe` v2/v3 (`mime` / `uri ` tails, hidden flag), `iloc` v0–v2 (all widths, construction methods 0 / 1 / 2, multi-extent, zero-length "to end"), `iref` v0/v1, `iprp` / `ipco` / `ipma` v0/v1 (7 / 15-bit indices, essential flag, index-0 placeholders), `idat`, `grpl`, `dinf` / `dref`, `ipro` |
 | Properties | `ispe` `pixi` `colr` (nclx + `rICC` / `prof`) `pasp` `clap` `irot` `imir` `iscl` `auxC` `hvcC` `av1C` `lhvC` `oinf` `tols` `avcC` `vvcC` (14496-15 §11.2.4 FullBox, `VvcPtlRecord`, `ptl_present_flag = 0` records read the SPS head in their arrays) `clli` `mdcv` `cclv` `amve` (14496-12 8th ed. §12.1.6–9 plain-Box syntax, FullBox-prefixed writers tolerated) `rloc` `lsel` `a1op` `a1lx` `rref` `crtt` `mdft` `udes` `altt` `reve` `ndwt` `cexg` `dadj` `stag` (Amd 1:2025 §6.5.41–45) `tilC` + `tipa` and the per-channel `pixi` (`px_flags & 1`, Amd 2:2026); §6.5.1 descriptive-before-transformative order, unrecognised-essential refusal, exact rational `clap` |
 | Coded items | `hvc1` / `hev1` → oxideav-h265 (`hvcC` extradata, length-prefixed AU); `av01` → oxideav-av1 (`av1C` extradata, temporal unit); `avc1` → oxideav-h264 (`avcC` extradata, length-prefixed AU; byte-exact against a black-box AVC decoder on Baseline / Main / High / 4:2:2 / 4:4:4 / 10-bit); `lhv1` → oxideav-h265's multi-layer decoder (`hvcC` ++ `lhvC` extradata, `layer=<lsel>` / `ols=<tols>`): the stereo shape (two `lhv1` items with `lsel` 0 / 1 in a `ster` group) yields each view, an item without `lsel` every output layer (`DecodedImage::layers`), both views byte-exact against a black-box decoder's per-view output; `vvc1` → oxideav-h266's Annex B stream decoder through this crate's `vvcdec` wrapper (the h266 registry factory is a parser-only placeholder on 0.0.9): `vvcC` arrays + `VVCItemData` re-assembled per L.2.2.2 (AUD / OPI first, the L.2.2.1.2 `tols` OPI rule), conformance window applied, byte-exact against ffmpeg's VVC decoder on every item; `cexg` items decode extent by extent; 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8–16 bit; via direct factories or a caller `CodecRegistry`; grid / `tili` / `cexg` tiles decode in parallel under `ItemDecoder::with_execution_context` (byte-identical for every budget) |
-| Derived images | `grid` (row-major, trim, tile alpha), `iovl` (sRGB fill via the H.273 matrix of the output `colr`, offsets, clipping, §6.9.1 straight / pre-multiplied alpha, translucent canvas → output alpha), `iden`, `tmap` (23008-12:2025/Amd 1:2025 §6.6.2.4: base by default, normative tone-mapped reconstruction on request or as an input of another derived item; see Gain maps), `cfen` (Amd 1 §6.6.2.5: the inputs' luma planes become Y / Cb / Cr or R / G / B and alpha; packed inputs (`is_packed_flag`) cut into `rows × cols` regions with guard bands per the Amd 2 §6.6.2.5.3 derivation — see Packed `cfen` below; depth (6) and K (7, the Amd 2 CMYK column) refused typed), `tili` tiled items (Amd 2 §6.11: `deti` offset tables, empty tiles, `ispe` crop; external tiles — one HEIF file per tile, addressed by the `deti` URL template — through a caller-supplied `ExternalTileResolver`, a typed refusal naming the first URL without one) |
+| Derived images | `grid` (row-major, trim, tile alpha), `iovl` (sRGB fill via the H.273 matrix of the output `colr`, offsets, clipping, §6.9.1 straight / pre-multiplied alpha, translucent canvas → output alpha), `iden`, `tmap` (23008-12:2025/Amd 1:2025 §6.6.2.4: base by default, normative tone-mapped reconstruction on request or as an input of another derived item; see Gain maps), `cfen` (Amd 1 §6.6.2.5: the inputs' luma planes become Y / Cb / Cr or R / G / B and alpha; packed inputs (`is_packed_flag`) cut into `rows × cols` regions with guard bands per the Amd 2 §6.6.2.5.3 derivation — see Packed `cfen` below; depth (6) and K (7, the Amd 2 CMYK column) refused typed), `tili` tiled items (Amd 2 §6.11: `deti` offset tables, empty tiles, `ispe` crop; external tiles — one HEIF file per tile, addressed by the `deti` URL template — through a caller-supplied `ExternalTileResolver`, a typed refusal naming the first URL without one), `sato` pixel transforms (4th edition WD §6.6.2.6: postfix integer expressions over the inputs' co-located samples at 8 / 16 / 32 / 64-bit saturating precision, clamped to the item's `pixi` depth and the `nclx` range — the Annex J.9 bit-depth extensions decode sample-exact) |
 | Transforms | `clap` → `irot` → `imir` → `iscl` in `ipma` order; `iscl` (§6.5.13) resizes by the exact ceil-ratio with an area/bilinear resampler; sub-sample chroma positions promote to 4:4:4 (MIAF §7.3.6.7) |
 | Auxiliaries | alpha (`urn:mpeg:mpegB:cicp:systems:auxiliary:alpha` and `urn:mpeg:hevc:2015:auxid:1`, resized / depth-matched, `prem`), depth (both URN families, surfaced as a frame); alpha *tracks* (§7.5.3 `auxv` + `auxl` + `auxi`, plain-Box `auxi` tolerated) composed into a `"heif"` stream of frames with alpha by the demuxer, written by `SequenceWriter::alpha` |
 | Sequence metadata | the track-level `MetaBox` (§8.3: `Exif` / XMP `mime` items, `Track::meta` / `sequence_metadata`, `HeifFile::item_data_in`) and timed metadata tracks (`Exif` / `metx` sample entries, `cdsc`, `Movie::metadata_tracks_of`); on every contract track frame (refined by the time-parallel sample), on the demuxer's stream blobs, as `exif` / `xmp` `Data` streams and as per-frame blobs of the composed `"heif"` stream; written by `SequenceWriter::exif` / `xmp` / `metadata_tracks` and the muxer (r478) |
@@ -806,6 +806,38 @@ reports the §6.11 shalls from the `meta` tree (`"HEIF-A2 6.11.2"` an
 `iloc` naming no `deti`, `"6.11.5.3"` `no_of_input_items` ≠ `NumTiles`,
 `"6.11.3.2"` a `tilC` tail that contradicts the storage form,
 `"6.11.3.3"` a `tipa` index past the `ipco` or an essential index 0).
+
+**Pixel transforms** (`sato`, ISO/IEC 23008-12 4th edition working
+draft §6.6.2.6; `tests/pixel_transform.rs`): `pixel_transform::PixelTransform`
+parses the body (an unrecognised `version` or a reserved token makes
+the item ignorable — `Unsupported`, so an `altr` alternative decodes —
+and an expression breaking the §6.6.2.6.4 stack rules is `InvalidData`)
+and evaluates it per sample at the signalled intermediate precision,
+every result saturating to the signed range (Table 6: quotient by 0 is
+L, `pow` with L = 0 is 0, negative exponents truncate). The output is
+clamped to the item's `pixi` depth (8..=16 composed) and, under a
+limited-range `nclx`, to 16..=235 / 16..=240 (times `2^(depth − 8)`;
+every channel luma-like under the identity matrix); no colour
+conversion touches the inputs. `HeifWriter::add_pixel_transform`
+writes the body to `idat` with the `dimg` inputs, `import_item` re-muxes
+it, `layout::predict_output` announces the depth, and `miaf::check`
+reports the §6.6.2.6.1 shalls (`"HEIF-WD 6.6.2.6.1"`: pixi + ispe on the
+item and every input, equal dimensions and colour information). The
+Annex J.9.1 (16-bit as two 8-bit lossless HEVC items, `256 × in₁ + in₂`)
+and J.9.2 (12-bit base + 8-bit residual, `16 × in₁ + in₂ − 128`) files
+decode to their 16-bit source sample for sample, and
+`encode::encode_pixel_transform_still` is the producer: a 9..=16-bit
+picture coded losslessly as two hidden 8-bit items (HEVC `pcm` in
+4:2:0, or lossless AV1 in the source's chroma; `clap` on unaligned
+sizes) plus the J.9.1 `sato` primary, the colour and ICC on all three
+items — an exact 16-bit HEIF for readers of the new text (alpha is
+refused). No black-box reader on
+this machine implements the item type: `heif-info` / `heif-convert` /
+`magick` refuse the primary (the `pitm` dangles once the unknown item
+is dropped), `ffmpeg` reports "Derived Image item of type sato is not
+implemented" and lists the hidden inputs as streams, `sips` reads no
+size; the same holds for an external-tile `tili` (the tile files
+themselves open everywhere).
 
 **Packed `cfen`** (`is_packed_flag = 1`, Amd 1 §6.6.2.5.2 with the Amd
 2:2026 §6.6.2.5.3 region derivation): one coded item's luma plane

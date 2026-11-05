@@ -257,6 +257,9 @@ pub enum ImageKind {
     /// A `cfen` colour format enhancement derived image (Amd 1:2025
     /// §6.6.2.5).
     ColourFormatEnhancement(ColourFormatEnhancement),
+    /// A `sato` pixel transform derived image (4th edition WD
+    /// §6.6.2.6).
+    PixelTransform(crate::pixel_transform::PixelTransform),
 }
 
 /// The `ColourFormatEnhancement` body of a `cfen` item (HEIF Amd 1:2025
@@ -485,6 +488,10 @@ impl ImageNode {
                 "item {} (cfen): no ispe property (Amd 1 §6.6.2.5.1 requires one)",
                 self.item.id
             ))),
+            ImageKind::PixelTransform(_) => Err(HeifError::invalid(format!(
+                "item {} (sato): no ispe property (§6.6.2.6.1 requires one)",
+                self.item.id
+            ))),
         }
     }
 
@@ -623,6 +630,22 @@ fn build_node<D: AsRef<[u8]>>(
                 input_ids.len(),
             )?)
         }
+        crate::meta::ITEM_TYPE_SATO => {
+            // WD §6.6.2.6.1: the inputs are the dimg targets; a derived
+            // item has one or more (§6.6.1).
+            if input_ids.is_empty() || input_ids.len() > 32 {
+                stack.pop();
+                return Err(HeifError::invalid(format!(
+                    "sato item {item_id}: reference_count {} (1..=32 inputs)",
+                    input_ids.len()
+                )));
+            }
+            let body = file.item_data(item_id)?;
+            ImageKind::PixelTransform(crate::pixel_transform::PixelTransform::parse(
+                &body,
+                input_ids.len(),
+            )?)
+        }
         ITEM_TYPE_TILI => {
             if !input_ids.is_empty() {
                 stack.pop();
@@ -745,6 +768,7 @@ pub fn is_derived_type(t: &FourCc) -> bool {
             | ITEM_TYPE_TMAP
             | ITEM_TYPE_TILI
             | ITEM_TYPE_CFEN
+            | crate::meta::ITEM_TYPE_SATO
     )
 }
 

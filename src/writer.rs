@@ -95,6 +95,8 @@ pub enum ItemBody {
         /// `deti` FullBox flags + body.
         deti: (u32, Vec<u8>),
     },
+    /// A `sato` `PixelTransform` body (`idat`, construction method 1).
+    PixelTransform(crate::pixel_transform::PixelTransform),
 }
 
 #[doc(hidden)]
@@ -267,6 +269,52 @@ impl HeifWriter {
             id,
             inputs.iter().map(|(i, _)| *i).collect(),
         );
+        Ok(id)
+    }
+
+    /// Add a `sato` pixel transform derived item (HEIF 4th edition WD
+    /// §6.6.2.6) over `inputs` (the `dimg` targets, 1..=32, in the order
+    /// the expression's input tokens number them). `properties` shall
+    /// carry `pixi` (the output depth the results are clamped to) and
+    /// `ispe`, as every input shall (§6.6.2.6.1: same dimensions,
+    /// channels, chroma layout and colour information).
+    pub fn add_pixel_transform(
+        &mut self,
+        inputs: &[u32],
+        transform: crate::pixel_transform::PixelTransform,
+        properties: Vec<(Property, bool)>,
+    ) -> Result<u32> {
+        if inputs.is_empty() || inputs.len() > 32 {
+            return Err(HeifError::invalid(format!(
+                "sato: {} inputs (1..=32)",
+                inputs.len()
+            )));
+        }
+        if transform.inputs_read() as usize > inputs.len() {
+            return Err(HeifError::invalid(format!(
+                "sato: the expression reads input {} of {}",
+                transform.inputs_read(),
+                inputs.len()
+            )));
+        }
+        let has = |f: fn(&Property) -> bool| properties.iter().any(|(p, _)| f(p));
+        if !has(|p| matches!(p, Property::Pixi(_))) || !has(|p| matches!(p, Property::Ispe(_))) {
+            return Err(HeifError::invalid(
+                "sato: the item shall carry pixi and ispe (§6.6.2.6.1)",
+            ));
+        }
+        let id = self.alloc_id();
+        self.items.push(WriterItem {
+            id,
+            item_type: crate::meta::ITEM_TYPE_SATO,
+            name: String::new(),
+            content_type: None,
+            content_encoding: None,
+            hidden: false,
+            body: ItemBody::PixelTransform(transform),
+            properties,
+        });
+        self.add_reference(crate::derived::DIMG, id, inputs.to_vec());
         Ok(id)
     }
 
@@ -994,6 +1042,12 @@ impl HeifWriter {
                 }
                 ITEM_TYPE_IDEN => ItemBody::Identity,
                 crate::meta::ITEM_TYPE_TMAP => ItemBody::ToneMap(file.item_data_owned(src)?),
+                crate::meta::ITEM_TYPE_SATO => {
+                    ItemBody::PixelTransform(crate::pixel_transform::PixelTransform::parse(
+                        &file.item_data(src)?,
+                        dimg.len(),
+                    )?)
+                }
                 crate::meta::ITEM_TYPE_CFEN => ItemBody::ColourFormatEnhancement(
                     crate::derived::ColourFormatEnhancement::parse(
                         &file.item_data(src)?,
@@ -1575,6 +1629,11 @@ impl HeifWriter {
                     idat_spans.push((it.id, idat.len() as u64, b.len() as u64));
                     idat.extend_from_slice(&b);
                 }
+                ItemBody::PixelTransform(t) => {
+                    let b = t.to_bytes();
+                    idat_spans.push((it.id, idat.len() as u64, b.len() as u64));
+                    idat.extend_from_slice(&b);
+                }
                 ItemBody::Identity => {}
             }
         }
@@ -1795,7 +1854,8 @@ impl HeifWriter {
                 | ItemBody::Grid(_)
                 | ItemBody::Overlay(_)
                 | ItemBody::Identity
-                | ItemBody::ColourFormatEnhancement(_) => false,
+                | ItemBody::ColourFormatEnhancement(_)
+                | ItemBody::PixelTransform(_) => false,
             };
             if empty {
                 return Err(HeifError::invalid(format!(

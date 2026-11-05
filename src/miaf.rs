@@ -1273,6 +1273,45 @@ fn walk(rep: &mut MiafReport, node: &ImageNode, profile: MiafProfile) {
             }
         }
         ImageKind::Coded(_) | ImageKind::ToneMap(_) => {}
+        ImageKind::PixelTransform(_) => {
+            // HEIF 4th edition WD §6.6.2.6.1: the item and every input
+            // carry pixi + ispe; the same dimensions (after the inputs'
+            // transformative properties) and the same colour
+            // information.
+            let has =
+                |n: &ImageNode| n.properties.pixi().is_some() && n.properties.ispe().is_some();
+            if !has(node) {
+                rep.push(
+                    "HEIF-WD 6.6.2.6.1",
+                    Some(id),
+                    "sato item needs pixi and ispe",
+                );
+            }
+            let size = node.reconstructed_size().ok();
+            for i in &node.inputs {
+                if !has(i) {
+                    rep.push(
+                        "HEIF-WD 6.6.2.6.1",
+                        Some(i.item.id),
+                        "sato input needs pixi and ispe",
+                    );
+                }
+                if size.is_some() && i.output_size().ok() != size {
+                    rep.push(
+                        "HEIF-WD 6.6.2.6.1",
+                        Some(i.item.id),
+                        "sato input dimensions differ from the derived item's",
+                    );
+                }
+                if i.properties.colrs() != node.properties.colrs() {
+                    rep.push(
+                        "HEIF-WD 6.6.2.6.1",
+                        Some(i.item.id),
+                        "sato input colour information differs from the derived item's",
+                    );
+                }
+            }
+        }
         ImageKind::ColourFormatEnhancement(c) => {
             // HEIF Amd 1 §6.6.2.5.1: the cfen item carries pixi + ispe +
             // an nclx colr; every input pixi + ispe; the inputs after the
