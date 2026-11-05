@@ -6,9 +6,14 @@
 //! tiles' coding format and properties come from the `tilC` property
 //! (`tile_item_type` + `TileItemPropertyAssociationBox`).
 //!
-//! This crate composes in-file tiles (`external_tiles_urls == 0`);
-//! external tiles are a typed [`HeifError::Unsupported`], as are the
-//! extra (non-spatial) dimensions of hyperrectangles.
+//! In-file tiles (`external_tiles_urls == 0`) compose from the item's
+//! own data. External tiles (`external_tiles_urls == 1`, §6.11.2: one
+//! HEIF file per tile, addressed by URL) compose through a
+//! caller-supplied [`ExternalTileResolver`] — this crate never touches
+//! a filesystem or a network on its own, so a file opened from bytes
+//! alone refuses them typed ([`HeifError::external_tile_unresolved`]),
+//! naming the first missing reference. The extra (non-spatial)
+//! dimensions of hyperrectangles are a typed [`HeifError::Unsupported`].
 
 use crate::boxes::Reader;
 use crate::error::{HeifError, Result};
@@ -66,9 +71,10 @@ impl DataEntryTiledItem {
     }
 }
 
-/// The URL construction fields of an external-tile `deti`.
+/// The URL construction fields of an external-tile `deti`
+/// (§6.11.5.2, `external_tiles_urls == 1`).
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[doc(hidden)]
+#[non_exhaustive]
 pub struct ExternalTiles {
     /// `directoryIDstart` / `directoryIDend` when `directory_ID_flag`.
     pub directory_ids: Option<(u16, u16)>,
@@ -98,6 +104,228 @@ impl ExternalTiles {
             request_template,
         }
     }
+}
+
+/// The `$tileID$` placeholder of a `tileitemrequesttemplate`
+/// (§6.11.5.3: "the tileID is replaced by the actual value of the tile").
+pub const TILE_ID_PLACEHOLDER: &str = "$tileID$";
+
+impl ExternalTiles {
+    /// The tile ID of the tile at row-major `index` (§6.11.5.3: IDs run
+    /// from `tileIDstart` in steps of one, in row-major order).
+    pub fn tile_id(&self, index: u64) -> Result<u64> {
+        self.tile_id_start.checked_add(index).ok_or_else(|| {
+            HeifError::invalid(format!(
+                "tili: tileIDstart {} + tile {index} overflows 64 bits",
+                self.tile_id_start
+            ))
+        })
+    }
+
+    /// The directory ID of the tile at row-major `index` of `num_tiles`
+    /// (`None` without `directory_ID_flag`). §6.11.5.3: every directory
+    /// holds `NumTiles / (directoryIDend − directoryIDstart)` tiles, the
+    /// last one (`directoryIDend`) also the remainder. Where that
+    /// quotient is undefined (`directoryIDend <= directoryIDstart`) or
+    /// zero (fewer tiles than directories) the text gives no
+    /// assignment: a typed [`HeifError::Unsupported`].
+    pub fn directory_id(&self, index: u64, num_tiles: u64) -> Result<Option<u16>> {
+        let Some((start, end)) = self.directory_ids else {
+            return Ok(None);
+        };
+        if end <= start {
+            return Err(HeifError::unsupported(format!(
+                "tili: directoryIDend {end} <= directoryIDstart {start} \
+                 (the tiles per directory, NumTiles / (end - start), are undefined)"
+            )));
+        }
+        let per_directory = num_tiles / (end - start) as u64;
+        if per_directory == 0 {
+            return Err(HeifError::unsupported(format!(
+                "tili: {num_tiles} tiles over directories {start}..={end} \
+                 (NumTiles / (end - start) is 0 tiles per directory)"
+            )));
+        }
+        let d = (start as u64 + index / per_directory).min(end as u64);
+        Ok(Some(d as u16))
+    }
+
+    /// The URL of the tile at row-major `index` of `num_tiles`
+    /// (§6.11.5.3, Table 12): `baseurl`, `urlextension`, `/`, then —
+    /// with directory IDs — the tile's directory ID and `/`, then the
+    /// `tileitemrequesttemplate` with every `$tileID$` replaced by the
+    /// tile ID in decimal. The worked example of Table 12 (`…/image/` +
+    /// `Representation1` + `/10/` + `1000.heif`) fixes the separator
+    /// after the directory ID that the prose leaves out.
+    pub fn url(&self, index: u64, num_tiles: u64) -> Result<String> {
+        let tile_id = self.tile_id(index)?;
+        let request = self
+            .request_template
+            .replace(TILE_ID_PLACEHOLDER, &tile_id.to_string());
+        Ok(match self.directory_id(index, num_tiles)? {
+            Some(d) => format!("{}{}/{d}/{request}", self.base_url, self.url_extension),
+            None => format!("{}{}/{request}", self.base_url, self.url_extension),
+        })
+    }
+
+    /// The request for the tile at row-major `index` of a
+    /// `columns`-wide, `num_tiles`-tile `tili` item `item_id`.
+    pub fn request(
+        &self,
+        item_id: u32,
+        index: u64,
+        columns: u32,
+        num_tiles: u64,
+    ) -> Result<ExternalTileRequest> {
+        if columns == 0 || index >= num_tiles {
+            return Err(HeifError::invalid(format!(
+                "tili item {item_id}: tile {index} outside {num_tiles} tiles"
+            )));
+        }
+        Ok(ExternalTileRequest {
+            item_id,
+            index,
+            column: (index % columns as u64) as u32,
+            row: (index / columns as u64) as u32,
+            tile_id: self.tile_id(index)?,
+            directory_id: self.directory_id(index, num_tiles)?,
+            url: self.url(index, num_tiles)?,
+        })
+    }
+}
+
+/// One external tile of a `tili` item to fetch (§6.11.2: a HEIF file
+/// holding the tile as its only image item), as handed to an
+/// [`ExternalTileResolver`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ExternalTileRequest {
+    /// The `tili` item.
+    pub item_id: u32,
+    /// Row-major tile index (`row × TileColumns + column`).
+    pub index: u64,
+    /// Tile column.
+    pub column: u32,
+    /// Tile row.
+    pub row: u32,
+    /// The tile ID (`tileIDstart + index`).
+    pub tile_id: u64,
+    /// The tile's directory ID, when the `deti` uses directories.
+    pub directory_id: Option<u16>,
+    /// The URL built from the `deti` fields ([`ExternalTiles::url`]).
+    pub url: String,
+}
+impl ExternalTileRequest {
+    /// Every field as a positional argument, in declaration order.
+    pub fn new(
+        item_id: u32,
+        index: u64,
+        column: u32,
+        row: u32,
+        tile_id: u64,
+        directory_id: Option<u16>,
+        url: String,
+    ) -> Self {
+        Self {
+            item_id,
+            index,
+            column,
+            row,
+            tile_id,
+            directory_id,
+            url,
+        }
+    }
+}
+
+/// Supplies the bytes of external tiles (§6.11.2). The reader never
+/// fetches anything itself: the caller decides what a URL means (a
+/// path next to the file, an HTTP cache, an in-memory map) and returns
+/// the whole tile file. Any error is passed through as the decode's
+/// error. Implemented for every `Fn(&ExternalTileRequest) ->
+/// Result<Vec<u8>> + Sync` closure.
+pub trait ExternalTileResolver: Sync {
+    /// The bytes of the HEIF file holding `request`'s tile.
+    fn resolve(&self, request: &ExternalTileRequest) -> Result<Vec<u8>>;
+}
+
+impl<F> ExternalTileResolver for F
+where
+    F: Fn(&ExternalTileRequest) -> Result<Vec<u8>> + Sync,
+{
+    fn resolve(&self, request: &ExternalTileRequest) -> Result<Vec<u8>> {
+        self(request)
+    }
+}
+
+/// A shareable [`ExternalTileResolver`] (the form
+/// [`DecodeOptions::tile_resolver`](crate::DecodeOptions::tile_resolver)
+/// holds). Two handles compare equal when they share one resolver.
+#[derive(Clone)]
+pub struct SharedTileResolver(std::sync::Arc<dyn ExternalTileResolver + Send>);
+
+impl SharedTileResolver {
+    /// Wrap `resolver`.
+    pub fn new(resolver: impl ExternalTileResolver + Send + 'static) -> Self {
+        Self(std::sync::Arc::new(resolver))
+    }
+
+    /// The resolver.
+    pub fn resolver(&self) -> &dyn ExternalTileResolver {
+        &*self.0
+    }
+}
+
+impl std::fmt::Debug for SharedTileResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SharedTileResolver(..)")
+    }
+}
+
+impl PartialEq for SharedTileResolver {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// Check that `tile` can be the external tile file of a `tili` item
+/// whose `MetaBox` handler is `handler_type` (§6.11.2: a HEIF compliant
+/// file holding the tile as its only image item, no entity grouping,
+/// the same `handler_type`). Returns the tile's item ID.
+pub fn check_external_tile<D: AsRef<[u8]>>(
+    tile: &crate::file::HeifFile<D>,
+    handler_type: Option<crate::boxes::FourCc>,
+) -> Result<u32> {
+    let fourcc = crate::boxes::fourcc_str;
+    if !tile.file_type.is_heif_family() {
+        return Err(HeifError::invalid(
+            "external tile: not a HEIF file (no HEIF-family brand; §6.11.2)",
+        ));
+    }
+    let meta = tile.meta()?;
+    if !meta.entity_groups.is_empty() {
+        return Err(HeifError::invalid(format!(
+            "external tile: {} entity group(s) (§6.11.2: shall not contain any)",
+            meta.entity_groups.len()
+        )));
+    }
+    let images: Vec<&crate::meta::ItemInfo> = meta.items.iter().filter(|i| i.is_image()).collect();
+    let [item] = images.as_slice() else {
+        return Err(HeifError::invalid(format!(
+            "external tile: {} image items (§6.11.2: only one input tile as an image item)",
+            images.len()
+        )));
+    };
+    let tile_handler = meta.handler.as_ref().map(|h| h.handler_type);
+    if tile_handler != handler_type {
+        let name = |h: Option<crate::boxes::FourCc>| h.map(|h| fourcc(&h)).unwrap_or_default();
+        return Err(HeifError::invalid(format!(
+            "external tile: handler_type '{}' differs from the tiled item's '{}' (§6.11.2)",
+            name(tile_handler),
+            name(handler_type)
+        )));
+    }
+    Ok(item.id)
 }
 
 impl DataEntryTiledItem {
@@ -265,6 +493,44 @@ impl DataEntryTiledItem {
         (flags, b)
     }
 
+    /// Serialise as a `dref` entry `(flags, payload)` for external
+    /// tiles (`external_tiles_urls = 1`, a 32-bit `no_of_input_items`;
+    /// the offset / size codes and `sequential_order` are 0 — they
+    /// describe an offset table this form does not have).
+    pub fn external_entry(num_tiles: u32, tiles: &ExternalTiles) -> Result<(u32, Vec<u8>)> {
+        for (what, s) in [
+            ("baseurl", &tiles.base_url),
+            ("urlextension", &tiles.url_extension),
+            ("tileitemrequesttemplate", &tiles.request_template),
+        ] {
+            if s.contains('\0') {
+                return Err(HeifError::invalid(format!(
+                    "deti {what}: a utf8string cannot hold a NUL"
+                )));
+            }
+        }
+        let flags = (2 << 5) | (1 << 7);
+        let mut b = num_tiles.to_be_bytes().to_vec();
+        match tiles.directory_ids {
+            Some((start, end)) => {
+                b.push(1);
+                b.extend_from_slice(&start.to_be_bytes());
+                b.extend_from_slice(&end.to_be_bytes());
+            }
+            None => b.push(0),
+        }
+        b.extend_from_slice(&tiles.tile_id_start.to_be_bytes());
+        for s in [
+            &tiles.base_url,
+            &tiles.url_extension,
+            &tiles.request_template,
+        ] {
+            b.extend_from_slice(s.as_bytes());
+            b.push(0);
+        }
+        Ok((flags, b))
+    }
+
     /// Build the item data of an in-file tiled item from its tiles
     /// (`None` = empty tile): the tiles back to back, then the
     /// `TiledImageOffsetTable` (32-bit offsets + sizes). Returns the
@@ -381,5 +647,46 @@ mod tests {
             parsed.tile_spans(&[], 4),
             Err(HeifError::Unsupported(_))
         ));
+        // Table 12: the first tile of a 150-tile item (10 per
+        // directory over 10..=25).
+        assert_eq!(
+            ext.url(0, 150).unwrap(),
+            "http://cdn.example.com/pictures/134532/image/Representation1/10/1000.heif"
+        );
+        assert_eq!(ext.directory_id(149, 150).unwrap(), Some(24));
+        // 151 tiles: the remainder goes to the last directory.
+        assert_eq!(ext.directory_id(150, 151).unwrap(), Some(25));
+        // 40 tiles: 2 per directory, the last one taking 10.
+        assert_eq!(ext.directory_id(29, 40).unwrap(), Some(24));
+        assert_eq!(ext.directory_id(30, 40).unwrap(), Some(25));
+        assert_eq!(ext.directory_id(39, 40).unwrap(), Some(25));
+        // Undefined splits.
+        assert!(matches!(
+            ext.directory_id(0, 14),
+            Err(HeifError::Unsupported(_))
+        ));
+        let mut flat = ext.clone();
+        flat.directory_ids = Some((5, 5));
+        assert!(matches!(
+            flat.directory_id(0, 14),
+            Err(HeifError::Unsupported(_))
+        ));
+        flat.directory_ids = None;
+        assert_eq!(
+            flat.url(3, 4).unwrap(),
+            "http://cdn.example.com/pictures/134532/image/Representation1/1003.heif"
+        );
+        flat.tile_id_start = u64::MAX;
+        assert!(flat.url(1, 4).is_err(), "tile ID overflow");
+        let r = ext.request(7, 13, 4, 150).unwrap();
+        assert_eq!((r.column, r.row, r.tile_id), (1, 3, 1013));
+        assert_eq!(r.directory_id, Some(11));
+        assert!(ext.request(7, 150, 4, 150).is_err());
+        // The serialised external entry parses back to the same fields.
+        let (flags, payload) = DataEntryTiledItem::external_entry(150, ext).unwrap();
+        let back = DataEntryTiledItem::parse(&entry(flags, payload)).unwrap();
+        assert_eq!(back.external.as_ref(), Some(ext));
+        assert_eq!(back.input_items, 150);
+        assert!(back.offset_table.is_none());
     }
 }

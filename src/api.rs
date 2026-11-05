@@ -1183,6 +1183,10 @@ pub struct DecodeOptions {
     /// HDR reference white (cd/m²) a PQ-coded tone-mapped
     /// reconstruction is anchored to.
     pub reference_white_nits: Option<f64>,
+    /// Supplies the external tiles of `tili` items (HEIF Amd 2:2026
+    /// §6.11.2); `None` (the default) refuses them typed
+    /// ([`HeifError::external_tile_unresolved`](crate::HeifError::external_tile_unresolved)).
+    pub tile_resolver: Option<crate::tiled::SharedTileResolver>,
 }
 
 impl Default for DecodeOptions {
@@ -1198,6 +1202,7 @@ impl Default for DecodeOptions {
             base_layer_fallback: false,
             threads: None,
             reference_white_nits: None,
+            tile_resolver: None,
         }
     }
 }
@@ -1228,6 +1233,7 @@ impl DecodeOptions {
             base_layer_fallback,
             threads,
             reference_white_nits,
+            tile_resolver: None,
         }
     }
 
@@ -1282,6 +1288,15 @@ impl DecodeOptions {
     /// Set [`DecodeOptions::threads`].
     pub fn with_threads(mut self, threads: Option<usize>) -> Self {
         self.threads = threads;
+        self
+    }
+
+    /// Set [`DecodeOptions::tile_resolver`].
+    pub fn with_tile_resolver(
+        mut self,
+        resolver: impl crate::tiled::ExternalTileResolver + Send + 'static,
+    ) -> Self {
+        self.tile_resolver = Some(crate::tiled::SharedTileResolver::new(resolver));
         self
     }
 

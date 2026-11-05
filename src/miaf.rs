@@ -150,6 +150,99 @@ impl MiafReport {
 /// entity is a region item, all of one group's regions describe the
 /// same image through `cdsc`, and a compound region names at least
 /// the main region and one part. Reported under `"HEIF-A2 11.3.5.x"`.
+/// HEIF Amd 2:2026 §6.11 on every `tili` item, from the `meta` tree
+/// alone (the offset table lives with the tile data and is checked when
+/// the tiles are read): the `iloc` entry maps the item to a `deti`
+/// entry (§6.11.2), `no_of_input_items` equals `NumTiles` (§6.11.5.3),
+/// the `tilC` carries `tile_item_type` + `tipa` exactly when the tiles
+/// are in this file (§6.11.3.2), and every `tipa` association names an
+/// existing property, an index of 0 never essential (§6.11.3.3).
+fn check_tiled_items(meta: &crate::meta::Meta, rep: &mut MiafReport) {
+    for it in meta.items.iter().filter(|i| i.is_tiled_image()) {
+        let id = it.id;
+        let Some(loc) = meta.location(id) else {
+            continue; // "image item has no iloc entry" is reported above
+        };
+        let dref = match loc.data_reference_index {
+            0 => None,
+            n => meta.data_references.get(n as usize - 1),
+        }
+        .filter(|d| &d.entry_type == b"deti");
+        let Some(dref) = dref else {
+            rep.push(
+                "HEIF-A2 6.11.2",
+                Some(id),
+                format!(
+                    "data_reference_index {} does not name a DataEntryTiledItemBox",
+                    loc.data_reference_index
+                ),
+            );
+            continue;
+        };
+        let deti = match crate::tiled::DataEntryTiledItem::parse(dref) {
+            Ok(d) => d,
+            Err(e) => {
+                rep.push("HEIF-A2 6.11.5.2", Some(id), format!("deti: {e}"));
+                continue;
+            }
+        };
+        let Ok(props) = crate::props::ItemProperties::resolve(meta, id) else {
+            continue;
+        };
+        let Some(tilc) = props.tilc() else {
+            rep.push("HEIF-A2 6.11.3.1", Some(id), "tili item without tilC");
+            continue;
+        };
+        if let Some(ispe) = props.ispe()
+            && let Some(n) = tilc.tile_count(ispe.width, ispe.height)
+            && n != deti.input_items
+        {
+            rep.push(
+                "HEIF-A2 6.11.5.3",
+                Some(id),
+                format!(
+                    "deti no_of_input_items {} but NumTiles is {n}",
+                    deti.input_items
+                ),
+            );
+        }
+        match (&tilc.in_file_tiles, deti.external.is_some()) {
+            (Some(_), true) => rep.push(
+                "HEIF-A2 6.11.3.2",
+                Some(id),
+                "tilC carries tile_item_type / tipa for external tiles",
+            ),
+            (None, false) => rep.push(
+                "HEIF-A2 6.11.3.2",
+                Some(id),
+                "tilC lacks tile_item_type / tipa for in-file tiles",
+            ),
+            (Some((_, assoc)), false) => {
+                for (essential, index) in assoc {
+                    if *index == 0 && *essential {
+                        rep.push(
+                            "HEIF-A2 6.11.3.3",
+                            Some(id),
+                            "tipa property_index 0 marked essential",
+                        );
+                    }
+                    if *index as usize > meta.properties.len() {
+                        rep.push(
+                            "HEIF-A2 6.11.3.3",
+                            Some(id),
+                            format!(
+                                "tipa property_index {index} past the {} ipco boxes",
+                                meta.properties.len()
+                            ),
+                        );
+                    }
+                }
+            }
+            (None, true) => {}
+        }
+    }
+}
+
 fn check_region_groups(meta: &crate::meta::Meta, rep: &mut MiafReport) {
     for g in &meta.entity_groups {
         let clause = match &g.grouping_type {
@@ -523,6 +616,7 @@ pub fn check<D: AsRef<[u8]>>(file: &HeifFile<D>, profile: MiafProfile) -> Result
     }
     check_tone_maps(file, meta, &mut rep);
     check_region_groups(meta, &mut rep);
+    check_tiled_items(meta, &mut rep);
     // Per-item structural checks.
     for it in meta.items.iter().filter(|i| i.is_image()) {
         let id = it.id;

@@ -97,6 +97,28 @@ fuzz_target!(|data: &[u8]| {
     );
     if let Ok(d) = oxideav_heif::tiled::DataEntryTiledItem::parse(&dref) {
         let _ = d.tile_spans(body, (sel % 7) as u64);
+        // External tiles (§6.11.5.3): tile IDs, directory split and URL
+        // of every tile; the entry re-serialises to the same fields.
+        if let Some(ext) = &d.external {
+            let n = (d.input_items % 64).max(1);
+            for i in 0..n {
+                let _ = ext.request(1, i, (sel % 9) as u32, n);
+            }
+            if let Ok((flags, payload)) =
+                oxideav_heif::tiled::DataEntryTiledItem::external_entry(n as u32, ext)
+            {
+                let back = oxideav_heif::meta::DataReference::new(
+                    *b"deti",
+                    false,
+                    String::new(),
+                    String::new(),
+                    flags,
+                    payload,
+                );
+                let again = oxideav_heif::tiled::DataEntryTiledItem::parse(&back).unwrap();
+                assert_eq!(again.external.as_ref(), Some(ext), "deti must round-trip");
+            }
+        }
     }
     // cfen body (Amd 1 §6.6.2.5.2): parse → serialize → parse; then the
     // Amd 2 §6.6.2.5.3 region planner over input geometry taken from

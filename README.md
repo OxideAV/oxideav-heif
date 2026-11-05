@@ -543,7 +543,7 @@ and real-world producers, and the production defaults.
 | `meta` tree | `hdlr`, `pitm` v0/v1, `iinf` v0/v1 + `infe` v2/v3 (`mime` / `uri ` tails, hidden flag), `iloc` v0–v2 (all widths, construction methods 0 / 1 / 2, multi-extent, zero-length "to end"), `iref` v0/v1, `iprp` / `ipco` / `ipma` v0/v1 (7 / 15-bit indices, essential flag, index-0 placeholders), `idat`, `grpl`, `dinf` / `dref`, `ipro` |
 | Properties | `ispe` `pixi` `colr` (nclx + `rICC` / `prof`) `pasp` `clap` `irot` `imir` `iscl` `auxC` `hvcC` `av1C` `lhvC` `oinf` `tols` `avcC` `vvcC` (14496-15 §11.2.4 FullBox, `VvcPtlRecord`, `ptl_present_flag = 0` records read the SPS head in their arrays) `clli` `mdcv` `cclv` `amve` (14496-12 8th ed. §12.1.6–9 plain-Box syntax, FullBox-prefixed writers tolerated) `rloc` `lsel` `a1op` `a1lx` `rref` `crtt` `mdft` `udes` `altt` `reve` `ndwt` `cexg` `dadj` `stag` (Amd 1:2025 §6.5.41–45) `tilC` + `tipa` and the per-channel `pixi` (`px_flags & 1`, Amd 2:2026); §6.5.1 descriptive-before-transformative order, unrecognised-essential refusal, exact rational `clap` |
 | Coded items | `hvc1` / `hev1` → oxideav-h265 (`hvcC` extradata, length-prefixed AU); `av01` → oxideav-av1 (`av1C` extradata, temporal unit); `avc1` → oxideav-h264 (`avcC` extradata, length-prefixed AU; byte-exact against a black-box AVC decoder on Baseline / Main / High / 4:2:2 / 4:4:4 / 10-bit); `lhv1` → oxideav-h265's multi-layer decoder (`hvcC` ++ `lhvC` extradata, `layer=<lsel>` / `ols=<tols>`): the stereo shape (two `lhv1` items with `lsel` 0 / 1 in a `ster` group) yields each view, an item without `lsel` every output layer (`DecodedImage::layers`), both views byte-exact against a black-box decoder's per-view output; `vvc1` → oxideav-h266's Annex B stream decoder through this crate's `vvcdec` wrapper (the h266 registry factory is a parser-only placeholder on 0.0.9): `vvcC` arrays + `VVCItemData` re-assembled per L.2.2.2 (AUD / OPI first, the L.2.2.1.2 `tols` OPI rule), conformance window applied, byte-exact against ffmpeg's VVC decoder on every item; `cexg` items decode extent by extent; 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8–16 bit; via direct factories or a caller `CodecRegistry`; grid / `tili` / `cexg` tiles decode in parallel under `ItemDecoder::with_execution_context` (byte-identical for every budget) |
-| Derived images | `grid` (row-major, trim, tile alpha), `iovl` (sRGB fill via the H.273 matrix of the output `colr`, offsets, clipping, §6.9.1 straight / pre-multiplied alpha, translucent canvas → output alpha), `iden`, `tmap` (23008-12:2025/Amd 1:2025 §6.6.2.4: base by default, normative tone-mapped reconstruction on request or as an input of another derived item; see Gain maps), `cfen` (Amd 1 §6.6.2.5: the inputs' luma planes become Y / Cb / Cr or R / G / B and alpha; packed inputs (`is_packed_flag`) cut into `rows × cols` regions with guard bands per the Amd 2 §6.6.2.5.3 derivation — see Packed `cfen` below; depth (6) and K (7, the Amd 2 CMYK column) refused typed), `tili` tiled items (Amd 2 §6.11: `deti` offset tables, empty tiles, `ispe` crop; external tiles refused) |
+| Derived images | `grid` (row-major, trim, tile alpha), `iovl` (sRGB fill via the H.273 matrix of the output `colr`, offsets, clipping, §6.9.1 straight / pre-multiplied alpha, translucent canvas → output alpha), `iden`, `tmap` (23008-12:2025/Amd 1:2025 §6.6.2.4: base by default, normative tone-mapped reconstruction on request or as an input of another derived item; see Gain maps), `cfen` (Amd 1 §6.6.2.5: the inputs' luma planes become Y / Cb / Cr or R / G / B and alpha; packed inputs (`is_packed_flag`) cut into `rows × cols` regions with guard bands per the Amd 2 §6.6.2.5.3 derivation — see Packed `cfen` below; depth (6) and K (7, the Amd 2 CMYK column) refused typed), `tili` tiled items (Amd 2 §6.11: `deti` offset tables, empty tiles, `ispe` crop; external tiles — one HEIF file per tile, addressed by the `deti` URL template — through a caller-supplied `ExternalTileResolver`, a typed refusal naming the first URL without one) |
 | Transforms | `clap` → `irot` → `imir` → `iscl` in `ipma` order; `iscl` (§6.5.13) resizes by the exact ceil-ratio with an area/bilinear resampler; sub-sample chroma positions promote to 4:4:4 (MIAF §7.3.6.7) |
 | Auxiliaries | alpha (`urn:mpeg:mpegB:cicp:systems:auxiliary:alpha` and `urn:mpeg:hevc:2015:auxid:1`, resized / depth-matched, `prem`), depth (both URN families, surfaced as a frame); alpha *tracks* (§7.5.3 `auxv` + `auxl` + `auxi`, plain-Box `auxi` tolerated) composed into a `"heif"` stream of frames with alpha by the demuxer, written by `SequenceWriter::alpha` |
 | Sequence metadata | the track-level `MetaBox` (§8.3: `Exif` / XMP `mime` items, `Track::meta` / `sequence_metadata`, `HeifFile::item_data_in`) and timed metadata tracks (`Exif` / `metx` sample entries, `cdsc`, `Movie::metadata_tracks_of`); on every contract track frame (refined by the time-parallel sample), on the demuxer's stream blobs, as `exif` / `xmp` `Data` streams and as per-frame blobs of the composed `"heif"` stream; written by `SequenceWriter::exif` / `xmp` / `metadata_tracks` and the muxer (r478) |
@@ -774,6 +774,38 @@ reader on this machine implements the 2026 item type: they refuse
 the primary (an unknown item type is dropped from their item list, so
 the `pitm` dangles) and ffmpeg renders the thumbnail instead (see the
 writer-direction table); the carrier stays opt-in.
+
+**External tiles** (Amd 2:2026 §6.11.2 / §6.11.5, `external_tiles_urls
+= 1`; `tests/external_tiles.rs`): every tile is a HEIF file of its own,
+addressed by the `deti` URL template — `baseurl` + `urlextension` + `/`
+(+ the directory ID + `/` when `directory_ID_flag`) + the
+`tileitemrequesttemplate` with `$tileID$` replaced by `tileIDstart +
+index` (row-major), the shape of Table 12; directories hold
+`NumTiles / (directoryIDend − directoryIDstart)` tiles each, the last
+the remainder. The reader never fetches anything itself:
+`ItemDecoder::with_tile_resolver` / `DecodeOptions::with_tile_resolver`
+take an `ExternalTileResolver` (any `Fn(&ExternalTileRequest) ->
+Result<Vec<u8>>`) that receives the item, index, row / column, tile ID,
+directory ID and URL and returns the tile file; without one the decode
+is `HeifError::external_tile_unresolved` (`external_tile_info()` reads
+back the item and the first URL). Each tile file is checked against the
+§6.11.2 shalls (a HEIF-family file, its tile the only image item, no
+entity groups, the tiled item's `handler_type`), every tile must share
+the first tile's item type and be `tile_width × tile_height` after its
+own properties; plain coded tiles decode as parallel jobs under the
+thread budget (byte-identical to serial), a tile with transformative
+properties through its file's graph, and the canvas is cropped to the
+`ispe`. `HeifWriter::add_external_tiled_item` authors the item: the
+`deti` with the URL fields, a `tilC` without `tile_item_type` / `tipa`
+(§6.11.3.2), an `iloc` entry naming the `deti` with one zero-length
+extent (no data in this file; ISO/IEC 14496-12 requires
+`extent_count >= 1`); a directory split that leaves a directory empty
+is refused (the text gives it no assignment). `import_item` /
+`from_files` carry the item and its `deti` across verbatim. `miaf::check`
+reports the §6.11 shalls from the `meta` tree (`"HEIF-A2 6.11.2"` an
+`iloc` naming no `deti`, `"6.11.5.3"` `no_of_input_items` ≠ `NumTiles`,
+`"6.11.3.2"` a `tilC` tail that contradicts the storage form,
+`"6.11.3.3"` a `tipa` index past the `ipco` or an essential index 0).
 
 **Packed `cfen`** (`is_packed_flag = 1`, Amd 1 §6.6.2.5.2 with the Amd
 2:2026 §6.6.2.5.3 region derivation): one coded item's luma plane

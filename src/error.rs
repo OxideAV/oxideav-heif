@@ -94,6 +94,36 @@ impl HeifError {
     }
 }
 
+impl HeifError {
+    /// The refusal for a `tili` item whose tiles live in external files
+    /// (HEIF Amd 2:2026 §6.11.2) when no
+    /// [`ExternalTileResolver`](crate::tiled::ExternalTileResolver) was
+    /// supplied: an [`HeifError::Unsupported`] naming the first missing
+    /// reference, which [`HeifError::external_tile_info`] reads back.
+    pub fn external_tile_unresolved(item_id: u32, url: &str) -> Self {
+        Self::Unsupported(format!(
+            "{EXTERNAL_TILE_PREFIX}item {item_id} needs external tile {url} (no tile resolver supplied)"
+        ))
+    }
+
+    /// `(item_id, url)` when this is the
+    /// [`HeifError::external_tile_unresolved`] refusal.
+    pub fn external_tile_info(&self) -> Option<(u32, String)> {
+        let HeifError::Unsupported(m) = self else {
+            return None;
+        };
+        let rest = m.strip_prefix(EXTERNAL_TILE_PREFIX)?;
+        let rest = rest.strip_prefix("item ")?;
+        let (id, rest) = rest.split_once(' ')?;
+        let rest = rest.strip_prefix("needs external tile ")?;
+        let url = rest.strip_suffix(" (no tile resolver supplied)")?;
+        Some((id.parse().ok()?, url.to_string()))
+    }
+}
+
+/// Message prefix of [`HeifError::external_tile_unresolved`].
+const EXTERNAL_TILE_PREFIX: &str = "external tiles: ";
+
 /// Message prefix of [`HeifError::layered_hevc`].
 const LAYERED_HEVC_PREFIX: &str = "L-HEVC: ";
 

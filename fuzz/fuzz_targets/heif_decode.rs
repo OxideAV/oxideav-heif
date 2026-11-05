@@ -4,7 +4,8 @@
 //! `decode_with` / `decode_rgba8` / `decode_all_with` under tight
 //! limits (the codec crates have their own harnesses; this one covers
 //! the container → codec → composition → RGB path and the limit checks
-//! in front of it). The contract is "the call returns".
+//! in front of it), plus external `tili` tiles served from the input.
+//! The contract is "the call returns".
 
 use libfuzzer_sys::fuzz_target;
 
@@ -32,4 +33,17 @@ fuzz_target!(|data: &[u8]| {
     }
     let strict = opts.clone().with_strict(true).with_tone_mapped(true);
     let _ = oxideav_heif::decode_with(data, &strict);
+    // External `tili` tiles (Amd 2 §6.11.2): every tile request is
+    // answered from the input itself, at an offset picked by the tile
+    // index and the input's last byte — the tile-file checks, the
+    // per-tile graphs and the composition run on hostile tile files.
+    let owned = data[..data.len().min(1 << 18)].to_vec();
+    let tiles = opts.with_tile_resolver(
+        move |r: &oxideav_heif::tiled::ExternalTileRequest| -> oxideav_heif::Result<Vec<u8>> {
+            let step = *owned.last().unwrap_or(&0) as u64 + 1;
+            let off = ((r.index * step) as usize).min(owned.len());
+            Ok(owned[off..].to_vec())
+        },
+    );
+    let _ = oxideav_heif::decode_with(data, &tiles);
 });

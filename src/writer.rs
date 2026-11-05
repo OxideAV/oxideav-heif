@@ -87,6 +87,14 @@ pub enum ItemBody {
         /// Properties of every tile, in association order.
         tile_properties: Vec<(Property, bool)>,
     },
+    /// A `tili` tiled image item whose tiles are external HEIF files
+    /// (HEIF Amd 2:2026 §6.11.2, `external_tiles_urls = 1`): no data in
+    /// this file, the `deti` entry `(flags, payload)` carrying the URL
+    /// template the item's `iloc` entry points at.
+    ExternalTiled {
+        /// `deti` FullBox flags + body.
+        deti: (u32, Vec<u8>),
+    },
 }
 
 #[doc(hidden)]
@@ -389,6 +397,68 @@ impl HeifWriter {
                 tile_item_type,
                 tile_properties,
             },
+            properties: props,
+        });
+        Ok(id)
+    }
+
+    /// Add a `tili` tiled image item (HEIF Amd 2:2026 §6.11) of
+    /// `width × height` pixels whose `tile_width × tile_height` tiles
+    /// are external HEIF files addressed by `tiles`' URL template
+    /// (§6.11.5.3; [`ExternalTiles::url`](crate::tiled::ExternalTiles::url)
+    /// gives each tile's URL). Each tile file holds its tile as its only
+    /// image item, with its own properties, under the `pict` handler
+    /// and without entity groups (§6.11.2) — a [`HeifWriter`] file with
+    /// one coded item is one. The item carries `tilC` (no
+    /// `tile_item_type` / `tipa`: §6.11.3.2 leaves them to the tile
+    /// files) + `ispe` + `properties`; its `iloc` entry points at the
+    /// `deti` entry with one zero-length extent (no data lives in this
+    /// file; ISO/IEC 14496-12 §8.11.3.3 requires an extent_count of 1
+    /// or more). A directory layout must give every directory at least
+    /// one tile (§6.11.5.3: NumTiles / (directoryIDend −
+    /// directoryIDstart) tiles each).
+    pub fn add_external_tiled_item(
+        &mut self,
+        width: u32,
+        height: u32,
+        tile_width: u32,
+        tile_height: u32,
+        tiles: crate::tiled::ExternalTiles,
+        properties: Vec<(Property, bool)>,
+    ) -> Result<u32> {
+        if tile_width == 0 || tile_height == 0 || width == 0 || height == 0 {
+            return Err(HeifError::invalid("tiled item: zero dimension"));
+        }
+        let n = width.div_ceil(tile_width) as u64 * height.div_ceil(tile_height) as u64;
+        let n =
+            u32::try_from(n).map_err(|_| HeifError::exhausted(format!("tiled item: {n} tiles")))?;
+        // Every tile must have a URL: the directory and tile-ID rules
+        // are checked on the last tile (the first overflow / the
+        // undefined directory split surface there).
+        tiles.url(n as u64 - 1, n as u64)?;
+        let deti = crate::tiled::DataEntryTiledItem::external_entry(n, &tiles)?;
+        let mut props = vec![
+            (
+                Property::TilC(crate::props::TilC {
+                    tile_width,
+                    tile_height,
+                    extra_dimensions: Vec::new(),
+                    in_file_tiles: None,
+                }),
+                true,
+            ),
+            (Property::Ispe(crate::props::Ispe { width, height }), false),
+        ];
+        props.extend(properties);
+        let id = self.alloc_id();
+        self.items.push(WriterItem {
+            id,
+            item_type: crate::meta::ITEM_TYPE_TILI,
+            name: String::new(),
+            content_type: None,
+            content_encoding: None,
+            hidden: false,
+            body: ItemBody::ExternalTiled { deti },
             properties: props,
         });
         Ok(id)
@@ -885,29 +955,37 @@ impl HeifWriter {
                         .ok_or_else(|| {
                             HeifError::invalid(format!("import: tili item {src} without a tilC"))
                         })?;
-                    let Some((tile_item_type, assoc)) = tilc.in_file_tiles else {
-                        return Err(HeifError::unsupported(format!(
-                            "import: tili item {src}: tiles stored in external files"
-                        )));
-                    };
-                    let tile_properties = assoc
-                        .iter()
-                        .filter(|(_, idx)| *idx != 0)
-                        .map(|(essential, idx)| {
-                            let raw = meta.properties.get(*idx as usize - 1).ok_or_else(|| {
+                    if !dref.self_contained {
+                        // External tiles: the URL template travels as
+                        // written; the tile files are not this file's.
+                        ItemBody::ExternalTiled {
+                            deti: (dref.flags, dref.payload.clone()),
+                        }
+                    } else {
+                        let Some((tile_item_type, assoc)) = tilc.in_file_tiles else {
+                            return Err(HeifError::invalid(format!(
+                                "import: tili item {src}: in-file tiles but the tilC has no tile_item_type"
+                            )));
+                        };
+                        let tile_properties = assoc
+                            .iter()
+                            .filter(|(_, idx)| *idx != 0)
+                            .map(|(essential, idx)| {
+                                let raw = meta.properties.get(*idx as usize - 1).ok_or_else(|| {
                                 HeifError::invalid(format!(
                                     "import: tili item {src}: tipa names property {idx} of {}",
                                     meta.properties.len()
                                 ))
                             })?;
-                            Ok((Property::parse(raw)?, *essential))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    ItemBody::Tiled {
-                        data: file.item_data_owned(src)?,
-                        deti: (dref.flags, dref.payload.clone()),
-                        tile_item_type,
-                        tile_properties,
+                                Ok((Property::parse(raw)?, *essential))
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        ItemBody::Tiled {
+                            data: file.item_data_owned(src)?,
+                            deti: (dref.flags, dref.payload.clone()),
+                            tile_item_type,
+                            tile_properties,
+                        }
                     }
                 }
                 ITEM_TYPE_GRID => ItemBody::Grid(GridDescriptor::parse(&file.item_data(src)?)?),
@@ -1450,6 +1528,8 @@ impl HeifWriter {
         // `deti` data references of tiled items, in mdat order (the
         // entry's 1-based position is the item's data_reference_index).
         let mut dref_entries: Vec<(u32, (u32, Vec<u8>))> = Vec::new();
+        // Items whose data is not in this file (external tiles).
+        let mut external_ids: Vec<u32> = Vec::new();
         for it in order {
             match &it.body {
                 ItemBody::Coded(d) | ItemBody::Metadata(d) => {
@@ -1470,6 +1550,10 @@ impl HeifWriter {
                     mdat_spans.push((it.id, vec![(mdat_len, data.len() as u64)]));
                     mdat_len += data.len() as u64;
                     mdat_pieces.push(data);
+                    dref_entries.push((it.id, deti.clone()));
+                }
+                ItemBody::ExternalTiled { deti } => {
+                    external_ids.push(it.id);
                     dref_entries.push((it.id, deti.clone()));
                 }
                 ItemBody::Grid(g) => {
@@ -1505,7 +1589,7 @@ impl HeifWriter {
             let offset_size = 8u8;
             let length_size = 8u8;
             let mut b = vec![(offset_size << 4) | length_size, 0u8];
-            let count = idat_spans.len() + mdat_spans.len();
+            let count = idat_spans.len() + mdat_spans.len() + external_ids.len();
             if large_ids {
                 b.extend_from_slice(&(count as u32).to_be_bytes());
             } else {
@@ -1524,6 +1608,9 @@ impl HeifWriter {
                     .iter()
                     .map(|(id, o, l)| (*id, 1u8, vec![(*o, *l)])),
             );
+            // One zero-length extent at offset 0 of the referenced
+            // (external) data: extent_count shall be >= 1.
+            entries.extend(external_ids.iter().map(|id| (*id, 0u8, vec![(0, 0)])));
             entries.sort_by_key(|e| e.0);
             for (id, cm, extents) in entries {
                 if large_ids {
@@ -1704,7 +1791,8 @@ impl HeifWriter {
                     tiles.is_empty() || tiles.iter().any(|t| t.is_empty())
                 }
                 ItemBody::Tiled { data, .. } => data.is_empty(),
-                ItemBody::Grid(_)
+                ItemBody::ExternalTiled { .. }
+                | ItemBody::Grid(_)
                 | ItemBody::Overlay(_)
                 | ItemBody::Identity
                 | ItemBody::ColourFormatEnhancement(_) => false,

@@ -81,6 +81,7 @@ pub struct ItemDecoder<'r> {
     reference_white_nits: Option<f64>,
     base_layer_fallback: bool,
     threads: usize,
+    tile_resolver: Option<&'r dyn crate::tiled::ExternalTileResolver>,
 }
 
 impl<'r> ItemDecoder<'r> {
@@ -92,6 +93,7 @@ impl<'r> ItemDecoder<'r> {
             reference_white_nits: None,
             base_layer_fallback: false,
             threads: 1,
+            tile_resolver: None,
         }
     }
 
@@ -103,6 +105,7 @@ impl<'r> ItemDecoder<'r> {
             reference_white_nits: None,
             base_layer_fallback: false,
             threads: 1,
+            tile_resolver: None,
         }
     }
 
@@ -120,6 +123,20 @@ impl<'r> ItemDecoder<'r> {
     /// serial); see [`ItemDecoder::with_execution_context`].
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads.max(1);
+        self
+    }
+
+    /// Resolve the external tiles of `tili` items (HEIF Amd 2:2026
+    /// §6.11.2: one HEIF file per tile, addressed by URL) through
+    /// `resolver`. Without one, such an item is the typed refusal
+    /// [`HeifError::external_tile_unresolved`] naming the first missing
+    /// reference: the decoder never reaches a filesystem or a network
+    /// on its own.
+    pub fn with_tile_resolver(
+        mut self,
+        resolver: &'r dyn crate::tiled::ExternalTileResolver,
+    ) -> Self {
+        self.tile_resolver = Some(resolver);
         self
     }
 
@@ -1115,11 +1132,6 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
                 cfg.extra_dimensions.len()
             )));
         }
-        let Some((tile_type, _)) = &cfg.in_file_tiles else {
-            return Err(HeifError::unsupported(format!(
-                "tili item {id}: tiles stored in external files"
-            )));
-        };
         let (w, h) = node.reconstructed_size()?;
         let (cols, rows) = cfg
             .tile_grid(w, h)
@@ -1154,14 +1166,30 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
             ))
         })?;
         let deti = crate::tiled::DataEntryTiledItem::parse(dref)?;
-        let data = self.file.item_data(id)?;
-        let spans = deti.tile_spans(&data, num_tiles)?;
         let desc = crate::derived::GridDescriptor {
             rows: rows as u16,
             columns: cols as u16,
             output_width: w,
             output_height: h,
         };
+        if let Some(ext) = &deti.external {
+            if deti.input_items != num_tiles {
+                return Err(HeifError::invalid(format!(
+                    "tili item {id}: deti no_of_input_items {} but the tilC / ispe geometry has {num_tiles} tiles",
+                    deti.input_items
+                )));
+            }
+            let handler = meta.handler.as_ref().map(|h| h.handler_type);
+            return self.reconstruct_external_tiles(node, cfg, ext, &desc, num_tiles, handler);
+        }
+        // §6.11.3.2: in-file tiles carry tile_item_type + tipa.
+        let Some((tile_type, _)) = &cfg.in_file_tiles else {
+            return Err(HeifError::invalid(format!(
+                "tili item {id}: in-file tiles but the tilC has no tile_item_type (Amd 2 §6.11.3.2)"
+            )));
+        };
+        let data = self.file.item_data(id)?;
+        let spans = deti.tile_spans(&data, num_tiles)?;
         let mut canvas = GridCanvas::new(&desc);
         // Every tile is "a coded image item of tile_item_type" with the
         // tilC-associated properties.
@@ -1206,6 +1234,93 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         self.run_tile_jobs(jobs, &mut canvas)?;
         for i in empty {
             canvas.place_blank(i)?;
+        }
+        canvas.finish()
+    }
+
+    /// The external tiles of a `tili` item (Amd 2:2026 §6.11.2): each
+    /// tile file fetched through the decoder's
+    /// [`ExternalTileResolver`](crate::tiled::ExternalTileResolver),
+    /// checked ([`crate::tiled::check_external_tile`]: a HEIF file, its
+    /// only image item the tile, no entity grouping, the tiled item's
+    /// `handler_type`), its item of the coding format every tile shares
+    /// (the first tile's `item_type`, §6.11.2) with an output of
+    /// `tile_width × tile_height`, decoded under the tile file's own
+    /// properties and placed row-major; the padding beyond the `ispe`
+    /// is cropped. Plain coded tiles run as independent jobs under the
+    /// thread budget (byte-identical to serial); a tile carrying its
+    /// own transformative properties decodes through its file's graph.
+    /// The tile files decode without the resolver: a tile never
+    /// reaches further files.
+    fn reconstruct_external_tiles(
+        &mut self,
+        node: &ImageNode,
+        cfg: &crate::props::TilC,
+        ext: &crate::tiled::ExternalTiles,
+        desc: &crate::derived::GridDescriptor,
+        num_tiles: u64,
+        handler: Option<crate::boxes::FourCc>,
+    ) -> Result<HeifFrame> {
+        let id = node.item.id;
+        let cols = desc.columns as u32;
+        let Some(resolver) = self.decoder.tile_resolver else {
+            let first = ext.request(id, 0, cols, num_tiles)?;
+            return Err(HeifError::external_tile_unresolved(id, &first.url));
+        };
+        self.count_decode(num_tiles as usize)?;
+        let sub = ItemDecoder {
+            tile_resolver: None,
+            ..self.decoder
+        };
+        let mut canvas = GridCanvas::new(desc);
+        let mut jobs = Vec::new();
+        let mut coding: Option<crate::boxes::FourCc> = None;
+        for i in 0..num_tiles {
+            let req = ext.request(id, i, cols, num_tiles)?;
+            let context = |e: HeifError| -> HeifError {
+                let msg = format!("tili item {id}: external tile {i} ({}): {e}", req.url);
+                match e {
+                    HeifError::Unsupported(_) => HeifError::unsupported(msg),
+                    HeifError::LimitExceeded(_) => HeifError::exhausted(msg),
+                    HeifError::Io(_) => HeifError::io(msg),
+                    _ => HeifError::invalid(msg),
+                }
+            };
+            let bytes = resolver.resolve(&req)?;
+            let tile = HeifFile::from_vec(bytes).map_err(context)?;
+            let tile_id = crate::tiled::check_external_tile(&tile, handler).map_err(context)?;
+            let tnode = build_graph(&tile, tile_id).map_err(context)?;
+            match coding {
+                None => coding = Some(tnode.item.item_type),
+                Some(t) if t != tnode.item.item_type => {
+                    return Err(context(HeifError::invalid(format!(
+                        "item type '{}' differs from tile 0's '{}' (the tiles share one coding format, §6.11.1)",
+                        crate::boxes::fourcc_str(&tnode.item.item_type),
+                        crate::boxes::fourcc_str(&t)
+                    ))));
+                }
+                Some(_) => {}
+            }
+            let size = tnode.output_size().map_err(context)?;
+            if size != (cfg.tile_width, cfg.tile_height) {
+                return Err(context(HeifError::invalid(format!(
+                    "a {}x{} tile for a tilC tile size of {}x{} (§6.11.3.3)",
+                    size.0, size.1, cfg.tile_width, cfg.tile_height
+                ))));
+            }
+            let plain = matches!(tnode.kind, ImageKind::Coded(_))
+                && tnode.alpha.is_none()
+                && tnode.properties.transformative().next().is_none()
+                && tnode.properties.unsupported_essential().is_empty();
+            if plain {
+                jobs.push((i as usize, sub.prepare(&tile, &tnode).map_err(context)?));
+            } else {
+                let img = decode_item(&tile, tile_id, sub).map_err(context)?;
+                canvas.place(i as usize, &img.frame)?;
+            }
+        }
+        if !jobs.is_empty() {
+            self.run_tile_jobs(jobs, &mut canvas)?;
         }
         canvas.finish()
     }

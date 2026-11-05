@@ -1,8 +1,8 @@
 //! `tili` tiled image items (ISO/IEC 23008-12:2025/Amd 2:2026 §6.11):
 //! the writer packs coded tiles behind a `deti` offset table, the reader
 //! composes them (in parallel under a thread budget) and crops the
-//! padding to the `ispe`; empty tiles render neutral; external tiles
-//! and hyperrectangles are typed refusals.
+//! padding to the `ispe`; empty tiles render neutral; hyperrectangles
+//! are typed refusals (external tiles: tests/external_tiles.rs).
 #![cfg(feature = "registry")]
 
 mod common;
@@ -184,19 +184,33 @@ fn tiled_item_edge_cases() {
     let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
     assert_eq!(img.frame, expected);
     assert_eq!(img.frame.format.chroma, Chroma::Yuv420);
-    // External tiles: parse fine, compose refused.
+    // External tiles: parse fine, compose refused without a resolver
+    // (tests/external_tiles.rs composes them), naming the first URL;
+    // a no_of_input_items other than NumTiles is invalid.
     let mut m = f.clone();
     let dref = &mut m.meta.as_mut().unwrap().data_references[0];
     dref.flags |= 1 << 7;
     dref.self_contained = false;
-    let mut payload = vec![0, 0, 0, 1]; // no_of_input_items (32-bit)
+    let mut payload = vec![0, 0, 0, 9]; // no_of_input_items (32-bit)
     payload.push(0); // directory_ID_flag 0
     payload.extend_from_slice(&0u64.to_be_bytes());
     payload.extend_from_slice(b"http://example.invalid/\0Rep\0$tileID$.heif\0");
-    dref.payload = payload;
+    dref.payload = payload.clone();
     let err = decode_primary(&m, ItemDecoder::direct()).unwrap_err();
     assert!(
         matches!(err, oxideav_heif::HeifError::Unsupported(_)),
+        "{err}"
+    );
+    let id = m.primary_item().unwrap().id;
+    assert_eq!(
+        err.external_tile_info(),
+        Some((id, "http://example.invalid/Rep/0.heif".to_string()))
+    );
+    payload[3] = 1;
+    m.meta.as_mut().unwrap().data_references[0].payload = payload;
+    let err = decode_primary(&m, ItemDecoder::direct()).unwrap_err();
+    assert!(
+        matches!(err, oxideav_heif::HeifError::InvalidData(_)),
         "{err}"
     );
     // Tile count mismatch in the writer.

@@ -105,14 +105,15 @@ fn decode_checked_item<D: AsRef<[u8]>>(
     let node = build_graph(file, id)?;
     let (w, h) = node.output_size()?;
     opts.check_dims(w, h)?;
-    let img = decode_item(file, id, item_decoder(opts))?;
+    let img = decode_item(file, id, item_decoder_for(opts))?;
     // A tone-mapped reconstruction / layered output may differ from the
     // announced size (the tmap's own geometry): re-check what came out.
     opts.check_dims(img.frame.width, img.frame.height)?;
     Ok(img)
 }
 
-/// The [`ItemDecoder`] `opts` describe (direct codec factories).
+/// The [`ItemDecoder`] `opts` describe (direct codec factories),
+/// without `opts.tile_resolver` (see [`item_decoder_for`]).
 pub fn item_decoder(opts: &DecodeOptions) -> ItemDecoder<'static> {
     let mut d = ItemDecoder::direct().with_threads(opts.threads.unwrap_or(1));
     if opts.tone_mapped {
@@ -125,6 +126,15 @@ pub fn item_decoder(opts: &DecodeOptions) -> ItemDecoder<'static> {
         d = d.with_reference_white(n);
     }
     d
+}
+
+/// [`item_decoder`] plus the external-tile resolver of `opts`.
+pub fn item_decoder_for(opts: &DecodeOptions) -> ItemDecoder<'_> {
+    let d = item_decoder(opts);
+    match &opts.tile_resolver {
+        Some(r) => d.with_tile_resolver(r.resolver()),
+        None => d,
+    }
 }
 
 /// `strict`: a HEIF-family brand is required, and a MIAF-branded file
