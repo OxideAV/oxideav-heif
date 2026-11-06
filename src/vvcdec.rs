@@ -48,7 +48,7 @@ pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
         cfg,
         tols,
         inner: oxideav_h266::stream::StreamDecoder::new(),
-        out: std::collections::VecDeque::new(),
+        out: crate::stream_params::ShapedQueue::new(),
         flushed: false,
     }))
 }
@@ -59,7 +59,9 @@ pub struct VvcItemDecoder {
     cfg: Option<VvcConfig>,
     tols: Option<u16>,
     inner: oxideav_h266::stream::StreamDecoder,
-    out: std::collections::VecDeque<oxideav_core::VideoFrame>,
+    /// Output pictures with their shapes (the `Frame::StreamParams`
+    /// events of oxideav-core 0.1.43 for a mid-stream change).
+    out: crate::stream_params::ShapedQueue,
     flushed: bool,
 }
 
@@ -102,18 +104,27 @@ impl Decoder for VvcItemDecoder {
                 continue;
             }
             let frame = frame_of(&p).map_err(|e| CoreError::invalid(format!("h266: {e}")))?;
-            let (mut vf, _) = frame
+            let (mut vf, pixel_format) = frame
                 .to_core()
                 .map_err(|e| CoreError::invalid(format!("h266: {e}")))?;
             vf.pts = packet.pts;
-            self.out.push_back(vf);
+            let shape = crate::stream_params::Shape {
+                width: frame.width,
+                height: frame.height,
+                pixel_format,
+                color_signal: oxideav_core::ColorSignal::default(),
+            };
+            self.out.push(vf, shape);
         }
         Ok(())
     }
 
+    /// The next output picture, preceded by one `Frame::StreamParams`
+    /// event when its cropped size or layout differs from the previous
+    /// picture's (a new SPS mid-stream).
     fn receive_frame(&mut self) -> Result<Frame> {
-        match self.out.pop_front() {
-            Some(v) => Ok(Frame::Video(v)),
+        match self.out.pop(&self.codec_id) {
+            Some(f) => Ok(f),
             None if self.flushed => Err(CoreError::Eof),
             None => Err(CoreError::NeedMore),
         }
@@ -122,6 +133,31 @@ impl Decoder for VvcItemDecoder {
     fn flush(&mut self) -> Result<()> {
         self.flushed = true;
         Ok(())
+    }
+
+    /// Drops the queued pictures and the stream decoder's state (the
+    /// `vvcC` parameter sets are prepended to every access unit, so
+    /// the next one decodes on its own); the last returned shape stays
+    /// the reference for the next event.
+    fn reset(&mut self) -> Result<()> {
+        self.out.clear();
+        self.inner = oxideav_h266::stream::StreamDecoder::new();
+        self.flushed = false;
+        Ok(())
+    }
+
+    /// The conformance-cropped size and layout of the picture most
+    /// recently returned (before the first: of the first decoded one).
+    fn output_params(&self) -> Option<CodecParameters> {
+        self.out.output_params(&self.codec_id)
+    }
+
+    fn output_pixel_format(&self) -> Option<oxideav_core::PixelFormat> {
+        self.output_params().and_then(|p| p.pixel_format)
+    }
+
+    fn output_params_generation(&self) -> u64 {
+        self.out.generation()
     }
 }
 

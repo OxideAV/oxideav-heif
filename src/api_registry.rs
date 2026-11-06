@@ -21,7 +21,10 @@ use crate::api::{
     RgbaImage, sequence_tracks,
 };
 use crate::compose::{apply_clap, attach_alpha};
-use crate::decode::{DecodedImage, ItemDecoder, ToneMapOutput, decode_item, frame_from_planes};
+use crate::decode::{
+    DecodedImage, ItemDecoder, StreamShape, ToneMapOutput, adopt_stream_params, decode_item,
+    frame_from_planes,
+};
 use crate::derived::build_graph;
 use crate::encode::{
     EncodeOptions, SequenceInput, StillCodec, coded_depth, encode_sequence, encode_still_into,
@@ -312,20 +315,9 @@ fn decode_samples<D: AsRef<[u8]>>(
     let mut dec = item_decoder(opts).instantiate(&params)?;
     let time_base = TimeBase::new(1, track.timescale.max(1) as i64);
     let mut out: Vec<HeifFrame> = Vec::with_capacity(track.samples.len());
-    let drain = |dec: &mut Box<dyn oxideav_core::Decoder>, out: &mut Vec<HeifFrame>| loop {
-        match dec.receive_frame() {
-            Ok(CoreFrame::Video(v)) => {
-                out.push(frame_from_planes(v, layout, Some((w, h)), track.track_id)?)
-            }
-            Ok(_) => {}
-            Err(CoreError::NeedMore) | Err(CoreError::Eof) => return Ok::<(), HeifError>(()),
-            Err(e) => {
-                return Err(HeifError::invalid(format!(
-                    "track {}: decode failed: {e}",
-                    track.track_id
-                )));
-            }
-        }
+    let mut shape: StreamShape = (layout, Some((w, h)));
+    let mut drain = |dec: &mut Box<dyn oxideav_core::Decoder>, out: &mut Vec<HeifFrame>| {
+        drain_track(dec.as_mut(), &mut shape, opts, track.track_id, out)
     };
     for (i, s) in track.samples.iter().enumerate() {
         let data = sample_bytes(file, s)?.to_vec();
@@ -352,6 +344,38 @@ fn decode_samples<D: AsRef<[u8]>>(
     by_pts.sort_by_key(|(pts, _)| *pts);
     let durations = by_pts.into_iter().map(|(_, d)| d).collect();
     Ok((out, durations, layout))
+}
+
+/// Pull every picture `dec` has ready into `out`, read at `shape` —
+/// the sample entry's layout and size until the codec announces a
+/// mid-stream change with a `Frame::StreamParams` event (oxideav-core
+/// 0.1.43), which re-shapes the pictures after it (its size checked
+/// against the decode limits) and is never a picture itself.
+fn drain_track(
+    dec: &mut dyn oxideav_core::Decoder,
+    shape: &mut StreamShape,
+    opts: &DecodeOptions,
+    track_id: u32,
+    out: &mut Vec<HeifFrame>,
+) -> Result<()> {
+    loop {
+        match dec.receive_frame() {
+            Ok(CoreFrame::Video(v)) => out.push(frame_from_planes(v, shape.0, shape.1, track_id)?),
+            Ok(CoreFrame::StreamParams(p)) => {
+                adopt_stream_params(&p, shape);
+                if let Some((w, h)) = shape.1 {
+                    opts.check_dims(w, h)?;
+                }
+            }
+            Ok(_) => {}
+            Err(CoreError::NeedMore) | Err(CoreError::Eof) => return Ok(()),
+            Err(e) => {
+                return Err(HeifError::invalid(format!(
+                    "track {track_id}: decode failed: {e}"
+                )));
+            }
+        }
+    }
 }
 
 /// The frames of one image-sequence track (its alpha track composed
@@ -1194,6 +1218,76 @@ impl From<HeifImage> for oxideav_core::VideoFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A codec that replays a scripted frame list (sequence-track
+    /// consumer test).
+    struct Replay(std::collections::VecDeque<CoreFrame>, CodecId);
+
+    impl oxideav_core::Decoder for Replay {
+        fn codec_id(&self) -> &CodecId {
+            &self.1
+        }
+        fn send_packet(&mut self, _: &Packet) -> oxideav_core::Result<()> {
+            Ok(())
+        }
+        fn receive_frame(&mut self) -> oxideav_core::Result<CoreFrame> {
+            self.0.pop_front().ok_or(CoreError::Eof)
+        }
+        fn flush(&mut self) -> oxideav_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn flat(w: u32, h: u32, fmt: HeifPixelFormat, v: u16) -> oxideav_core::VideoFrame {
+        let (vf, _) = HeifFrame::filled(w, h, fmt, v).unwrap().to_core().unwrap();
+        vf.with_layer(oxideav_core::LayerIdentity::new(0).with_access_unit(0))
+    }
+
+    /// A sequence track whose codec switches shape mid-stream: the
+    /// `Frame::StreamParams` event re-shapes the pictures after it (the
+    /// sample entry's layout / size before), is never a picture, and
+    /// the layer side channel never an image plane.
+    #[test]
+    fn track_drain_follows_the_codec_shape_events() {
+        use crate::image::Chroma;
+        let yuv = HeifPixelFormat::new(Chroma::Yuv420, 8, false).unwrap();
+        let grey10 = HeifPixelFormat::new(Chroma::Mono, 10, false).unwrap();
+        let id = CodecId::new("h265");
+        let mut event = CodecParameters::video(id.clone());
+        event.width = Some(8);
+        event.height = Some(4);
+        event.pixel_format = Some(oxideav_core::PixelFormat::Gray10Le);
+        let mut dec = Replay(
+            [
+                CoreFrame::Video(flat(16, 8, yuv, 100)),
+                CoreFrame::StreamParams(Box::new(event.clone())),
+                CoreFrame::Video(flat(8, 4, grey10, 700)),
+                CoreFrame::Video(flat(8, 4, grey10, 701)),
+            ]
+            .into(),
+            id.clone(),
+        );
+        let mut shape: StreamShape = (yuv, Some((16, 8)));
+        let mut out = Vec::new();
+        drain_track(&mut dec, &mut shape, &DecodeOptions::default(), 1, &mut out).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0], HeifFrame::filled(16, 8, yuv, 100).unwrap());
+        assert_eq!(out[1], HeifFrame::filled(8, 4, grey10, 700).unwrap());
+        assert_eq!(out[2], HeifFrame::filled(8, 4, grey10, 701).unwrap());
+        assert_eq!(shape, (grey10, Some((8, 4))));
+        // An announced size over the decode limits is refused.
+        let mut dec = Replay(
+            [
+                CoreFrame::Video(flat(16, 8, yuv, 1)),
+                CoreFrame::StreamParams(Box::new(event)),
+            ]
+            .into(),
+            id,
+        );
+        let mut shape: StreamShape = (yuv, Some((16, 8)));
+        let tight = DecodeOptions::default().with_max_width(Some(4));
+        assert!(drain_track(&mut dec, &mut shape, &tight, 1, &mut Vec::new()).is_err());
+    }
 
     #[test]
     fn effective_colr_follows_the_framework_rule() {

@@ -118,6 +118,9 @@ fn probe_open_and_decode_every_bundle_through_the_registry() {
             vdec.flush().unwrap();
             let mut frames = 0;
             while let Ok(f) = vdec.receive_frame() {
+                if f.is_stream_params() {
+                    continue;
+                }
                 assert!(matches!(f, Frame::Video(_)));
                 frames += 1;
             }

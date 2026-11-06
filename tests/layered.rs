@@ -10,7 +10,7 @@ mod common;
 
 use std::io::Cursor;
 
-use oxideav_core::{Frame, RuntimeContext};
+use oxideav_core::RuntimeContext;
 use oxideav_heif::decode::{ItemDecoder, decode_item, decode_primary};
 use oxideav_heif::lhvc::{
     LayerDependency, LhevcConfig, OperatingPoint, OperatingPointLayer, OperatingPointPtl,
@@ -235,10 +235,40 @@ fn two_output_layer_item_yields_both_views() {
     let mut dec = ctx.codecs.first_decoder(&still.params).unwrap();
     dec.send_packet(&pkt).unwrap();
     let mut layers = Vec::new();
-    while let Ok(Frame::Video(v)) = dec.receive_frame() {
+    while let Some(v) = common::stub::next_video(&mut *dec) {
         layers.push(v.layer().map(|l| l.layer_id));
     }
     assert_eq!(layers, vec![Some(0), Some(1)]);
+}
+
+/// A multi-layer codec announcing a later output layer of another
+/// shape with `Frame::StreamParams` (oxideav-core 0.1.43): through a
+/// caller-supplied registry holding a stub that emits the base layer at
+/// the item's size, an event, then the second output layer at half the
+/// size (each tagged with its layer identity), the item yields both
+/// layers, each at its own announced size, with only the image planes.
+#[test]
+fn output_layer_of_another_shape_follows_the_codec_event() {
+    let (hvcc, lhvc, au) = source();
+    let mut w = HeifWriter::new();
+    let id = w.add_coded_item(ITEM_TYPE_LHV1, au, lhv1_props(&hvcc, &lhvc, None));
+    w.set_primary(id);
+    let bytes = w.write_to_vec().unwrap();
+    let f = HeifFile::parse(&bytes).unwrap();
+    let node = oxideav_heif::derived::build_primary_graph(&f).unwrap();
+    let reg = common::stub::registry(true);
+    let layers = ItemDecoder::with_registry(&reg)
+        .decode_coded_layers(&f, &node)
+        .unwrap();
+    assert_eq!(layers.len(), 2);
+    assert_eq!(layers[0].layer_id, 0);
+    assert_eq!(layers[1].layer_id, 1);
+    assert_eq!((layers[0].frame.width, layers[0].frame.height), (960, 960));
+    assert_eq!((layers[1].frame.width, layers[1].frame.height), (480, 480));
+    for l in &layers {
+        assert_eq!(l.frame.planes.len(), 3, "layer {}", l.layer_id);
+        assert!(common::stub::is_flat(&l.frame), "layer {}", l.layer_id);
+    }
 }
 
 /// The stereo pair through the framework: the still stream announces
@@ -268,7 +298,7 @@ fn stereo_pair_streams_both_views_through_the_framework() {
     let mut dec = ctx.codecs.first_decoder(&still.params).unwrap();
     dec.send_packet(&pkt).unwrap();
     let mut views = Vec::new();
-    while let Ok(Frame::Video(v)) = dec.receive_frame() {
+    while let Some(v) = common::stub::next_video(&mut *dec) {
         let tag = v.layer().unwrap();
         let mut all = Vec::new();
         for p in v.image_planes() {

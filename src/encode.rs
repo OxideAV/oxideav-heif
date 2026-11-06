@@ -4423,7 +4423,17 @@ impl Encoder for HeifEncoder {
         }
     }
 
+    /// Codes one still per video frame at the configured geometry and
+    /// pixel format. A `Frame::StreamParams` event (a mid-stream shape
+    /// change upstream, oxideav-core 0.1.43) is refused with
+    /// `Error::Unsupported`: the encoder's `output_params` describe one
+    /// shape for the stream's lifetime.
     fn send_frame(&mut self, frame: &Frame) -> CoreResult<()> {
+        if frame.is_stream_params() {
+            return Err(CoreError::unsupported(
+                "heif: the still encoder cannot re-configure for a mid-stream shape change",
+            ));
+        }
         let Frame::Video(vf) = frame else {
             return Err(CoreError::invalid("heif: only video frames can be encoded"));
         };

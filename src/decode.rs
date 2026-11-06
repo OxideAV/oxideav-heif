@@ -496,14 +496,21 @@ impl CodedJob {
         dec.flush()
             .map_err(|e| HeifError::invalid(format!("item {id}: flush: {e}")))?;
         let want = self.layers.as_ref().map(Vec::len).unwrap_or(1);
-        let mut frames: Vec<oxideav_core::VideoFrame> = Vec::with_capacity(want);
+        // Each picture with the shape it is read at: the item's own
+        // (layout, ispe) until the codec announces a mid-stream change
+        // with a `Frame::StreamParams` event (oxideav-core 0.1.43; a
+        // later output layer of a different size or layout), the
+        // announced one from then on. Never a picture itself.
+        let mut shape = (self.layout, self.ispe);
+        let mut frames: Vec<(oxideav_core::VideoFrame, StreamShape)> = Vec::with_capacity(want);
         loop {
             match dec.receive_frame() {
                 Ok(Frame::Video(v)) => {
                     if frames.len() < want {
-                        frames.push(v);
+                        frames.push((v, shape));
                     }
                 }
+                Ok(Frame::StreamParams(p)) => adopt_stream_params(&p, &mut shape),
                 Ok(_) => {}
                 Err(CoreError::NeedMore) | Err(CoreError::Eof) => break,
                 Err(e) => return Err(HeifError::invalid(format!("item {id}: decode failed: {e}"))),
@@ -526,7 +533,7 @@ impl CodedJob {
         frames
             .into_iter()
             .zip(layers)
-            .map(|(vf, layer_id)| {
+            .map(|((vf, (layout, ispe)), layer_id)| {
                 // A layer's own picture tags its layer when the codec
                 // says so; otherwise the emission order (increasing
                 // nuh_layer_id) is the oinf output-layer order.
@@ -536,10 +543,33 @@ impl CodedJob {
                     .unwrap_or(layer_id);
                 Ok(LayerFrame {
                     layer_id,
-                    frame: frame_from_planes(vf, self.layout, self.ispe, id)?,
+                    frame: frame_from_planes(vf, layout, ispe, id)?,
                 })
             })
             .collect()
+    }
+}
+
+/// The layout and output size decoded pictures are read at
+/// ([`frame_from_planes`]).
+pub(crate) type StreamShape = (HeifPixelFormat, Option<(u32, u32)>);
+
+/// Fold a codec's `Frame::StreamParams` event (oxideav-core 0.1.43: the
+/// shape of the pictures that follow) into `shape`: the announced
+/// width / height and — when it is one this crate reads — pixel
+/// layout replace the current ones; fields the event leaves unset keep
+/// theirs.
+pub(crate) fn adopt_stream_params(p: &CodecParameters, shape: &mut StreamShape) {
+    if let (Some(w), Some(h)) = (p.width, p.height)
+        && w > 0
+        && h > 0
+    {
+        shape.1 = Some((w, h));
+    }
+    if let Some(layout) = p.pixel_format.and_then(|pf| {
+        HeifPixelFormat::from_core(pf).or_else(|| HeifPixelFormat::from_core_gbr(pf))
+    }) {
+        shape.0 = layout;
     }
 }
 

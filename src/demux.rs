@@ -35,7 +35,6 @@
 //!   / `dts` / `duration` in the media time base and the `stss` sync
 //!   flags; `seek_to` lands on sync samples.
 
-use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
 
 use oxideav_core::{
@@ -1396,7 +1395,9 @@ impl oxideav_core::CodecOptionsStruct for HeifDecoderOptions {
 /// = the primary item's output image.
 pub struct HeifCodec {
     codec_id: CodecId,
-    queue: VecDeque<Frame>,
+    /// Decoded pictures with their shapes; inserts the
+    /// `Frame::StreamParams` events (oxideav-core 0.1.43).
+    queue: crate::stream_params::ShapedQueue,
     flushed: bool,
     /// The most recently decoded image's descriptive side (colour,
     /// metadata) for callers holding the concrete type.
@@ -1414,7 +1415,7 @@ impl HeifCodec {
     pub fn new(codec_id: CodecId) -> Self {
         Self {
             codec_id,
-            queue: VecDeque::new(),
+            queue: crate::stream_params::ShapedQueue::new(),
             flushed: false,
             last: None,
             exec: oxideav_core::ExecutionContext::serial(),
@@ -1472,6 +1473,11 @@ impl Decoder for HeifCodec {
                 None,
             )
         };
+        // Each picture with its shape — geometry, the label the frame's
+        // planes carry and its colour signal — so a picture whose shape
+        // differs from the one before it is announced by a
+        // `Frame::StreamParams` event (files / items of different shapes
+        // decoded in turn, layers of different sizes).
         let signal_frame =
             |f: &crate::HeifFrame, nclx: &crate::props::Colr, metadata: crate::api::Metadata| {
                 let image = crate::api::HeifImage::from_frame(
@@ -1479,16 +1485,26 @@ impl Decoder for HeifCodec {
                     crate::api::ColorInfo::from_colr(nclx),
                     metadata,
                 );
-                let (mut vf, _pf) = image.into_video_frame();
+                let (width, height) = (image.width, image.height);
+                let (mut vf, pixel_format) = image.into_video_frame();
                 vf.pts = packet.pts;
-                Ok::<_, CoreError>(vf)
+                let shape = crate::stream_params::Shape {
+                    width,
+                    height,
+                    pixel_format,
+                    color_signal: vf.color_signal().unwrap_or_default(),
+                };
+                Ok::<_, CoreError>((vf, shape))
             };
+        // Decode the whole packet before queueing anything, so a refused
+        // packet leaves the queue (and the announced shape) untouched.
+        let mut out = Vec::new();
         if !img.layers.is_empty() {
             // A layered item without lsel: every output layer, tagged.
             for l in &img.layers {
-                let vf = signal_frame(&l.frame, &img.nclx, metadata_of(&img))?
-                    .with_layer(oxideav_core::LayerIdentity::new(l.layer_id as u16));
-                self.queue.push_back(Frame::Video(vf));
+                let (vf, shape) = signal_frame(&l.frame, &img.nclx, metadata_of(&img))?;
+                let vf = vf.with_layer(oxideav_core::LayerIdentity::new(l.layer_id as u16));
+                out.push((vf, shape));
             }
         } else if let Some((left, right)) = stereo_pair_of(&file, img.item_id) {
             // HEIF §6.8.5 'ster': the primary is one view of a stereo
@@ -1505,24 +1521,51 @@ impl Decoder for HeifCodec {
             };
             for (view, image) in [(0u16, first), (1u16, second)] {
                 let layer = view_layer_id(&file, image.item_id).unwrap_or(view);
-                let vf = signal_frame(&image.frame, &image.nclx, metadata_of(image))?
-                    .with_layer(oxideav_core::LayerIdentity::new(layer).with_view_id(view));
-                self.queue.push_back(Frame::Video(vf));
+                let (vf, shape) = signal_frame(&image.frame, &image.nclx, metadata_of(image))?;
+                let vf = vf.with_layer(oxideav_core::LayerIdentity::new(layer).with_view_id(view));
+                out.push((vf, shape));
             }
         } else {
-            let vf = signal_frame(&img.frame, &img.nclx, metadata_of(&img))?;
-            self.queue.push_back(Frame::Video(vf));
+            out.push(signal_frame(&img.frame, &img.nclx, metadata_of(&img))?);
+        }
+        for (vf, shape) in out {
+            self.queue.push(vf, shape);
         }
         self.last = Some(img);
         Ok(())
     }
 
+    /// The next picture — or, immediately before the first picture
+    /// whose shape (width, height, pixel format, colour signal)
+    /// differs from the previous one's, a `Frame::StreamParams` event
+    /// carrying the new [`Decoder::output_params`] (oxideav-core
+    /// 0.1.43). No event for the first shape or a constant stream.
     fn receive_frame(&mut self) -> CoreResult<Frame> {
-        match self.queue.pop_front() {
+        match self.queue.pop(&self.codec_id) {
             Some(f) => Ok(f),
             None if self.flushed => Err(CoreError::Eof),
             None => Err(CoreError::NeedMore),
         }
+    }
+
+    /// The shape of the picture most recently returned (before the
+    /// first one: of the first decoded picture, once a packet was
+    /// sent): width / height, the pixel format the frame's planes are
+    /// labelled with (planar RGB for identity-matrix items, the
+    /// full-range `YuvJ*` label for 8-bit full-range YCbCr) and the
+    /// item's colour signal. `None` before the first packet.
+    fn output_params(&self) -> Option<CodecParameters> {
+        self.queue.output_params(&self.codec_id)
+    }
+
+    fn output_pixel_format(&self) -> Option<PixelFormat> {
+        self.output_params().and_then(|p| p.pixel_format)
+    }
+
+    /// Bumped once per mid-stream shape change, together with the
+    /// `Frame::StreamParams` event announcing it.
+    fn output_params_generation(&self) -> u64 {
+        self.queue.generation()
     }
 
     fn flush(&mut self) -> CoreResult<()> {
@@ -1530,6 +1573,9 @@ impl Decoder for HeifCodec {
         Ok(())
     }
 
+    /// Drops the queued pictures; the shape of the last picture
+    /// returned stays the reference, so a different shape after the
+    /// seek is announced by an event.
     fn reset(&mut self) -> CoreResult<()> {
         self.queue.clear();
         self.flushed = false;

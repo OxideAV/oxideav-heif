@@ -278,7 +278,7 @@ fn apple_alpha_sequence_composes_alpha_through_the_demuxer() {
 fn sequence_level_metadata_round_trips() {
     use std::io::Cursor;
 
-    use oxideav_core::{BlobKind, Error, Frame, RuntimeContext};
+    use oxideav_core::{BlobKind, Error, RuntimeContext};
     use oxideav_heif::encode::encode_hevc_picture;
     use oxideav_heif::image::Chroma;
     use oxideav_heif::props::{Colr, Ispe, Pixi, Property};
@@ -500,7 +500,7 @@ fn sequence_level_metadata_round_trips() {
     assert_eq!(xmp_packets[1].duration, Some(2));
     dec.flush().unwrap();
     let mut i = 0;
-    while let Ok(Frame::Video(v)) = dec.receive_frame() {
+    while let Some(v) = common::stub::next_video(&mut *dec) {
         let blobs = v.blobs();
         let exif = blobs
             .iter()

@@ -137,6 +137,23 @@ takes the geometry and label directly); the
 8-bit YCbCr layouts carrying the framework's full-range `YuvJ*` label
 when `color.range` is full.
 
+**Stream shape (r482, oxideav-core 0.1.43).** The `"heif"` decoder
+answers `output_params()` — width / height, the frame label above and
+the colour signal of the picture most recently returned (before the
+first one: of the first decoded picture) — and, when a picture's shape
+differs from the previous one's (files or items of different geometry,
+layout or colour decoded in turn, output layers of different sizes),
+returns one `Frame::StreamParams` event immediately before it, with
+`output_params()` and `output_params_generation()` already moved. No
+event for the first shape or a constant stream; `reset()` keeps the
+last returned shape as the reference. Consumers that do not care skip
+the event (`Frame::is_stream_params`). In the other direction every
+codec this crate drives may return the event: item, tile, layer and
+sequence decodes read the pictures after it at the announced size and
+layout, and only a frame's image planes (`image_planes()`) — never its
+layer-identity / colour-signal side channels — become pixels. The
+`"heif"` encoder refuses the event (`Unsupported`).
+
 ## Framework surface (r475)
 
 The path `oxideav-image` / `oxideav-io` / `oxideav-cli-convert` take —
@@ -185,8 +202,8 @@ typed refusals.
 registry decoders against `decode_all` / `info` over every HEIF-family
 file the checkout sees — 57 vendored fixtures, the 14 staged corpus
 bundles, the 2 device samples, the 66 MPEG / Nokia conformance files
-and the 13 encrypted ones: **152 files, 128 decode on both paths, 24
-refused on both** (the `cenc` items, the predictive `pred` items C043 /
+and the 13 encrypted ones: **152 files, 132 decode on both paths, 20
+refused on both** (r482 count) (the `cenc` items, the predictive `pred` items C043 /
 C044 and the L-HEVC enhancement layers this crate does not decode),
 0 disagreements — every contract image item is a packet of a still
 stream with byte-identical pixels, label, colour signal and metadata

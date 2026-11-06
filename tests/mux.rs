@@ -3,6 +3,8 @@
 //! the same frames.
 #![cfg(feature = "registry")]
 
+mod common;
+
 use std::io::Cursor;
 
 use oxideav_heif::encode::EncodeOptions;
@@ -162,7 +164,7 @@ fn sequence_mux_demux_round_trip_is_exact() {
     assert_eq!(got, 3);
     dec.flush().unwrap();
     let mut i = 0;
-    while let Ok(Frame::Video(v)) = dec.receive_frame() {
+    while let Some(v) = common::stub::next_video(&mut *dec) {
         let back = HeifFrame::from_core(&v, 32, 32, PixelFormat::Yuv420P).unwrap();
         assert_eq!(back, frames[i], "frame {i}");
         i += 1;
@@ -749,7 +751,7 @@ fn still_burst_merges_into_one_collection_with_per_item_metadata() {
             Err(e) => panic!("{e}"),
         };
         dec.send_packet(&pkt).unwrap();
-        while let Ok(Frame::Video(vf)) = dec.receive_frame() {
+        while let Some(vf) = common::stub::next_video(&mut *dec) {
             assert_eq!(
                 vf.blob(&BlobKind::EXIF).map(|b| b.data),
                 Some(exif_of(n as u8)),
@@ -964,7 +966,7 @@ fn metadata_tracks_round_trip_through_the_muxer() {
     assert_eq!(xmps, vec![(xmp_of(0), Some(1)), (xmp_of(1), Some(2))]);
     dec.flush().unwrap();
     let mut i = 0;
-    while let Ok(Frame::Video(v)) = dec.receive_frame() {
+    while let Some(v) = common::stub::next_video(&mut *dec) {
         let blobs = v.blobs();
         assert_eq!(
             blobs

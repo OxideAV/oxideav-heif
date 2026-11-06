@@ -17,6 +17,8 @@
 
 pub mod png;
 pub mod pngw;
+#[cfg(feature = "registry")]
+pub mod stub;
 
 use std::path::{Path, PathBuf};
 

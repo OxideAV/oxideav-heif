@@ -100,6 +100,8 @@ pub mod encode;
 pub mod mux;
 #[cfg(feature = "registry")]
 pub mod registry;
+#[cfg(feature = "registry")]
+mod stream_params;
 
 pub use api::{
     ColorInfo, ColorRange, DecodeOptions, Frame, HeifImage, ImageInfo, Metadata, Palette,
