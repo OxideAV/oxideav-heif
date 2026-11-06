@@ -2024,9 +2024,11 @@ pub struct SequenceWriter {
     pub entry_type: FourCc,
     /// Decoder configuration property (`HvcC` / `Av1C`) for the entry.
     pub config: Property,
-    /// Coded picture size.
+    /// Coded picture size (the sample entry's `width`; the `tkhd`
+    /// carries the presentation size, narrowed by an entry `clap` /
+    /// scaled by an entry `pasp`).
     pub width: u16,
-    /// Coded picture size.
+    /// Coded picture size (the sample entry's `height`).
     pub height: u16,
     /// Extra sample-entry children (`colr`, `clap`, `pasp`, …).
     pub entry_properties: Vec<Property>,
@@ -2708,6 +2710,43 @@ fn looping_boxes(looping: Option<crate::sequence::LoopBehaviour>, total: u64) ->
     }
 }
 
+/// The `tkhd` `width` / `height` (16.16 fixed point) of a visual
+/// track whose sample entry codes `width × height` pixels: the track's
+/// visual presentation size (ISO/IEC 14496-12 §8.3.2.3 — "need not be
+/// the same as the pixel dimensions of the images, which is documented
+/// in the sample description"). The entry's `clap` (§12.1.4) narrows
+/// the coded picture to its clean aperture — a coded size padded to the
+/// codec's block alignment presents at the visible size — and a
+/// non-square `pasp` scales the horizontal dimension (§12.1.4.1 NOTE:
+/// "normally, the horizontal dimension of the video is scaled"). The
+/// fractions keep their 16.16 precision; a degenerate (zero
+/// denominator) box is ignored.
+pub(crate) fn presentation_size(width: u16, height: u16, entry: &[Property]) -> (u32, u32) {
+    let fixed = |n: u32, d: u32| -> Option<u64> { (d != 0).then(|| ((n as u64) << 16) / d as u64) };
+    let mut w = (width as u64) << 16;
+    let mut h = (height as u64) << 16;
+    for p in entry {
+        if let Property::Clap(c) = p
+            && let (Some(cw), Some(ch)) =
+                (fixed(c.width_n, c.width_d), fixed(c.height_n, c.height_d))
+        {
+            w = cw;
+            h = ch;
+        }
+    }
+    for p in entry {
+        if let Property::Pasp(a) = p
+            && a.h_spacing != 0
+            && a.v_spacing != 0
+            && a.h_spacing != a.v_spacing
+        {
+            w = w * a.h_spacing as u64 / a.v_spacing as u64;
+        }
+    }
+    let clamp = |v: u64| v.min(u32::MAX as u64) as u32;
+    (clamp(w), clamp(h))
+}
+
 /// Serialize a `trak` whose single chunk starts at `chunk_offset`.
 fn trak_box(t: &TrackSpec<'_>, ts: u32, chunk_offset: u64) -> Vec<u8> {
     let total: u64 = t.samples.iter().map(|s| s.duration as u64).sum();
@@ -2722,8 +2761,9 @@ fn trak_box(t: &TrackSpec<'_>, ts: u32, chunk_offset: u64) -> Vec<u8> {
         for m in [0x10000u32, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000] {
             b.extend_from_slice(&m.to_be_bytes());
         }
-        b.extend_from_slice(&((t.width as u32) << 16).to_be_bytes());
-        b.extend_from_slice(&((t.height as u32) << 16).to_be_bytes());
+        let (pw, ph) = presentation_size(t.width, t.height, t.entry_properties);
+        b.extend_from_slice(&pw.to_be_bytes());
+        b.extend_from_slice(&ph.to_be_bytes());
         full_boxed(b"tkhd", 0, t.tkhd_flags, &b)
     };
     let tref = match t.tref_auxl {
@@ -2998,6 +3038,43 @@ mod tests {
     fn hvcc() -> HevcConfig {
         let raw = crate::hvcc::tests::sample_record();
         HevcConfig::parse(&raw).unwrap()
+    }
+
+    #[test]
+    fn presentation_size_follows_clap_and_pasp() {
+        use crate::props::{Clap, Pasp};
+        // No clap / pasp: the coded size.
+        assert_eq!(presentation_size(64, 48, &[]), (64 << 16, 48 << 16));
+        // An integer clean aperture over a padded picture.
+        let crop = Clap::new(33, 1, 17, 1, -31, 2, -15, 2);
+        assert_eq!(
+            presentation_size(64, 32, &[Property::Clap(crop)]),
+            (33 << 16, 17 << 16)
+        );
+        // Fractional apertures keep their 16.16 precision.
+        let half = Clap::new(67, 2, 35, 2, 0, 1, 0, 1);
+        assert_eq!(
+            presentation_size(64, 32, &[Property::Clap(half)]),
+            ((67 << 16) / 2, (35 << 16) / 2)
+        );
+        // A non-square pixel scales the horizontal dimension after the
+        // aperture; a square one changes nothing.
+        let wide = [Property::Pasp(Pasp::new(4, 3)), Property::Clap(crop)];
+        assert_eq!(presentation_size(64, 32, &wide), ((44 << 16), 17 << 16));
+        assert_eq!(
+            presentation_size(64, 32, &[Property::Pasp(Pasp::new(5, 5))]),
+            (64 << 16, 32 << 16)
+        );
+        // Degenerate boxes are ignored.
+        let zero = Clap::new(33, 0, 17, 1, 0, 1, 0, 1);
+        assert_eq!(
+            presentation_size(
+                64,
+                32,
+                &[Property::Clap(zero), Property::Pasp(Pasp::new(0, 1))]
+            ),
+            (64 << 16, 32 << 16)
+        );
     }
 
     fn std_props(w: u32, h: u32) -> Vec<(Property, bool)> {
