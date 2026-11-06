@@ -77,11 +77,44 @@ fn written_invariants(bytes: &[u8]) -> HeifFile<Vec<u8>> {
         }
     }
     for loc in &meta.locations {
+        if is_external_tile_reference(meta, loc) {
+            continue;
+        }
         for e in &loc.extents {
             assert_ne!(e.length, 0, "item {}: zero-length extent", loc.item_id);
         }
     }
     file
+}
+
+/// The one shape exempt from the no-zero-length rule: a `tili` item
+/// whose tiles are external files (HEIF Amd 2:2026 §6.11.2,
+/// `external_tiles_urls = 1`) has no data in the file (§6.11.4 defines
+/// a payload only for in-file tiles), yet its `iloc` entry must carry
+/// an extent (ISO/IEC 14496-12 §8.11.3.3: `extent_count` 1 or greater)
+/// to name the `deti` through `data_reference_index` — the writer emits
+/// exactly one extent at offset 0 of length 0 (§8.11.3.2.4.3 1c: the
+/// whole referenced resource). Recognised from the parsed file — the
+/// item type, the construction method, the `dref` entry the item
+/// names and the extent shape — never by item id. Pending the
+/// docs-gap ruling on how such an item's `iloc` entry is meant to look.
+fn is_external_tile_reference(
+    meta: &oxideav_heif::meta::Meta,
+    loc: &oxideav_heif::meta::ItemLocation,
+) -> bool {
+    let tili = meta
+        .item(loc.item_id)
+        .is_some_and(|i| i.item_type == *b"tili");
+    let external = (loc.data_reference_index as usize)
+        .checked_sub(1)
+        .and_then(|i| meta.data_references.get(i))
+        .and_then(|d| oxideav_heif::tiled::DataEntryTiledItem::parse(d).ok())
+        .is_some_and(|d| d.external.is_some());
+    tili && external
+        && loc.construction_method == 0
+        && loc.extents.len() == 1
+        && loc.extents[0].offset == 0
+        && loc.extents[0].length == 0
 }
 
 /// Re-mux `bytes` and compare the primaries when the source decodes.

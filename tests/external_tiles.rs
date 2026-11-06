@@ -406,6 +406,48 @@ fn external_tiles_remux_and_writer_refusals() {
     );
 }
 
+/// The `iloc` shape of an external-tile item, written and re-muxed:
+/// exactly one extent at offset 0 of length 0, construction method 0,
+/// `data_reference_index` naming the external `deti` (ISO/IEC 14496-12
+/// §8.11.3.3 requires `extent_count` ≥ 1; HEIF Amd 2:2026 §6.11.4
+/// defines no in-file payload for external tiles). It is the only
+/// zero-length extent a written file carries (the `heif_writer` fuzz
+/// invariant exempts exactly this shape; the daily run's regression
+/// input is the re-mux of such a file).
+#[test]
+fn external_tile_item_iloc_is_one_empty_extent_naming_the_deti() {
+    let bytes = main_file(200, 136, 64, template(None));
+    let remuxed = HeifWriter::from_files(&[&bytes])
+        .unwrap()
+        .write_to_vec()
+        .unwrap();
+    for file in [&bytes, &remuxed] {
+        let f = HeifFile::parse(file).unwrap();
+        let meta = f.meta().unwrap();
+        let mut external = 0;
+        for loc in &meta.locations {
+            let item = meta.item(loc.item_id).unwrap();
+            let deti = (loc.data_reference_index as usize)
+                .checked_sub(1)
+                .and_then(|i| meta.data_references.get(i))
+                .and_then(|d| DataEntryTiledItem::parse(d).ok());
+            if item.item_type == *b"tili" && deti.as_ref().is_some_and(|d| d.external.is_some()) {
+                external += 1;
+                assert_eq!(loc.construction_method, 0);
+                assert_eq!(loc.extents.len(), 1);
+                assert_eq!((loc.extents[0].offset, loc.extents[0].length), (0, 0));
+            } else {
+                assert!(
+                    loc.extents.iter().all(|e| e.length != 0),
+                    "item {}: zero-length extent",
+                    loc.item_id
+                );
+            }
+        }
+        assert_eq!(external, 1);
+    }
+}
+
 /// The HEIF-A2 §6.11 checks of `miaf::check`, from the `meta` tree:
 /// `no_of_input_items` against `NumTiles`, the `tilC` tail against the
 /// `deti` storage form, a `tili` whose `iloc` names no `deti`.
