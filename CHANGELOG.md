@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.15](https://github.com/OxideAV/oxideav-heif/compare/v0.0.14...v0.0.15) - 2026-11-07
+
+### Other
+
+- API hygiene: non_exhaustive HeifPixelFormat/BoxHeader + builders
+
 ### Added
 
 - `HeifFrame::new`, `BoxHeader::new`, and `with_<field>` setters on `HeifFrame`, `HeifPixelFormat` and `BoxHeader`.
