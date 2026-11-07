@@ -450,14 +450,9 @@ fn label(coded: HeifPixelFormat, identity: bool, full: bool) -> Pf {
     if identity {
         return coded.to_core_gbr().unwrap();
     }
-    let pf = coded.to_core().unwrap_or_else(|| {
-        HeifPixelFormat {
-            chroma: Chroma::Yuv444,
-            ..coded
-        }
+    let pf = coded
         .to_core()
-        .unwrap()
-    });
+        .unwrap_or_else(|| coded.with_chroma(Chroma::Yuv444).to_core().unwrap());
     if full && !coded.has_alpha {
         j_variant(pf)
     } else {

@@ -33,6 +33,7 @@ pub fn fourcc_str(t: &FourCc) -> String {
 
 /// One parsed box header plus the payload span inside the parent slice.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BoxHeader {
     /// Box type (`ftyp`, `meta`, …).
     pub box_type: FourCc,
@@ -44,6 +45,60 @@ pub struct BoxHeader {
     pub payload_start: usize,
     /// Payload length in bytes (header bytes excluded).
     pub payload_len: usize,
+}
+
+impl BoxHeader {
+    /// Build a `BoxHeader` from its mandatory fields.
+    pub fn new(
+        box_type: FourCc,
+        user_type: Option<[u8; 16]>,
+        start: usize,
+        payload_start: usize,
+        payload_len: usize,
+    ) -> Self {
+        Self {
+            box_type,
+            user_type,
+            start,
+            payload_start,
+            payload_len,
+        }
+    }
+
+    /// Set `box_type`.
+    #[must_use]
+    pub fn with_box_type(mut self, v: FourCc) -> Self {
+        self.box_type = v;
+        self
+    }
+
+    /// Set `user_type`.
+    #[must_use]
+    pub fn with_user_type(mut self, v: Option<[u8; 16]>) -> Self {
+        self.user_type = v;
+        self
+    }
+
+    /// Set `start`.
+    #[must_use]
+    pub fn with_start(mut self, v: usize) -> Self {
+        self.start = v;
+        self
+    }
+
+    /// Set `payload_start`.
+    #[must_use]
+    pub fn with_payload_start(mut self, v: usize) -> Self {
+        self.payload_start = v;
+        self
+    }
+
+    /// Set `payload_len`.
+    #[must_use]
+    pub fn with_payload_len(mut self, v: usize) -> Self {
+        self.payload_len = v;
+        self
+    }
 }
 
 impl BoxHeader {

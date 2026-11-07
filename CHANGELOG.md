@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `HeifFrame::new`, `BoxHeader::new`, and `with_<field>` setters on `HeifFrame`, `HeifPixelFormat` and `BoxHeader`.
+
+### Changed
+
+- API hygiene: `HeifPixelFormat` and `BoxHeader` are now `#[non_exhaustive]`. `Chroma` (the four ISO/IEC 23008-12 chroma structures) stays exhaustive; `HeifFrame` stays exhaustive for now because sibling crates still build it with a struct literal.
+
 ## [0.0.14](https://github.com/OxideAV/oxideav-heif/compare/v0.0.13...v0.0.14) - 2026-11-06
 
 ### Other

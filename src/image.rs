@@ -72,6 +72,7 @@ impl Chroma {
 
 /// Sample layout of a [`HeifFrame`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct HeifPixelFormat {
     /// Chroma structure.
     pub chroma: Chroma,
@@ -79,6 +80,29 @@ pub struct HeifPixelFormat {
     pub bit_depth: u8,
     /// Whether a full-resolution alpha plane follows the colour planes.
     pub has_alpha: bool,
+}
+
+impl HeifPixelFormat {
+    /// Set `chroma`.
+    #[must_use]
+    pub fn with_chroma(mut self, v: Chroma) -> Self {
+        self.chroma = v;
+        self
+    }
+
+    /// Set `bit_depth`.
+    #[must_use]
+    pub fn with_bit_depth(mut self, v: u8) -> Self {
+        self.bit_depth = v;
+        self
+    }
+
+    /// Set `has_alpha`.
+    #[must_use]
+    pub fn with_has_alpha(mut self, v: bool) -> Self {
+        self.has_alpha = v;
+        self
+    }
 }
 
 impl HeifPixelFormat {
@@ -172,6 +196,46 @@ pub struct HeifFrame {
     pub format: HeifPixelFormat,
     /// The planes, `format.plane_count()` of them.
     pub planes: Vec<Plane>,
+}
+
+impl HeifFrame {
+    /// Build a `HeifFrame` from its mandatory fields.
+    pub fn new(width: u32, height: u32, format: HeifPixelFormat, planes: Vec<Plane>) -> Self {
+        Self {
+            width,
+            height,
+            format,
+            planes,
+        }
+    }
+
+    /// Set `width`.
+    #[must_use]
+    pub fn with_width(mut self, v: u32) -> Self {
+        self.width = v;
+        self
+    }
+
+    /// Set `height`.
+    #[must_use]
+    pub fn with_height(mut self, v: u32) -> Self {
+        self.height = v;
+        self
+    }
+
+    /// Set `format`.
+    #[must_use]
+    pub fn with_format(mut self, v: HeifPixelFormat) -> Self {
+        self.format = v;
+        self
+    }
+
+    /// Set `planes`.
+    #[must_use]
+    pub fn with_planes(mut self, v: Vec<Plane>) -> Self {
+        self.planes = v;
+        self
+    }
 }
 
 /// Upper bound on the luma pixel count of a frame this crate allocates.
