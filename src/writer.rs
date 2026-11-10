@@ -140,8 +140,9 @@ pub struct HeifWriter {
     next_id: u32,
     major_brand: Option<FourCc>,
     compatible_brands: Option<Vec<FourCc>>,
-    /// Protected items: `(item id, scheme_type, scheme_version)`.
-    protections: Vec<(u32, FourCc, u32)>,
+    /// Protected items: `(item id, the payload of the item's `sinf`
+    /// protection scheme information box)`.
+    protections: Vec<(u32, Vec<u8>)>,
 }
 
 impl HeifWriter {
@@ -840,7 +841,7 @@ impl HeifWriter {
         cipher: &dyn crate::cenc::BlockCipher,
     ) -> Result<Option<u32>> {
         use crate::cenc::{SCHEME_CBC1, SCHEME_CENC, SCHEME_CENS};
-        if self.protections.iter().any(|(i, _, _)| *i == id) {
+        if self.protections.iter().any(|(i, _)| *i == id) {
             return Err(HeifError::invalid(format!(
                 "writer: item {id} is already protected"
             )));
@@ -872,7 +873,10 @@ impl HeifWriter {
         };
         *body = crate::cenc::encrypt(scheme, &ienc, aux, body, cipher)?;
         item.properties.push((Property::Ienc(ienc), true));
-        self.protections.push((id, scheme, 0x0001_0000));
+        let mut schm = scheme.to_vec();
+        schm.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        self.protections
+            .push((id, full_boxed(b"schm", 0, 0, &schm)));
         if aux_bytes.is_empty() {
             return Ok(None);
         }
@@ -1040,7 +1044,11 @@ impl HeifWriter {
     /// and item names kept; ids are re-assigned. Returns the new id of
     /// `id`. A `tili` tiled item comes along with its tile data, `deti`
     /// entry and tile properties (in-file tiles; external tiles are a
-    /// typed refusal), a protected item (`ipro`) is one too. The caller
+    /// typed refusal). A protected item is imported as it is — the
+    /// encrypted body, the `ienc` property, the `sinf` of its `ipro`
+    /// entry byte for byte and the auxiliary information item behind
+    /// its `auxr` reference (with its `iaux`) — so the re-muxed file
+    /// decrypts under the same keys; no cipher is involved. The caller
     /// chooses the primary.
     pub fn import_item<D: AsRef<[u8]>>(&mut self, file: &HeifFile<D>, id: u32) -> Result<u32> {
         use std::collections::BTreeMap;
@@ -1054,11 +1062,25 @@ impl HeifWriter {
             let info = meta
                 .item(src)
                 .ok_or_else(|| HeifError::invalid(format!("import: item {src} is not in iinf")))?;
-            if info.protection_index != 0 {
-                return Err(HeifError::unsupported(format!(
-                    "import: item {src} is protected (ipro)"
-                )));
-            }
+            // A protected item (ISO/IEC 14496-12 §8.11.5, 23001-7
+            // Amd 1 §8.3 / §8.4) travels as it is: the body still
+            // encrypted, its `ienc` among the properties, the `sinf`
+            // of its `ipro` entry byte for byte, and (below) the
+            // auxiliary information item its `auxr` reference names.
+            let protection = match info.protection_index {
+                0 => None,
+                n => Some(
+                    meta.protection_scheme(src)
+                        .ok_or_else(|| {
+                            HeifError::invalid(format!(
+                                "import: item {src} names protection scheme {n} of {}",
+                                meta.protection_schemes.len()
+                            ))
+                        })?
+                        .raw
+                        .clone(),
+                ),
+            };
             let dimg = meta.references_from(src, &reference::DIMG);
             let body = match info.item_type {
                 // A tiled item (Amd 2 §6.11): its data (tiles + offset
@@ -1170,6 +1192,10 @@ impl HeifWriter {
                 properties,
             });
             map.insert(src, new_id);
+            if let Some(sinf) = protection {
+                self.protections.push((new_id, sinf));
+                work.extend(meta.references_from(src, b"auxr"));
+            }
             // What this item needs: its inputs, and the items that
             // describe or accompany it.
             work.extend(dimg);
@@ -1560,28 +1586,32 @@ impl HeifWriter {
         };
         // ipro (ISO/IEC 14496-12 §8.11.5): one sinf per distinct
         // scheme; an item's item_protection_index is its 1-based entry.
-        let mut schemes: Vec<(FourCc, u32)> = Vec::new();
-        for (_, scheme, version) in &self.protections {
-            if !schemes.contains(&(*scheme, *version)) {
-                schemes.push((*scheme, *version));
+        let mut schemes: Vec<&[u8]> = Vec::new();
+        for (_, sinf) in &self.protections {
+            if !schemes.contains(&sinf.as_slice()) {
+                schemes.push(sinf);
             }
+        }
+        if schemes.len() > u16::MAX as usize {
+            return Err(HeifError::exhausted(format!(
+                "writer: {} protection schemes (ipro counts 16 bits)",
+                schemes.len()
+            )));
         }
         let ipro = if schemes.is_empty() {
             Vec::new()
         } else {
             let mut body = (schemes.len() as u16).to_be_bytes().to_vec();
-            for (scheme, version) in &schemes {
-                let mut schm = scheme.to_vec();
-                schm.extend_from_slice(&version.to_be_bytes());
-                body.extend(boxed(b"sinf", &full_boxed(b"schm", 0, 0, &schm)));
+            for sinf in &schemes {
+                body.extend(boxed(b"sinf", sinf));
             }
             full_boxed(b"ipro", 0, 0, &body)
         };
         let protection_index = |id: u32| -> u16 {
             self.protections
                 .iter()
-                .find(|(i, _, _)| *i == id)
-                .and_then(|(_, s, v)| schemes.iter().position(|x| x == &(*s, *v)))
+                .find(|(i, _)| *i == id)
+                .and_then(|(_, s)| schemes.iter().position(|x| *x == s.as_slice()))
                 .map_or(0, |p| p as u16 + 1)
         };
         let mut infes = Vec::new();

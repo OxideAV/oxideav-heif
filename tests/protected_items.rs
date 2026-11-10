@@ -284,6 +284,69 @@ fn protected_items_written_by_this_crate_decrypt_and_decode() {
                 let image = oxideav_heif::HeifImage::from_video_frame(&v, &params).unwrap();
                 assert_eq!(image.to_rgba8(), want.to_rgba8(), "{tag}: framework pixels");
             }
+            // Re-mux (`import_item` through `from_files`): no cipher is
+            // involved — the protected body, the `ienc`, the `sinf` of
+            // the `ipro` entry and the auxiliary information item
+            // travel byte for byte, so the copy decrypts under the same
+            // key and stays refused without one.
+            {
+                let remuxed = HeifWriter::from_files(&[&bytes])
+                    .unwrap_or_else(|e| panic!("{tag}: re-mux: {e}"))
+                    .write_to_vec()
+                    .unwrap();
+                let again = HeifFile::parse_borrowed(&remuxed).unwrap();
+                let (m2, p2) = (again.meta().unwrap(), again.primary_item().unwrap().id);
+                assert_eq!(
+                    m2.protection_scheme(p2).map(|s| &s.raw),
+                    meta.protection_scheme(pid).map(|s| &s.raw),
+                    "{tag}: sinf"
+                );
+                assert_eq!(
+                    ItemProperties::resolve(m2, p2).unwrap().ienc(),
+                    Some(&case.ienc),
+                    "{tag}"
+                );
+                assert_eq!(
+                    &*again.item_data(p2).unwrap(),
+                    &*file.item_data(pid).unwrap(),
+                    "{tag}: protected body"
+                );
+                let (a1, a2) = (
+                    meta.references_from(pid, b"auxr"),
+                    m2.references_from(p2, b"auxr"),
+                );
+                assert_eq!(a1.len(), a2.len(), "{tag}: auxr");
+                for (x, y) in a1.iter().zip(&a2) {
+                    assert_eq!(
+                        &*again.item_data(*y).unwrap(),
+                        &*file.item_data(*x).unwrap(),
+                        "{tag}: auxiliary data"
+                    );
+                    assert_eq!(
+                        ItemProperties::resolve(m2, *y).unwrap().iaux(),
+                        ItemProperties::resolve(meta, *x).unwrap().iaux(),
+                        "{tag}: iaux"
+                    );
+                }
+                assert!(
+                    decode_with(&remuxed, &DecodeOptions::default())
+                        .unwrap_err()
+                        .encrypted_item_info()
+                        .is_some(),
+                    "{tag}: re-muxed file without a cipher"
+                );
+                assert_eq!(
+                    decode_with(&remuxed, &keyed).unwrap_or_else(|e| panic!("{tag}: {e}")),
+                    want,
+                    "{tag}: re-muxed"
+                );
+                // A second generation is the first, byte for byte.
+                let twice = HeifWriter::from_files(&[&remuxed])
+                    .unwrap()
+                    .write_to_vec()
+                    .unwrap();
+                assert_eq!(twice, remuxed, "{tag}: re-mux fixed point");
+            }
             // A wrong key never yields the picture.
             let wrong = DecodeOptions::default().with_decryptor(WrongKey);
             assert!(

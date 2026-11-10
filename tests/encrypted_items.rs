@@ -97,6 +97,40 @@ fn encrypted_items_decrypt_and_decode() {
         if let Ok(s) = strict {
             assert_eq!(s.frame, img.frame, "{name}: strict vs compat");
         }
+        // Re-mux: the protected item is imported as it is (body,
+        // `ienc`, the `sinf` of its `ipro` entry, the auxiliary
+        // information item) and decrypts to the same picture.
+        let remuxed = oxideav_heif::HeifWriter::from_files(&[file.bytes()])
+            .unwrap_or_else(|e| panic!("{name}: re-mux: {e}"))
+            .write_to_vec()
+            .unwrap();
+        let again = HeifFile::from_vec(remuxed).unwrap();
+        let pid = again.primary_item().unwrap().id;
+        assert_eq!(
+            again.meta().unwrap().protection_scheme(pid).map(|s| &s.raw),
+            file.meta().unwrap().protection_scheme(1).map(|s| &s.raw),
+            "{name}: sinf"
+        );
+        assert_eq!(
+            &*again.item_data(pid).unwrap(),
+            &*file.item_data(1).unwrap(),
+            "{name}: protected body"
+        );
+        assert!(
+            decode_primary(&again, ItemDecoder::direct())
+                .unwrap_err()
+                .encrypted_item_info()
+                .is_some(),
+            "{name}: re-muxed file without a cipher"
+        );
+        let img2 = decode_primary(
+            &again,
+            ItemDecoder::direct()
+                .with_decryptor(&cipher)
+                .with_cenc_reading(CencReading::compat()),
+        )
+        .unwrap_or_else(|e| panic!("{name}: re-muxed: {e}"));
+        assert_eq!(img2.frame, img.frame, "{name}: re-muxed picture");
         pictures.push((name, planar(&img.frame)));
     }
     for (name, p) in &pictures[1..] {
