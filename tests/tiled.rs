@@ -278,6 +278,44 @@ fn constrained_extents_item_composes_its_extents() {
     m.properties[cexg_index].body[4..6].copy_from_slice(&2u16.to_be_bytes());
     let err = decode_primary(&broken, ItemDecoder::direct()).unwrap_err();
     assert!(err.to_string().contains("extents"), "{err}");
+    // tile_config_info_present_flag (0x000002) with an
+    // ExtentDecoderConfigurationRecord — a record Amd 1 §6.5.41.3
+    // leaves to the coding format and no binding defines: it is kept
+    // as opaque bytes to the end of the property and the item decodes
+    // with its own decoder configuration property…
+    let mut with_record = f.clone();
+    let m = with_record.meta.as_mut().unwrap();
+    let record = [0xde, 0xad, 0xbe, 0xef, 0x01];
+    m.properties[cexg_index].body[3] |= 2;
+    m.properties[cexg_index].body.extend_from_slice(&record);
+    let props = oxideav_heif::props::ItemProperties::resolve(m, id).unwrap();
+    assert_eq!(
+        props.cexg().and_then(|c| c.extent_config.clone()),
+        Some(record.to_vec())
+    );
+    let img = decode_primary(&with_record, ItemDecoder::direct()).unwrap();
+    assert_eq!(img.frame, expected);
+    // … and is refused, typed, when the record is the only
+    // configuration it has.
+    let m = with_record.meta.as_mut().unwrap();
+    let hvcc_index = m
+        .properties
+        .iter()
+        .position(|p| &p.box_type == b"hvcC")
+        .unwrap() as u16
+        + 1;
+    for a in &mut m.associations {
+        a.entries.retain(|e| e.index != hvcc_index);
+    }
+    let err = decode_primary(&with_record, ItemDecoder::direct()).unwrap_err();
+    assert!(
+        matches!(err, oxideav_heif::HeifError::Unsupported(_)),
+        "{err}"
+    );
+    assert!(
+        err.to_string().contains("ExtentDecoderConfigurationRecord"),
+        "{err}"
+    );
     assert!(
         w.add_constrained_extents_item(*b"hvc1", 2, 2, 64, 64, vec![Vec::new(); 3], vec![])
             .is_err()

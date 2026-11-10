@@ -2024,12 +2024,24 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
                 cexg.columns, cexg.rows
             )));
         }
-        if cexg.extent_config.is_some() {
-            // The per-extent ExtentDecoderConfigurationRecord is
-            // codec-specific and undefined for the codecs here; the
-            // item's own configuration properties decode the tiles.
+        if cexg.extent_config.is_some()
+            && !node
+                .properties
+                .entries
+                .iter()
+                .any(|e| e.property.is_decoder_config())
+        {
+            // `tile_config_info_present_flag`: the configuration to
+            // decode an extent on its own rides in the property as an
+            // ExtentDecoderConfigurationRecord, which Amd 1 §6.5.41.3
+            // leaves to "the image coding format" and no coding-format
+            // binding defines. The record is kept as opaque bytes
+            // (`Cexg::extent_config`) and never interpreted: an item
+            // that also carries its ordinary decoder configuration
+            // property decodes with that one, an item without is
+            // refused.
             return Err(HeifError::unsupported(format!(
-                "item {id}: cexg with an ExtentDecoderConfigurationRecord"
+                "item {id}: cexg carries its decoder configuration only as an ExtentDecoderConfigurationRecord, which no staged coding-format binding defines"
             )));
         }
         let desc = crate::derived::GridDescriptor {

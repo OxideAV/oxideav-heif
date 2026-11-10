@@ -41,6 +41,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **`cexg` with an `ExtentDecoderConfigurationRecord`** (round 487; HEIF Amd 1:2025 §6.5.41): the record is defined by no staged coding-format binding, so it stays opaque bytes (`Cexg::extent_config`); an item that also carries its ordinary decoder configuration property now decodes with that one instead of being refused, an item whose only configuration is the record stays a typed `Unsupported`.
 - API hygiene: `HeifPixelFormat` and `BoxHeader` are now `#[non_exhaustive]`. `Chroma` (the four ISO/IEC 23008-12 chroma structures) stays exhaustive; `HeifFrame` stays exhaustive for now because sibling crates still build it with a struct literal.
 
 ## [0.0.14](https://github.com/OxideAV/oxideav-heif/compare/v0.0.13...v0.0.14) - 2026-11-06

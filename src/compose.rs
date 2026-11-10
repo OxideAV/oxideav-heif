@@ -1157,7 +1157,7 @@ fn cfen_role(c: u8, rgb: bool, i: usize, packed: bool) -> Result<CfenRole> {
         }
         7 => {
             return Err(HeifError::unsupported(format!(
-                "cfen input {i}: {what} 7 (K) — Amd 2 Table 2's CMYK column names no colr signalling that selects it (nclx has no CMYK matrix)"
+                "cfen input {i}: {what} 7 (K) — no rule selects the CMYK column of Amd 2 Table 2 (the mandatory nclx colr has no four-colour code point; only an added 'prof' ICC profile could label the item CMYK, which the standard does not require) and the output picture has no fourth colour plane"
             )));
         }
         c => {
@@ -1217,9 +1217,18 @@ fn cfen_packed_cells(
 ///
 /// Table 2 (as amended) maps a channel through the output `colr` (see
 /// [`CfenRegion`]): Y / Cb / Cr, or R / G / B under an identity matrix;
-/// alpha (5) must be at the output size. Depth (6) has no plane here,
-/// K (7) waits on the signalling that selects the CMYK column, and
-/// reserved values are refused. A `channel_id` of 0 is refused (Amd 2:
+/// alpha (5) must be at the output size. Depth (6) has no plane here
+/// and reserved values are refused. K (7) is refused too: the Amd 2
+/// table heads its three columns "depending on the 'colr' box" and no
+/// text says which `colr` selects which — an `nclx` is mandatory on
+/// the item (Amd 1 §6.6.2.5.1) and H.273 has no four-colour code
+/// point, so a CMYK item can only be *labelled* by an additional
+/// `prof` ICC profile (HEIF §6.5.5.1; `rICC` cannot carry one,
+/// ISO/IEC 14496-12 §12.1.5.1), which the standard never requires;
+/// polarity and rendering are undefined, and this crate's picture
+/// model has no fourth colour plane to expose the samples in. That the
+/// identity matrix selects R / G / B and every other value Y / Cb / Cr
+/// is likewise this crate's reading, not a sentence of the clause. A `channel_id` of 0 is refused (Amd 2:
 /// "shall not be equal to 0"); a `packed_channel_id` of 0 marks an
 /// unused partition. Channels above 1 shall not repeat across the
 /// inputs. The chroma layout follows the Cb / Cr region sizes against
