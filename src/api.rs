@@ -1188,6 +1188,14 @@ pub struct DecodeOptions {
     /// §6.11.2); `None` (the default) refuses them typed
     /// ([`HeifError::external_tile_unresolved`](crate::HeifError::external_tile_unresolved)).
     pub tile_resolver: Option<crate::tiled::SharedTileResolver>,
+    /// The AES-128 block cipher, keyed by KID, that decrypts items
+    /// protected with Common Encryption (`ienc`, ISO/IEC 23001-7
+    /// Amd 1 §8.3); `None` (the default) refuses them typed
+    /// ([`HeifError::encrypted_item`](crate::HeifError::encrypted_item)).
+    pub decryptor: Option<crate::cenc::SharedBlockCipher>,
+    /// How protection records are read (see
+    /// [`CencReading`](crate::cenc::CencReading); strict by default).
+    pub cenc_reading: crate::cenc::CencReading,
 }
 
 impl Default for DecodeOptions {
@@ -1204,6 +1212,8 @@ impl Default for DecodeOptions {
             threads: None,
             reference_white_nits: None,
             tile_resolver: None,
+            decryptor: None,
+            cenc_reading: crate::cenc::CencReading::strict(),
         }
     }
 }
@@ -1235,6 +1245,8 @@ impl DecodeOptions {
             threads,
             reference_white_nits,
             tile_resolver: None,
+            decryptor: None,
+            cenc_reading: crate::cenc::CencReading::strict(),
         }
     }
 
@@ -1298,6 +1310,21 @@ impl DecodeOptions {
         resolver: impl crate::tiled::ExternalTileResolver + Send + 'static,
     ) -> Self {
         self.tile_resolver = Some(crate::tiled::SharedTileResolver::new(resolver));
+        self
+    }
+
+    /// Set [`DecodeOptions::decryptor`].
+    pub fn with_decryptor(
+        mut self,
+        cipher: impl crate::cenc::BlockCipher + Send + 'static,
+    ) -> Self {
+        self.decryptor = Some(crate::cenc::SharedBlockCipher::new(cipher));
+        self
+    }
+
+    /// Set [`DecodeOptions::cenc_reading`].
+    pub fn with_cenc_reading(mut self, reading: crate::cenc::CencReading) -> Self {
+        self.cenc_reading = reading;
         self
     }
 

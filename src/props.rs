@@ -1071,6 +1071,10 @@ pub enum Property {
     A1lx(A1lx),
     /// `rref`.
     Rref(Rref),
+    /// `ienc` (ISO/IEC 23001-7 Amd 1 §8.3): item encryption parameters.
+    Ienc(crate::cenc::ItemEncryption),
+    /// `iaux` (ISO/IEC 23001-7 Amd 1 §8.4): auxiliary information type.
+    Iaux(crate::cenc::ItemAuxInfo),
     /// `crtt`.
     Crtt(TimeInfo),
     /// `mdft`.
@@ -1127,6 +1131,8 @@ impl Property {
             Property::A1op(_) => *b"a1op",
             Property::A1lx(_) => *b"a1lx",
             Property::Rref(_) => *b"rref",
+            Property::Ienc(_) => *b"ienc",
+            Property::Iaux(_) => *b"iaux",
             Property::Crtt(_) => *b"crtt",
             Property::Mdft(_) => *b"mdft",
             Property::Udes(_) => *b"udes",
@@ -1215,6 +1221,8 @@ impl Property {
             }),
             b"a1lx" => Property::A1lx(parse_a1lx(b)?),
             b"rref" => Property::Rref(parse_rref(b)?),
+            b"ienc" => Property::Ienc(crate::cenc::ItemEncryption::parse(b)?),
+            b"iaux" => Property::Iaux(crate::cenc::ItemAuxInfo::parse(b)?),
             b"crtt" => Property::Crtt(parse_time(b, "crtt")?),
             b"mdft" => Property::Mdft(parse_time(b, "mdft")?),
             b"udes" => Property::Udes(parse_udes(b)?),
@@ -1587,6 +1595,22 @@ impl ItemProperties {
     pub fn a1lx(&self) -> Option<A1lx> {
         self.find(|p| match p {
             Property::A1lx(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    /// `ienc` (the item is protected with Common Encryption).
+    pub fn ienc(&self) -> Option<&crate::cenc::ItemEncryption> {
+        self.descriptive().find_map(|e| match &e.property {
+            Property::Ienc(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// `iaux`.
+    pub fn iaux(&self) -> Option<crate::cenc::ItemAuxInfo> {
+        self.find(|p| match p {
+            Property::Iaux(v) => Some(*v),
             _ => None,
         })
     }
@@ -2308,6 +2332,8 @@ pub mod write {
                 }
                 full_boxed(b"rref", 0, 0, &b)
             }
+            Property::Ienc(e) => boxed(b"ienc", &e.to_body()),
+            Property::Iaux(a) => boxed(b"iaux", &a.to_body()),
             Property::Crtt(t) => full_boxed(b"crtt", 0, 0, &t.time.to_be_bytes()),
             Property::Mdft(t) => full_boxed(b"mdft", 0, 0, &t.time.to_be_bytes()),
             Property::Udes(u) => {

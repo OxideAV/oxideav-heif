@@ -203,7 +203,8 @@ registry decoders against `decode_all` / `info` over every HEIF-family
 file the checkout sees — 57 vendored fixtures, the 14 staged corpus
 bundles, the 2 device samples, the 66 MPEG / Nokia conformance files
 and the 13 encrypted ones: **152 files, 136 decode on both paths, 16
-refused on both** (r485 count) (the 13 `cenc` items; `iff_hevc_tile_multiple_items_tbas`,
+refused on both** (r485 count) (the 13 `cenc` items without a caller cipher — see
+**Encrypted items** below; `iff_hevc_tile_multiple_items_tbas`,
 whose `ipma` rows are out of order; C046, whose sequence track starts at
 a non-IRAP sample the black-box decoder refuses too; multilayer002,
 whose three `TRAIL_R` `lhv1` items have no output picture — see
@@ -761,6 +762,26 @@ to the official SHVC conformance MD5s). `import_item` carries every
 item of the five files with its `lhvC` / `oinf` / `tols` / `lsel` byte
 for byte and its `exbl` base along (the `lhvC` writer now sets the
 `'11'b` reserved bits of 14496-15 §9.5 it dropped).
+
+**Encrypted items** (`tests/encrypted_items.rs`, ISO/IEC 23001-7
+Amd 1 §8.3 / §8.4, r485): `ipro` / `sinf` / `schm` schemes, the `ienc`
+and `iaux` properties and the `CencSampleAuxiliaryDataFormat` of the
+`auxr`-referenced `auxi` item are parsed; `cenc` (CTR, one byte stream
+per key), `cens` (CTR with the pattern), `cbc1` (CBC chained per item)
+and `cbcs` (CBC with the pattern, chained per subsample), per-item and
+constant IVs, several keys per item, decrypt through the caller's
+AES-128 (`cenc::BlockCipher`, keyed by KID — the crate holds no key
+material and ships no cipher): `ItemDecoder::with_decryptor` /
+`DecodeOptions::with_decryptor`. Without one an encrypted item is the
+typed `HeifError::encrypted_item` refusal. Over the 13 staged files
+with the `drm_cfg` test keys and `openssl` as the black-box cipher:
+4 decrypt under the Amd 1 syntax as written (`cbc1`, `cenc` 64 / 128-bit
+IV, key roll); the other 9 depart from it (the `ienc` pattern byte holds
+skip before crypt — the files' own parameters show the swap; a 16-bit
+`multi_subindex_IV`; a `cbcs` item with per-sample IVs chained across
+its subsamples) and decrypt under the opt-in `CencReading::compat()`.
+All 13 reconstruct one picture, byte-exact against the black-box
+decoder on the decrypted item.
 
 **Predictively coded items** (`tests/predictive_items.rs`, HEIF §6.4.9,
 r485): an `hvc1` item with `pred` references decodes the bitstream its

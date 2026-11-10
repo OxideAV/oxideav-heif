@@ -131,13 +131,19 @@ pub fn item_decoder(opts: &DecodeOptions) -> ItemDecoder<'static> {
     d
 }
 
-/// [`item_decoder`] plus the external-tile resolver of `opts`.
+/// [`item_decoder`] plus the external-tile resolver and the
+/// decryptor of `opts`.
 pub fn item_decoder_for(opts: &DecodeOptions) -> ItemDecoder<'_> {
-    let d = item_decoder(opts);
-    match &opts.tile_resolver {
-        Some(r) => d.with_tile_resolver(r.resolver()),
-        None => d,
+    let mut d = item_decoder(opts);
+    if let Some(r) = &opts.tile_resolver {
+        d = d.with_tile_resolver(r.resolver());
     }
+    if let Some(c) = &opts.decryptor {
+        d = d
+            .with_decryptor(c.cipher())
+            .with_cenc_reading(opts.cenc_reading);
+    }
+    d
 }
 
 /// `strict`: a HEIF-family brand is required, and a MIAF-branded file

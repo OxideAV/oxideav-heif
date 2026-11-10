@@ -122,6 +122,38 @@ impl HeifError {
     }
 }
 
+impl HeifError {
+    /// The refusal for an item protected with Common Encryption
+    /// (ISO/IEC 23001-7 Amd 1 §8.3) when no
+    /// [`BlockCipher`](crate::cenc::BlockCipher) was supplied: an
+    /// [`HeifError::Unsupported`] naming the item and its scheme, which
+    /// [`HeifError::encrypted_item_info`] reads back.
+    pub fn encrypted_item(item_id: u32, scheme: &str) -> Self {
+        Self::Unsupported(format!(
+            "{ENCRYPTED_ITEM_PREFIX}item {item_id} is protected with scheme {scheme} (no decryptor supplied)"
+        ))
+    }
+
+    /// `(item_id, scheme)` when this is the
+    /// [`HeifError::encrypted_item`] refusal.
+    pub fn encrypted_item_info(&self) -> Option<(u32, String)> {
+        let HeifError::Unsupported(m) = self else {
+            return None;
+        };
+        let rest = m
+            .strip_prefix(ENCRYPTED_ITEM_PREFIX)?
+            .strip_prefix("item ")?;
+        let (id, rest) = rest.split_once(' ')?;
+        let scheme = rest
+            .strip_prefix("is protected with scheme ")?
+            .strip_suffix(" (no decryptor supplied)")?;
+        Some((id.parse().ok()?, scheme.to_string()))
+    }
+}
+
+/// Message prefix of [`HeifError::encrypted_item`].
+const ENCRYPTED_ITEM_PREFIX: &str = "encrypted item: ";
+
 /// Message prefix of [`HeifError::external_tile_unresolved`].
 const EXTERNAL_TILE_PREFIX: &str = "external tiles: ";
 

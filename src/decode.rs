@@ -82,6 +82,8 @@ pub struct ItemDecoder<'r> {
     base_layer_fallback: bool,
     threads: usize,
     tile_resolver: Option<&'r dyn crate::tiled::ExternalTileResolver>,
+    decryptor: Option<&'r dyn crate::cenc::BlockCipher>,
+    cenc_reading: crate::cenc::CencReading,
 }
 
 impl<'r> ItemDecoder<'r> {
@@ -94,6 +96,8 @@ impl<'r> ItemDecoder<'r> {
             base_layer_fallback: false,
             threads: 1,
             tile_resolver: None,
+            decryptor: None,
+            cenc_reading: crate::cenc::CencReading::strict(),
         }
     }
 
@@ -106,6 +110,8 @@ impl<'r> ItemDecoder<'r> {
             base_layer_fallback: false,
             threads: 1,
             tile_resolver: None,
+            decryptor: None,
+            cenc_reading: crate::cenc::CencReading::strict(),
         }
     }
 
@@ -137,6 +143,24 @@ impl<'r> ItemDecoder<'r> {
         resolver: &'r dyn crate::tiled::ExternalTileResolver,
     ) -> Self {
         self.tile_resolver = Some(resolver);
+        self
+    }
+
+    /// Decrypt items protected with Common Encryption (an `ipro`
+    /// scheme + `ienc` property + `auxr`-referenced `auxi` item,
+    /// ISO/IEC 23001-7 Amd 1 §8.3 / §8.4) through `cipher`, the caller's
+    /// AES-128 keyed by KID. Without one such an item is the typed
+    /// refusal [`HeifError::encrypted_item`].
+    pub fn with_decryptor(mut self, cipher: &'r dyn crate::cenc::BlockCipher) -> Self {
+        self.decryptor = Some(cipher);
+        self
+    }
+
+    /// How protection records are read ([`crate::cenc::CencReading`]:
+    /// the Amd 1 syntax by default, or also the staged conformance
+    /// files' layout).
+    pub fn with_cenc_reading(mut self, reading: crate::cenc::CencReading) -> Self {
+        self.cenc_reading = reading;
         self
     }
 
@@ -317,10 +341,91 @@ impl<'r> ItemDecoder<'r> {
     /// (the codec instance is made separately, so jobs can run on
     /// worker threads without touching the file).
     fn prepare<D: AsRef<[u8]>>(&self, file: &HeifFile<D>, node: &ImageNode) -> Result<CodedJob> {
-        let mut job = self.prepare_with(node, |id| file.item_data(id), node.ispe())?;
+        let mut job = self.prepare_with(node, |id| self.item_payload(file, id), node.ispe())?;
         job.external_base = self.external_base(file, node, &job)?;
         job.predicted = predicted_stream(file, node, &job.data)?;
         Ok(job)
+    }
+
+    /// An item's data, decrypted when the item is protected (an `ipro`
+    /// scheme named by its `item_protection_index`, ISO/IEC 23001-7
+    /// Amd 1 §8.3 / §8.4): the `ienc` keys, the `CencSampleAuxiliaryDataFormat`
+    /// of the `auxi` item it names through `auxr` (the one whose `iaux`
+    /// type is the scheme, or that has no `iaux`; the multiple-key form
+    /// when `aux_info_type_parameter` is 1) and the caller's cipher.
+    fn item_payload<'f, D: AsRef<[u8]>>(
+        &self,
+        file: &'f HeifFile<D>,
+        id: u32,
+    ) -> Result<std::borrow::Cow<'f, [u8]>> {
+        let meta = file.meta()?;
+        let protected = meta.item(id).is_some_and(|i| i.protection_index != 0);
+        if !protected {
+            return file.item_data(id);
+        }
+        let scheme = meta
+            .protection_scheme(id)
+            .and_then(|s| s.scheme_type)
+            .ok_or_else(|| {
+                HeifError::invalid(format!(
+                    "item {id}: item_protection_index names no ipro scheme"
+                ))
+            })?;
+        let props = crate::props::ItemProperties::resolve(meta, id)?;
+        let Some(ienc) = props.ienc() else {
+            return Err(HeifError::unsupported(format!(
+                "item {id}: protected with '{}' without an ienc property",
+                crate::boxes::fourcc_str(&scheme)
+            )));
+        };
+        let Some(cipher) = self.decryptor else {
+            return Err(HeifError::encrypted_item(
+                id,
+                &crate::boxes::fourcc_str(&scheme),
+            ));
+        };
+        let mut aux: Option<(u32, u32)> = None;
+        for a in meta.references_from(id, b"auxr") {
+            let ap = crate::props::ItemProperties::resolve(meta, a)?;
+            // No `iaux`, or one whose aux_info_type is all zero (not a
+            // four-character code): the implied type is the scheme
+            // (Amd 1 §8.4.1).
+            let (ty, param) = ap.iaux().map_or((scheme, 0), |x| {
+                let ty = if x.aux_info_type == [0; 4] {
+                    scheme
+                } else {
+                    x.aux_info_type
+                };
+                (ty, x.aux_info_type_parameter)
+            });
+            if ty == scheme {
+                aux = Some((a, param));
+                break;
+            }
+        }
+        let reading = self.cenc_reading;
+        let swapped;
+        let ienc = if reading.compat {
+            swapped = ienc.clone().with_swapped_pattern();
+            &swapped
+        } else {
+            ienc
+        };
+        let aux = match aux {
+            Some((a, param)) => {
+                crate::cenc::CencAuxData::parse_with(&file.item_data(a)?, ienc, param, reading)?
+            }
+            // No auxiliary information: constant IVs, the whole item
+            // protected (§7.1: empty auxiliary information is omitted).
+            None => crate::cenc::CencAuxData::parse(&[], ienc, 0)?,
+        };
+        let data = file.item_data(id)?;
+        crate::cenc::decrypt_with(scheme, ienc, &aux, &data, cipher, reading)
+            .map(std::borrow::Cow::Owned)
+            .map_err(|e| match e {
+                HeifError::InvalidData(m) => HeifError::invalid(format!("item {id}: {m}")),
+                other => other,
+            })
     }
 
     /// HEIF B.2.2.1.3: the decoded picture of the image item an `lhv1`

@@ -807,6 +807,9 @@ pub struct Meta {
     pub idat: Option<Vec<u8>>,
     /// Number of `sinf` protection schemes declared in `ipro`.
     pub protection_scheme_count: u16,
+    /// The `ipro` box's `sinf` entries (an item's 1-based
+    /// `item_protection_index` names one).
+    pub protection_schemes: Vec<crate::cenc::ProtectionScheme>,
     /// `xml ` box payload (UTF-8), when present.
     pub xml: Option<String>,
     /// Box types encountered directly inside `meta`, in file order.
@@ -848,9 +851,18 @@ impl Meta {
             data_references,
             idat,
             protection_scheme_count,
+            protection_schemes: Vec::new(),
             xml,
             child_box_types,
         }
+    }
+
+    /// The `sinf` an item's `item_protection_index` names (`None` for an
+    /// unprotected item or an index past the `ipro` entries).
+    pub fn protection_scheme(&self, item_id: u32) -> Option<&crate::cenc::ProtectionScheme> {
+        let i = self.item(item_id)?.protection_index;
+        i.checked_sub(1)
+            .and_then(|i| self.protection_schemes.get(i as usize))
     }
 }
 
@@ -887,7 +899,9 @@ impl Meta {
                 b"idat" => me.idat = Some(p.to_vec()),
                 b"grpl" => me.entity_groups = parse_grpl(p)?,
                 b"dinf" => me.data_references = parse_dinf(p)?,
-                b"ipro" => me.protection_scheme_count = parse_ipro(p)?,
+                b"ipro" => {
+                    (me.protection_scheme_count, me.protection_schemes) = parse_ipro(p)?;
+                }
                 b"xml " => {
                     let (_v, _f, x) = parse_full_box(p)?;
                     me.xml = Some(String::from_utf8_lossy(x).into_owned());
@@ -1526,10 +1540,21 @@ fn parse_dinf(p: &[u8]) -> Result<Vec<DataReference>> {
     Ok(out)
 }
 
-fn parse_ipro(p: &[u8]) -> Result<u16> {
+fn parse_ipro(p: &[u8]) -> Result<(u16, Vec<crate::cenc::ProtectionScheme>)> {
     let (_v, _f, body) = parse_full_box(p)?;
     let mut r = Reader::new(body);
-    r.u16("ipro protection_count")
+    let count = r.u16("ipro protection_count")?;
+    let mut schemes = Vec::new();
+    for h in crate::boxes::iter_boxes(r.rest()) {
+        let h = h?;
+        if &h.box_type == b"sinf" && schemes.len() < count as usize {
+            schemes.push(crate::cenc::parse_sinf(crate::boxes::payload(
+                r.rest(),
+                &h,
+            ))?);
+        }
+    }
+    Ok((count, schemes))
 }
 
 #[cfg(test)]

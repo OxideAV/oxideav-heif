@@ -65,6 +65,7 @@ pub mod api;
 pub mod av1c;
 pub mod avcc;
 pub mod boxes;
+pub mod cenc;
 pub mod compose;
 pub mod derived;
 pub mod error;
