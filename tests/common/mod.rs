@@ -15,6 +15,8 @@
 //! [`all_bundles`] yields every `(root, bundle)` pair across both.
 #![allow(dead_code)]
 
+#[cfg(feature = "registry")]
+pub mod cipher;
 pub mod png;
 pub mod pngw;
 #[cfg(feature = "registry")]

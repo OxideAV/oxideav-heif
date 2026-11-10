@@ -1398,6 +1398,55 @@ impl Frame {
     }
 }
 
+/// An entry of a file [`decode_all_partial`](crate::decode_all_partial)
+/// left out because it does not decode.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct SkippedEntry {
+    /// The displayable item — with its `altr` alternatives, in the
+    /// order they were tried — for an item entry; empty for a track.
+    pub item_ids: Vec<u32>,
+    /// The image-sequence track, for a track entry.
+    pub track_id: Option<u32>,
+    /// Why (an item entry: its first alternative's error).
+    pub error: crate::HeifError,
+}
+
+impl SkippedEntry {
+    /// Every field as a positional argument, in declaration order.
+    pub fn new(item_ids: Vec<u32>, track_id: Option<u32>, error: crate::HeifError) -> Self {
+        Self {
+            item_ids,
+            track_id,
+            error,
+        }
+    }
+}
+
+/// What [`decode_all_partial`](crate::decode_all_partial) returns.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct PartialDecode {
+    /// The images that decode, in [`decode_all`](crate::decode_all)'s
+    /// order.
+    pub frames: Vec<Frame>,
+    /// The entries that do not, in the order they were met (items
+    /// before tracks); empty when the whole file decodes.
+    pub skipped: Vec<SkippedEntry>,
+}
+
+impl PartialDecode {
+    /// Every field as a positional argument, in declaration order.
+    pub fn new(frames: Vec<Frame>, skipped: Vec<SkippedEntry>) -> Self {
+        Self { frames, skipped }
+    }
+
+    /// `true` when nothing was left out.
+    pub fn is_complete(&self) -> bool {
+        self.skipped.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -299,6 +299,98 @@ pub struct CencAuxData {
 }
 
 impl CencAuxData {
+    /// Auxiliary data from its parts: the per-item `(key entry, IV)`
+    /// pairs and the subsamples (`None`: the whole item is protected
+    /// under key entry 1).
+    pub fn new(ivs: Vec<(u16, Vec<u8>)>, subsamples: Option<Vec<Subsample>>) -> Self {
+        Self { ivs, subsamples }
+    }
+
+    /// Serialise as the `CencSampleAuxiliaryDataFormat` of an item
+    /// whose `ienc` is `ienc` (Amd 1 §7.1): `aux_info_type_parameter`
+    /// 0 is the single-key form — the IV of key entry 1 when that key
+    /// has a per-item IV, then the subsamples, all under key entry 1 —
+    /// and 1 the multiple-key form. An IV whose size is not the key's
+    /// `Per_Sample_IV_Size`, a subsample the form cannot express or a
+    /// count past the field width is `InvalidData`. The single-key form
+    /// of constant-IV full protection is empty (no auxiliary item is
+    /// written for it).
+    pub fn to_bytes(&self, ienc: &ItemEncryption, aux_info_type_parameter: u32) -> Result<Vec<u8>> {
+        let iv_for = |idx: u16, iv: &[u8]| -> Result<()> {
+            let size = ienc.key(idx)?.per_sample_iv_size as usize;
+            if size == 0 || iv.len() != size {
+                return Err(HeifError::invalid(format!(
+                    "key entry {idx}: a {}-byte IV where Per_Sample_IV_Size is {size}",
+                    iv.len()
+                )));
+            }
+            Ok(())
+        };
+        let mut b = Vec::new();
+        match aux_info_type_parameter {
+            0 => {
+                let size = ienc.key(1)?.per_sample_iv_size as usize;
+                match self.ivs.as_slice() {
+                    [] if size == 0 => {}
+                    [(1, iv)] => {
+                        iv_for(1, iv)?;
+                        b.extend_from_slice(iv);
+                    }
+                    _ => {
+                        return Err(HeifError::invalid(
+                            "the single-key form carries exactly the IV of key entry 1",
+                        ));
+                    }
+                }
+                if let Some(subs) = &self.subsamples {
+                    let n = u16::try_from(subs.len()).map_err(|_| {
+                        HeifError::invalid("more than 65535 subsamples in the single-key form")
+                    })?;
+                    b.extend_from_slice(&n.to_be_bytes());
+                    for s in subs {
+                        if s.key_index != 1 {
+                            return Err(HeifError::invalid(
+                                "the single-key form protects under key entry 1 only",
+                            ));
+                        }
+                        b.extend_from_slice(&s.clear.to_be_bytes());
+                        b.extend_from_slice(&s.protected.to_be_bytes());
+                    }
+                }
+            }
+            1 => {
+                let n = u16::try_from(self.ivs.len())
+                    .map_err(|_| HeifError::invalid("more than 65535 IVs"))?;
+                b.extend_from_slice(&n.to_be_bytes());
+                for (idx, iv) in &self.ivs {
+                    iv_for(*idx, iv)?;
+                    let idx8 = u8::try_from(*idx).map_err(|_| {
+                        HeifError::invalid("multi_subindex_IV is an 8-bit field (Amd 1 §7.1)")
+                    })?;
+                    b.push(idx8);
+                    b.extend_from_slice(iv);
+                }
+                let subs = self.subsamples.as_deref().ok_or_else(|| {
+                    HeifError::invalid("the multiple-key form lists its subsamples")
+                })?;
+                let n = u32::try_from(subs.len())
+                    .map_err(|_| HeifError::invalid("more than 2^32 - 1 subsamples"))?;
+                b.extend_from_slice(&n.to_be_bytes());
+                for s in subs {
+                    b.extend_from_slice(&s.key_index.to_be_bytes());
+                    b.extend_from_slice(&s.clear.to_be_bytes());
+                    b.extend_from_slice(&s.protected.to_be_bytes());
+                }
+            }
+            p => {
+                return Err(HeifError::unsupported(format!(
+                    "CencSampleAuxiliaryDataFormat for aux_info_type_parameter {p}"
+                )));
+            }
+        }
+        Ok(b)
+    }
+
     /// Parse `b` for an item whose `ienc` is `ienc`;
     /// `aux_info_type_parameter` 1 selects the multiple-key form.
     pub fn parse(b: &[u8], ienc: &ItemEncryption, aux_info_type_parameter: u32) -> Result<Self> {
@@ -510,6 +602,100 @@ pub fn decrypt_with(
     cipher: &dyn BlockCipher,
     reading: CencReading,
 ) -> Result<Vec<u8>> {
+    transform(scheme, ienc, aux, data, cipher, reading, false)
+}
+
+/// Encrypt `data`, the clear item data, exactly as [`decrypt`] undoes
+/// it: the same ranges, IVs, counters, chaining and patterns of
+/// `scheme` under `ienc` and `aux` (the Amd 1 syntax as written —
+/// [`CencReading::strict`]). `decrypt(encrypt(x)) == x` for every
+/// input either accepts.
+pub fn encrypt(
+    scheme: FourCc,
+    ienc: &ItemEncryption,
+    aux: &CencAuxData,
+    data: &[u8],
+    cipher: &dyn BlockCipher,
+) -> Result<Vec<u8>> {
+    transform(scheme, ienc, aux, data, cipher, CencReading::strict(), true)
+}
+
+/// Subsamples for item data made of length-prefixed NAL units (§9.5.2:
+/// the length field and the leading bytes a reader needs stay clear).
+/// `clear_lead(nal)` is the number of bytes of that unit — after its
+/// `length_size`-byte length field — to leave clear, `None` for a unit
+/// left entirely clear (parameter sets, SEI); the rest of the unit is
+/// protected under `key_index`. With `block_align` the protected part
+/// is shortened to a whole number of 16-byte blocks (§9.5.2.2), the
+/// remainder joining the clear lead. Clear runs longer than the 16-bit
+/// `BytesOfClearData` are split over subsamples without protected
+/// bytes. Data that is not a whole sequence of units is `InvalidData`.
+pub fn nal_subsamples(
+    data: &[u8],
+    length_size: usize,
+    key_index: u16,
+    block_align: bool,
+    mut clear_lead: impl FnMut(&[u8]) -> Option<usize>,
+) -> Result<Vec<Subsample>> {
+    if !(1..=4).contains(&length_size) {
+        return Err(HeifError::invalid(format!(
+            "NAL length field of {length_size} bytes"
+        )));
+    }
+    let mut out: Vec<Subsample> = Vec::new();
+    let mut clear = 0usize;
+    let mut pos = 0usize;
+    let flush = |clear: &mut usize, protected: usize, out: &mut Vec<Subsample>| {
+        while *clear > u16::MAX as usize {
+            out.push(Subsample::new(key_index, u16::MAX, 0));
+            *clear -= u16::MAX as usize;
+        }
+        if *clear > 0 || protected > 0 {
+            out.push(Subsample::new(key_index, *clear as u16, protected as u32));
+        }
+        *clear = 0;
+    };
+    while pos < data.len() {
+        if data.len() - pos < length_size {
+            return Err(HeifError::invalid("truncated NAL length field"));
+        }
+        let len = data[pos..pos + length_size]
+            .iter()
+            .fold(0usize, |a, &b| (a << 8) | b as usize);
+        let start = pos + length_size;
+        if len > data.len() - start {
+            return Err(HeifError::invalid("NAL unit runs past the item data"));
+        }
+        let nal = &data[start..start + len];
+        let lead = clear_lead(nal).map_or(len, |l| l.min(len));
+        let mut protected = len - lead;
+        if block_align {
+            protected -= protected % 16;
+        }
+        if protected > u32::MAX as usize {
+            return Err(HeifError::invalid("NAL unit larger than 4 GiB"));
+        }
+        clear += length_size + (len - protected);
+        if protected > 0 {
+            flush(&mut clear, protected, &mut out);
+        }
+        pos = start + len;
+    }
+    flush(&mut clear, 0, &mut out);
+    Ok(out)
+}
+
+/// [`decrypt_with`] / [`encrypt`]: one walk, `forward` picks the
+/// direction.
+fn transform(
+    scheme: FourCc,
+    ienc: &ItemEncryption,
+    aux: &CencAuxData,
+    data: &[u8],
+    cipher: &dyn BlockCipher,
+    reading: CencReading,
+    forward: bool,
+) -> Result<Vec<u8>> {
     let per_sample_ivs = !aux.ivs.is_empty();
     let (ctr, per_subsample_chain) = match &scheme {
         b"cenc" | b"cens" => (true, false),
@@ -620,6 +806,21 @@ pub fn decrypt_with(
         }
     } else {
         let cbc = |out: &mut [u8], kid: &[u8; 16], iv: [u8; 16], blocks: &[(usize, usize)]| {
+            if forward {
+                // C[i] = E(P[i] ^ C[i-1]): each block needs the one
+                // before it, so the cipher runs block by block.
+                let mut prev = iv;
+                for &(o, _) in blocks {
+                    let mut block = [0u8; 16];
+                    for j in 0..16 {
+                        block[j] = out[o + j] ^ prev[j];
+                    }
+                    cipher.encrypt_blocks(kid, &mut block)?;
+                    out[o..o + 16].copy_from_slice(&block);
+                    prev = block;
+                }
+                return Ok::<(), HeifError>(());
+            }
             let mut buf = Vec::with_capacity(blocks.len() * 16);
             for &(o, _) in blocks {
                 buf.extend_from_slice(&out[o..o + 16]);
@@ -815,6 +1016,149 @@ mod tests {
             .with_pattern(1, 9)
             .with_swapped_pattern();
         assert_eq!((p.crypt_byte_block, p.skip_byte_block), (9, 1));
+    }
+
+    /// A toy block "cipher" whose two directions differ (so a CBC walk
+    /// in the wrong direction shows): a keyed byte substitution.
+    struct Subst;
+    impl BlockCipher for Subst {
+        fn encrypt_blocks(&self, kid: &[u8; 16], blocks: &mut [u8]) -> Result<()> {
+            assert_eq!(blocks.len() % 16, 0);
+            for (i, b) in blocks.iter_mut().enumerate() {
+                *b = (*b ^ kid[i % 16]).wrapping_add(17).rotate_left(3);
+            }
+            Ok(())
+        }
+        fn decrypt_blocks(&self, kid: &[u8; 16], blocks: &mut [u8]) -> Result<()> {
+            assert_eq!(blocks.len() % 16, 0);
+            for (i, b) in blocks.iter_mut().enumerate() {
+                *b = b.rotate_right(3).wrapping_sub(17) ^ kid[i % 16];
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn encrypt_is_undone_by_decrypt_under_every_scheme() {
+        let data: Vec<u8> = (0..517u32).map(|i| (i * 7 + 3) as u8).collect();
+        let two_keys = ItemEncryption::new(vec![
+            EncryptionKey::new(8, [0x11; 16]),
+            EncryptionKey::new(16, [0x22; 16]),
+        ]);
+        let subs = vec![
+            Subsample::new(1, 5, 100),
+            Subsample::new(2, 0, 37),
+            Subsample::new(1, 70, 0),
+            Subsample::new(2, 1, 304),
+        ];
+        let ivs = vec![(1, vec![0xa5; 8]), (2, vec![0x5a; 16])];
+        let multi = CencAuxData::new(ivs, Some(subs));
+        let constant = ItemEncryption::new(vec![
+            EncryptionKey::new(0, [0x33; 16]).with_constant_iv(vec![0x44; 16]),
+        ]);
+        let whole = CencAuxData::new(Vec::new(), None);
+        for scheme in [SCHEME_CENC, SCHEME_CENS, SCHEME_CBC1, SCHEME_CBCS] {
+            for (ienc, aux, param) in [
+                (two_keys.clone(), multi.clone(), 1),
+                (two_keys.clone().with_pattern(1, 2), multi.clone(), 1),
+                (constant.clone(), whole.clone(), 0),
+                (constant.clone().with_pattern(3, 1), whole.clone(), 0),
+            ] {
+                let sealed = encrypt(scheme, &ienc, &aux, &data, &Subst).unwrap();
+                assert_eq!(sealed.len(), data.len());
+                assert_ne!(sealed, data, "{scheme:?}");
+                assert_eq!(
+                    decrypt(scheme, &ienc, &aux, &sealed, &Subst).unwrap(),
+                    data,
+                    "{scheme:?} pattern {}:{}",
+                    ienc.crypt_byte_block,
+                    ienc.skip_byte_block
+                );
+                // The auxiliary data survives its serialisation.
+                let bytes = aux.to_bytes(&ienc, param).unwrap();
+                let back = CencAuxData::parse(&bytes, &ienc, param).unwrap();
+                assert_eq!(back, aux);
+            }
+        }
+    }
+
+    #[test]
+    fn aux_data_serialiser_refuses_what_the_form_cannot_say() {
+        let e = ItemEncryption::new(vec![
+            EncryptionKey::new(8, [1; 16]),
+            EncryptionKey::new(0, [2; 16]).with_constant_iv(vec![9; 16]),
+        ]);
+        // Wrong IV size; an IV for a constant-IV key; key 2 in the
+        // single-key form; the multiple-key form without subsamples.
+        assert!(
+            CencAuxData::new(vec![(1, vec![0; 16])], None)
+                .to_bytes(&e, 0)
+                .is_err()
+        );
+        assert!(
+            CencAuxData::new(vec![(2, vec![0; 16])], Some(vec![]))
+                .to_bytes(&e, 1)
+                .is_err()
+        );
+        let two = CencAuxData::new(vec![(1, vec![0; 8])], Some(vec![Subsample::new(2, 0, 16)]));
+        assert!(two.to_bytes(&e, 0).is_err());
+        assert!(two.to_bytes(&e, 1).is_ok());
+        assert!(
+            CencAuxData::new(vec![(1, vec![0; 8])], None)
+                .to_bytes(&e, 1)
+                .is_err()
+        );
+        assert!(two.to_bytes(&e, 2).is_err());
+    }
+
+    #[test]
+    fn nal_subsamples_keep_lengths_and_leads_clear() {
+        // Units of 3 (left clear), 40 and 20 bytes, 2-byte lengths.
+        let mut data = Vec::new();
+        for (len, fill) in [(3usize, 0x40u8), (40, 0x02), (20, 0x26)] {
+            data.extend_from_slice(&(len as u16).to_be_bytes());
+            data.extend(std::iter::repeat_n(fill, len));
+        }
+        let lead = |nal: &[u8]| (nal[0] != 0x40).then_some(4);
+        let subs = nal_subsamples(&data, 2, 1, false, lead).unwrap();
+        assert_eq!(
+            subs,
+            vec![
+                Subsample::new(1, 2 + 3 + 2 + 4, 36),
+                Subsample::new(1, 2 + 4, 16)
+            ]
+        );
+        // Block-aligned: 36 → 32 protected, the 4 spare bytes clear.
+        let subs = nal_subsamples(&data, 2, 1, true, lead).unwrap();
+        assert_eq!(
+            subs,
+            vec![
+                Subsample::new(1, 2 + 3 + 2 + 8, 32),
+                Subsample::new(1, 2 + 4, 16)
+            ]
+        );
+        let covered: usize = subs
+            .iter()
+            .map(|s| s.clear as usize + s.protected as usize)
+            .sum();
+        assert_eq!(covered, data.len());
+        // A trailing clear unit closes with a clear-only subsample; a
+        // clear run past 65535 bytes is split.
+        let mut long = vec![0, 1, 0, 0];
+        long[..4].copy_from_slice(&70000u32.to_be_bytes());
+        long.extend(std::iter::repeat_n(0x40, 70000));
+        let subs = nal_subsamples(&long, 4, 3, false, |_| None).unwrap();
+        assert_eq!(
+            subs,
+            vec![
+                Subsample::new(3, u16::MAX, 0),
+                Subsample::new(3, (70004 - 65535) as u16, 0)
+            ]
+        );
+        // Not a whole sequence of units.
+        assert!(nal_subsamples(&data[..data.len() - 1], 2, 1, false, lead).is_err());
+        assert!(nal_subsamples(&[0], 2, 1, false, lead).is_err());
+        assert!(nal_subsamples(&data, 5, 1, false, lead).is_err());
     }
 
     #[test]

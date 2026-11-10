@@ -106,7 +106,7 @@ mod stream_params;
 
 pub use api::{
     ColorInfo, ColorRange, DecodeOptions, Frame, HeifImage, ImageInfo, Metadata, Palette,
-    PixelFormat, RgbImage, RgbaImage, info, info_of, probe,
+    PartialDecode, PixelFormat, RgbImage, RgbaImage, SkippedEntry, info, info_of, probe,
 };
 pub use av1c::Av1Config;
 pub use avcc::AvcConfig;
@@ -130,9 +130,9 @@ pub use miaf::{MiafProfile, MiafReport, MiafViolation};
 
 #[cfg(feature = "registry")]
 pub use api_registry::{
-    blobs_of_metadata, decode, decode_all, decode_all_with, decode_file, decode_file_item,
-    decode_from, decode_rgb8, decode_rgba8, decode_with, encode, encode_all, encode_owned,
-    encode_rgb8, encode_rgba8, encode_to, metadata_of_blobs,
+    blobs_of_metadata, decode, decode_all, decode_all_partial, decode_all_with, decode_file,
+    decode_file_item, decode_from, decode_rgb8, decode_rgba8, decode_with, encode, encode_all,
+    encode_owned, encode_rgb8, encode_rgba8, encode_to, metadata_of_blobs,
 };
 #[cfg(feature = "registry")]
 pub use decode::{DecodedImage, ItemDecoder, decode_item, decode_primary};

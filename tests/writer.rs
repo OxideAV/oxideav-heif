@@ -1321,6 +1321,51 @@ fn ipco_is_a_pool_shared_by_every_item() {
     assert_eq!(check(&g, MiafProfile::Miaf).unwrap().violations, vec![]);
 }
 
+/// Counts that do not fit their box field are refused, never wrapped:
+/// a reference box names at most 65 535 items (its `reference_count`
+/// is 16 bits — a 256 × 256 grid, 65 536 tiles, cannot be written),
+/// an `iloc` entry holds at most 65 535 extents.
+#[test]
+fn counts_past_their_field_width_are_refused() {
+    use oxideav_heif::props::{Colr, Ispe, Pixi};
+
+    let (hvcc, data) = hevc_record_and_data();
+    let props = || {
+        vec![
+            (hvcc.clone(), true),
+            (Property::Ispe(Ispe::new(64, 64)), false),
+            (Property::Pixi(Pixi::new(vec![8, 8, 8])), false),
+            (Property::Colr(Colr::MIAF_DEFAULT), false),
+        ]
+    };
+    let mut w = HeifWriter::new();
+    let a = w.add_coded_item(*b"hvc1", data.clone(), props());
+    let b = w.add_coded_item(*b"hvc1", data.clone(), props());
+    w.set_primary(a);
+    w.add_reference(*b"cdsc", b, vec![a; 65_535]);
+    w.write_to_vec().expect("65 535 targets fit");
+    w.add_reference(*b"base", b, vec![a; 65_536]);
+    let e = w.write_to_vec().unwrap_err();
+    assert!(
+        matches!(e, oxideav_heif::HeifError::LimitExceeded(_)),
+        "{e}"
+    );
+    assert!(e.to_string().contains("65536"), "{e}");
+
+    let mut w = HeifWriter::new();
+    let tiles = vec![vec![0u8, 0, 0, 1]; 65_536];
+    let id = w
+        .add_constrained_extents_item(*b"hvc1", 256, 256, 64, 64, tiles, props())
+        .unwrap();
+    w.set_primary(id);
+    let e = w.write_to_vec().unwrap_err();
+    assert!(
+        matches!(e, oxideav_heif::HeifError::LimitExceeded(_)),
+        "{e}"
+    );
+    assert!(e.to_string().contains("extents"), "{e}");
+}
+
 /// §8.11.14: `ipma` flags bit 0 selects 15-bit property indices, to be
 /// set only when the `ipco` holds more than 127 entries. On each side
 /// of the boundary the writer picks the right form and the reader

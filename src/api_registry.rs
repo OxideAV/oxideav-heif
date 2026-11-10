@@ -17,8 +17,8 @@ use oxideav_core::{
 };
 
 use crate::api::{
-    ColorInfo, ColorRange, DecodeOptions, Frame, HeifImage, Metadata, PixelFormat, RgbImage,
-    RgbaImage, sequence_tracks,
+    ColorInfo, ColorRange, DecodeOptions, Frame, HeifImage, Metadata, PartialDecode, PixelFormat,
+    RgbImage, RgbaImage, SkippedEntry, sequence_tracks,
 };
 use crate::compose::{apply_clap, attach_alpha};
 use crate::decode::{
@@ -207,11 +207,34 @@ pub fn decode_all(bytes: &[u8]) -> Result<Vec<Frame>> {
 /// `opts` (`item_id` and `tone_mapped` are ignored: every displayable
 /// item comes back as its base rendition).
 pub fn decode_all_with(bytes: &[u8], opts: &DecodeOptions) -> Result<Vec<Frame>> {
+    decode_all_inner(bytes, opts, None)
+}
+
+/// [`decode_all_with`] for a viewer that shows what it can: an entry
+/// that does not decode — a displayable item none of whose `altr`
+/// alternatives decodes, an image-sequence track one of whose samples
+/// the codec refuses — is left out of `frames` and listed in `skipped`
+/// with the error, instead of failing the whole file. The frames that
+/// are returned are exactly the ones [`decode_all_with`] yields for
+/// them (same order, pixels, metadata and delays; a track is all of
+/// its frames or none). A file that does not parse, exceeds the input
+/// limit or fails the `strict` check is still an error, and so is one
+/// of which nothing decodes (the first entry's error).
+pub fn decode_all_partial(bytes: &[u8], opts: &DecodeOptions) -> Result<PartialDecode> {
+    let mut skipped = Vec::new();
+    let frames = decode_all_inner(bytes, opts, Some(&mut skipped))?;
+    Ok(PartialDecode::new(frames, skipped))
+}
+
+fn decode_all_inner(
+    bytes: &[u8],
+    opts: &DecodeOptions,
+    mut skipped: Option<&mut Vec<SkippedEntry>>,
+) -> Result<Vec<Frame>> {
     opts.check_input(bytes.len())?;
     let file = HeifFile::parse_borrowed(bytes)?;
     check_strict(&file, opts)?;
     let mut frames = Vec::new();
-    let mut first_err = None;
     if let Ok(meta) = file.meta() {
         let primary = file.primary_item().ok().map(|i| i.id);
         let mut entries = meta.display_order();
@@ -231,7 +254,8 @@ pub fn decode_all_with(bytes: &[u8], opts: &DecodeOptions) -> Result<Vec<Frame>>
         }
         for alternatives in entries {
             let mut decoded = false;
-            for id in alternatives {
+            let mut entry_err = None;
+            for &id in &alternatives {
                 match decode_checked_item(&file, id, opts) {
                     Ok(img) => {
                         frames.push(Frame::new(HeifImage::from(img), None, Some(id), None));
@@ -239,24 +263,38 @@ pub fn decode_all_with(bytes: &[u8], opts: &DecodeOptions) -> Result<Vec<Frame>>
                         break;
                     }
                     Err(e) => {
-                        if first_err.is_none() {
-                            first_err = Some(e);
+                        if entry_err.is_none() {
+                            entry_err = Some(e);
                         }
                     }
                 }
             }
-            if !decoded && let Some(e) = first_err {
-                return Err(e);
+            if decoded {
+                continue;
+            }
+            let Some(e) = entry_err else { continue };
+            match skipped.as_deref_mut() {
+                Some(list) => list.push(SkippedEntry::new(alternatives, None, e)),
+                None => return Err(e),
             }
         }
     }
     if let Some(movie) = parse_movie(&file)? {
         for track in sequence_tracks(&movie) {
-            frames.extend(decode_track(&file, &movie, track, opts)?);
+            match decode_track(&file, &movie, track, opts) {
+                Ok(f) => frames.extend(f),
+                Err(e) => match skipped.as_deref_mut() {
+                    Some(list) => {
+                        list.push(SkippedEntry::new(Vec::new(), Some(track.track_id), e));
+                    }
+                    None => return Err(e),
+                },
+            }
         }
     }
     if frames.is_empty() {
-        return Err(first_err.unwrap_or_else(|| {
+        let first = skipped.and_then(|list| (!list.is_empty()).then(|| list.remove(0).error));
+        return Err(first.unwrap_or_else(|| {
             HeifError::invalid("file carries neither image items nor image-sequence tracks")
         }));
     }

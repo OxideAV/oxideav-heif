@@ -22,8 +22,109 @@ const TYPES: &[&[u8; 4]] = &[
     b"clli", b"mdcv", b"cclv", b"amve", b"avcC", b"lhvC", b"oinf", b"tols", b"ispe", b"pixi",
     b"colr", b"pasp", b"clap", b"irot", b"imir", b"iscl", b"auxC", b"hvcC", b"av1C", b"rloc",
     b"lsel", b"a1op", b"a1lx", b"rref", b"crtt", b"mdft", b"udes", b"altt", b"reve", b"ndwt",
-    b"cexg", b"dadj", b"stag", b"tilC",
+    b"cexg", b"dadj", b"stag", b"tilC", b"ienc", b"iaux",
 ];
+
+/// A toy block "cipher" (a keyed byte substitution whose directions
+/// differ) for the Common Encryption walk: the ranges, counters,
+/// chains and patterns are this crate's, the cipher the caller's.
+struct Toy;
+impl oxideav_heif::cenc::BlockCipher for Toy {
+    fn encrypt_blocks(&self, kid: &[u8; 16], blocks: &mut [u8]) -> oxideav_heif::Result<()> {
+        assert_eq!(blocks.len() % 16, 0, "whole blocks only");
+        for (i, b) in blocks.iter_mut().enumerate() {
+            *b = (*b ^ kid[i % 16]).wrapping_add(17).rotate_left(3);
+        }
+        Ok(())
+    }
+    fn decrypt_blocks(&self, kid: &[u8; 16], blocks: &mut [u8]) -> oxideav_heif::Result<()> {
+        assert_eq!(blocks.len() % 16, 0, "whole blocks only");
+        for (i, b) in blocks.iter_mut().enumerate() {
+            *b = b.rotate_right(3).wrapping_sub(17) ^ kid[i % 16];
+        }
+        Ok(())
+    }
+}
+
+/// Common Encryption of items (ISO/IEC 23001-7 Amd 1 §7.1 / §8.3,
+/// §9 / §10) on arbitrary records: `body` = one length byte, an `ienc`
+/// body of that length, one length byte, auxiliary data of that
+/// length, then the item data.
+fn cenc_records(sel: usize, body: &[u8]) {
+    use oxideav_heif::cenc::{
+        decrypt, decrypt_with, encrypt, nal_subsamples, CencAuxData, CencReading, ItemEncryption,
+        Subsample,
+    };
+    let Some((&n, rest)) = body.split_first() else {
+        return;
+    };
+    let n = (n as usize).min(rest.len());
+    let (ienc_bytes, rest) = rest.split_at(n);
+    let Ok(ienc) = ItemEncryption::parse(ienc_bytes) else {
+        return;
+    };
+    assert_eq!(
+        ItemEncryption::parse(&ienc.to_body()).ok().as_ref(),
+        Some(&ienc),
+        "ienc must round-trip"
+    );
+    let Some((&m, rest)) = rest.split_first() else {
+        return;
+    };
+    let m = (m as usize).min(rest.len());
+    let (aux_bytes, data) = rest.split_at(m);
+    let param = (sel & 1) as u32;
+    let scheme = [*b"cenc", *b"cens", *b"cbc1", *b"cbcs", *b"zzzz"][(sel >> 1) % 5];
+    let walk = |aux: &CencAuxData, ienc: &ItemEncryption| {
+        // decrypt returns; encrypt is its inverse whenever it accepts.
+        if let Ok(clear) = decrypt(scheme, ienc, aux, data, &Toy) {
+            assert_eq!(clear.len(), data.len());
+            let sealed = encrypt(scheme, ienc, aux, &clear, &Toy).expect("encrypt what decrypts");
+            assert_eq!(sealed, data, "encrypt must undo decrypt");
+        }
+        if let Ok(sealed) = encrypt(scheme, ienc, aux, data, &Toy) {
+            assert_eq!(
+                decrypt(scheme, ienc, aux, &sealed, &Toy).ok().as_deref(),
+                Some(data),
+                "decrypt must undo encrypt"
+            );
+        }
+        let _ = decrypt_with(scheme, ienc, aux, data, &Toy, CencReading::compat());
+    };
+    if let Ok(aux) = CencAuxData::parse(aux_bytes, &ienc, param) {
+        // Whatever parses re-serialises to a form that parses equal.
+        if let Ok(bytes) = aux.to_bytes(&ienc, param) {
+            assert_eq!(
+                CencAuxData::parse(&bytes, &ienc, param).ok().as_ref(),
+                Some(&aux),
+                "auxiliary data must round-trip"
+            );
+        }
+        walk(&aux, &ienc);
+        walk(&aux, &ienc.clone().with_swapped_pattern());
+    }
+    if let Ok(aux) = CencAuxData::parse_with(aux_bytes, &ienc, param, CencReading::compat()) {
+        let _ = decrypt_with(scheme, &ienc, &aux, data, &Toy, CencReading::compat());
+    }
+    // Subsamples over the item data read as NAL units: they cover it
+    // exactly, and protect under them round-trips.
+    let length_size = 1 + (sel >> 4) % 5;
+    let lead = aux_bytes.first().copied().unwrap_or(2) as usize;
+    if let Ok(subs) = nal_subsamples(data, length_size, 1, sel & 8 != 0, |nal| {
+        (nal.first().is_some_and(|b| b & 1 == 0)).then_some(lead)
+    }) {
+        let covered: u64 = subs.iter().map(|s: &Subsample| s.clear as u64 + s.protected as u64).sum();
+        assert_eq!(covered, data.len() as u64, "subsamples must cover the item");
+        let ivs = ienc
+            .keys
+            .first()
+            .filter(|k| k.per_sample_iv_size > 0)
+            .map(|k| (1u16, vec![0xa5; k.per_sample_iv_size as usize]))
+            .into_iter()
+            .collect();
+        walk(&CencAuxData::new(ivs, Some(subs)), &ienc);
+    }
+}
 
 fn round_trip(p: &Property) {
     let bytes = property_box(p);
@@ -62,6 +163,7 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(p) = Property::parse(&raw) {
         round_trip(&p);
     }
+    cenc_records(sel, body);
     // Low-overhead `mini` box (Amd 2 Annex O): parse → serialize →
     // parse is a fixed point; the O.4 expansion parses as a HEIF file.
     if let Ok(m) = oxideav_heif::mini::MinimizedImage::parse(body) {

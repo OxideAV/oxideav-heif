@@ -158,7 +158,11 @@ type Pumped = (
     BTreeMap<u32, Vec<Got>>,
 );
 
-fn pump_all(ctx: &RuntimeContext, bytes: Vec<u8>) -> Result<Pumped, String> {
+fn pump_all(
+    ctx: &RuntimeContext,
+    bytes: Vec<u8>,
+    heif_opts: Option<&DecodeOptions>,
+) -> Result<Pumped, String> {
     let mut d = ctx
         .containers
         .open_demuxer("heif", Box::new(Cursor::new(bytes)), &ctx.codecs)
@@ -171,7 +175,18 @@ fn pump_all(ctx: &RuntimeContext, bytes: Vec<u8>) -> Result<Pumped, String> {
     let mut decoders: Vec<Option<Box<dyn Decoder>>> = streams
         .iter()
         .map(|s| {
-            ctx.codecs.first_decoder(&s.params).ok().map(|mut d| {
+            // A caller cipher has no string form: the keyed leg builds
+            // the `"heif"` decoder as its concrete type with the
+            // contract options (what a framework caller holding keys
+            // does); every other stream goes through the registry.
+            let dec: Option<Box<dyn Decoder>> = match heif_opts {
+                Some(o) if s.params.codec_id.as_str() == "heif" => Some(Box::new(
+                    oxideav_heif::HeifCodec::new(s.params.codec_id.clone())
+                        .with_decode_options(o.clone()),
+                )),
+                _ => ctx.codecs.first_decoder(&s.params).ok(),
+            };
+            dec.map(|mut d| {
                 d.set_execution_context(&ExecutionContext::with_threads(8));
                 d
             })
@@ -266,13 +281,45 @@ fn meta_of<'a>(metadata: &'a [(String, String)], key: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
+/// How one comparison runs.
+#[derive(Clone, Copy, PartialEq)]
+enum Leg {
+    /// `decode_all` (all or nothing) at the given options.
+    Whole,
+    /// `decode_all_partial`: what decodes of a file `decode_all`
+    /// refuses, against the frames the framework delivers per packet.
+    Partial,
+}
+
 /// One file: the list of discrepancies (empty = the paths agree).
 fn compare(ctx: &RuntimeContext, path: &Path) -> Vec<String> {
+    compare_leg(ctx, path, &DecodeOptions::default(), false, Leg::Whole)
+}
+
+/// [`compare`] at `opts`; `keyed` hands the same options to the
+/// framework `"heif"` decoder (the encrypted files); `leg` picks the
+/// contract function.
+fn compare_leg(
+    ctx: &RuntimeContext,
+    path: &Path,
+    opts: &DecodeOptions,
+    keyed: bool,
+    leg: Leg,
+) -> Vec<String> {
     let mut issues = Vec::new();
     let bytes = std::fs::read(path).unwrap();
-    let opts = DecodeOptions::default();
-    let contract = decode_all_with(&bytes, &opts);
-    let framework = pump_all(ctx, bytes.clone());
+    let opts = opts.clone();
+    let partial = leg == Leg::Partial;
+    let contract = match leg {
+        Leg::Whole => decode_all_with(&bytes, &opts),
+        Leg::Partial => oxideav_heif::decode_all_partial(&bytes, &opts).map(|p| {
+            if p.is_complete() {
+                issues.push("partial decode skipped nothing on a file decode_all refuses".into());
+            }
+            p.frames
+        }),
+    };
+    let framework = pump_all(ctx, bytes.clone(), keyed.then_some(&opts));
     let (frames, (streams, metadata, got)) = match (contract, framework) {
         (Err(_), Err(_)) => return issues,
         (Err(e), Ok((_, _, got))) => {
@@ -356,7 +403,19 @@ fn compare(ctx: &RuntimeContext, path: &Path) -> Vec<String> {
                 continue;
             };
             found = true;
-            let Some(g) = got.get(&s.index).and_then(|v| v.get(pos)) else {
+            // A refused packet leaves no frame, so the partial leg finds
+            // the item's frame by its packet index (`pts`).
+            let frame_of_packet = |v: &'_ Vec<Got>| -> Option<usize> {
+                if partial {
+                    v.iter().position(|g| g.pts == Some(pos as i64))
+                } else {
+                    (pos < v.len()).then_some(pos)
+                }
+            };
+            let Some(g) = got
+                .get(&s.index)
+                .and_then(|v| frame_of_packet(v).map(|i| &v[i]))
+            else {
                 issues.push(format!("item {id}: stream {} has no frame {pos}", s.index));
                 continue;
             };
@@ -540,7 +599,7 @@ fn compare(ctx: &RuntimeContext, path: &Path) -> Vec<String> {
                     i.width, i.height, s.params.width, s.params.height
                 ));
             }
-            if i.frames as usize != frames.len() {
+            if !partial && i.frames as usize != frames.len() {
                 issues.push(format!(
                     "info.frames {} vs {} decoded frames",
                     i.frames,
@@ -554,6 +613,28 @@ fn compare(ctx: &RuntimeContext, path: &Path) -> Vec<String> {
     issues
 }
 
+/// The decode options that open an encrypted conformance file: its
+/// `drm_cfg` test keys behind the black-box AES-128 (`openssl`), read
+/// with `CencReading::compat()` (nine of the files depart from the
+/// Amd 1 syntax). `None` for any other file, or without `openssl`.
+fn keyed_options(path: &Path) -> Option<DecodeOptions> {
+    let dir = path.parent()?;
+    let name = path.file_stem()?.to_string_lossy().to_string();
+    let cfg = dir
+        .join("drm_cfg")
+        .join(format!("{}.xml", name.strip_prefix("image_")?));
+    let xml = std::fs::read_to_string(cfg).ok()?;
+    if !common::have_binary("openssl") {
+        return None;
+    }
+    let cipher = common::cipher::OpenSsl(common::cipher::keys(&xml));
+    Some(
+        DecodeOptions::default()
+            .with_decryptor(cipher)
+            .with_cenc_reading(oxideav_heif::cenc::CencReading::compat()),
+    )
+}
+
 #[test]
 fn framework_path_equals_decode_all_over_every_file() {
     let ctx = context();
@@ -562,6 +643,8 @@ fn framework_path_equals_decode_all_over_every_file() {
     let mut rows = Vec::new();
     let mut bad = 0usize;
     let mut decoded = 0usize;
+    let mut with_keys = 0usize;
+    let mut in_part = 0usize;
     for path in &files {
         let name = path
             .strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
@@ -572,12 +655,42 @@ fn framework_path_equals_decode_all_over_every_file() {
         let issues = compare(&ctx, path);
         eprintln!("{name}: {:.1} s", started.elapsed().as_secs_f64());
         let bytes = std::fs::read(path).unwrap();
+        let mut issues = issues;
         let class = match decode_all_with(&bytes, &DecodeOptions::default()) {
             Ok(f) => {
                 decoded += 1;
                 format!("{} frames", f.len())
             }
-            Err(e) => format!("refused ({e})"),
+            Err(e) => {
+                // A refused file's further legs: the encrypted ones
+                // under their test keys (both paths decrypt through
+                // the black-box cipher), the others through
+                // `decode_all_partial` — what decodes of the file,
+                // against the framework's per-packet frames.
+                let mut class = format!("refused ({e})");
+                if let Some(keyed) = keyed_options(path) {
+                    issues.extend(compare_leg(&ctx, path, &keyed, true, Leg::Whole));
+                    match decode_all_with(&bytes, &keyed) {
+                        Ok(f) => {
+                            with_keys += 1;
+                            class = format!("{} frames with the test keys", f.len());
+                        }
+                        Err(e) => issues.push(format!("with the test keys: {e}")),
+                    }
+                } else if e.encrypted_item_info().is_none() {
+                    let opts = DecodeOptions::default();
+                    issues.extend(compare_leg(&ctx, path, &opts, false, Leg::Partial));
+                    if let Ok(p) = oxideav_heif::decode_all_partial(&bytes, &opts) {
+                        in_part += 1;
+                        class = format!(
+                            "{} frames in part, {} entries skipped ({e})",
+                            p.frames.len(),
+                            p.skipped.len()
+                        );
+                    }
+                }
+                class
+            }
         };
         if issues.is_empty() {
             rows.push(format!("{name:<70} {class:<24} agree"));
@@ -589,9 +702,12 @@ fn framework_path_equals_decode_all_over_every_file() {
     let report = rows.join("\n");
     eprintln!("{report}");
     eprintln!(
-        "decode matrix: {} files, {} decode on both paths, {} disagree",
+        "decode matrix: {} files, {} decode on both paths, {} more with the test keys, \
+         {} more in part, {} disagree",
         files.len(),
         decoded,
+        with_keys,
+        in_part,
         bad
     );
     let dir = std::env::temp_dir().join("oxideav-heif-framework-matrix");

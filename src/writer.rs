@@ -48,7 +48,7 @@ use crate::meta::{
 };
 use crate::miaf::{MiafProfile, check};
 use crate::props::{AUX_URN_ALPHA, AUX_URN_DEPTH, AuxC, Property, write::property_box};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[doc(hidden)]
 /// How an item's body is stored.
@@ -140,6 +140,8 @@ pub struct HeifWriter {
     next_id: u32,
     major_brand: Option<FourCc>,
     compatible_brands: Option<Vec<FourCc>>,
+    /// Protected items: `(item id, scheme_type, scheme_version)`.
+    protections: Vec<(u32, FourCc, u32)>,
 }
 
 impl HeifWriter {
@@ -811,6 +813,90 @@ impl HeifWriter {
         }
     }
 
+    /// Protect coded item `id` with Common Encryption (ISO/IEC 23001-7
+    /// Amd 1 §8.3 / §8.4): its body is encrypted under `scheme`
+    /// (`cenc` / `cens` / `cbc1` / `cbcs`) with the keys of `ienc`, the
+    /// IVs and subsamples of `aux` and the caller's `cipher`
+    /// ([`crate::cenc::encrypt`] — the crate ships no cipher and holds
+    /// no key), the item gains the essential `ienc` property and the
+    /// file an `ipro` entry naming the scheme. The auxiliary data is
+    /// written as an `auxi` item (`aux_info_type_parameter` 0: the
+    /// single-key form, 1: the multiple-key form) with an essential
+    /// `iaux`, referenced by `auxr`; its id is returned — `None` when
+    /// the data is empty (one constant-IV key over the whole item).
+    /// NAL-structured items leave their length fields and headers
+    /// clear through subsamples ([`crate::cenc::nal_subsamples`]).
+    /// Refused: an item that is not a single coded body or is already
+    /// protected, a constant IV under a counter scheme (§8.3.1), a
+    /// pattern under `cenc` / `cbc1`, anything `encrypt` or the
+    /// auxiliary-data form refuses.
+    pub fn protect_item(
+        &mut self,
+        id: u32,
+        scheme: FourCc,
+        ienc: crate::cenc::ItemEncryption,
+        aux: &crate::cenc::CencAuxData,
+        aux_info_type_parameter: u32,
+        cipher: &dyn crate::cenc::BlockCipher,
+    ) -> Result<Option<u32>> {
+        use crate::cenc::{SCHEME_CBC1, SCHEME_CENC, SCHEME_CENS};
+        if self.protections.iter().any(|(i, _, _)| *i == id) {
+            return Err(HeifError::invalid(format!(
+                "writer: item {id} is already protected"
+            )));
+        }
+        let counter_mode = scheme == SCHEME_CENC || scheme == SCHEME_CENS;
+        if counter_mode && ienc.keys.iter().any(|k| k.constant_iv.is_some()) {
+            return Err(HeifError::invalid(
+                "writer: a constant IV shall not be used with counter-mode encryption \
+                 (ISO/IEC 23001-7 Amd 1 §8.3.1)",
+            ));
+        }
+        if (scheme == SCHEME_CENC || scheme == SCHEME_CBC1)
+            && (ienc.crypt_byte_block, ienc.skip_byte_block) != (0, 0)
+        {
+            return Err(HeifError::invalid(
+                "writer: the cenc / cbc1 schemes have no pattern (ienc version 0)",
+            ));
+        }
+        let aux_bytes = aux.to_bytes(&ienc, aux_info_type_parameter)?;
+        let item = self
+            .items
+            .iter_mut()
+            .find(|i| i.id == id)
+            .ok_or_else(|| HeifError::invalid(format!("writer: item {id} was not added")))?;
+        let ItemBody::Coded(body) = &mut item.body else {
+            return Err(HeifError::unsupported(format!(
+                "writer: item {id} is not a single coded body"
+            )));
+        };
+        *body = crate::cenc::encrypt(scheme, &ienc, aux, body, cipher)?;
+        item.properties.push((Property::Ienc(ienc), true));
+        self.protections.push((id, scheme, 0x0001_0000));
+        if aux_bytes.is_empty() {
+            return Ok(None);
+        }
+        let aux_id = self.alloc_id();
+        self.items.push(WriterItem {
+            id: aux_id,
+            item_type: *b"auxi",
+            name: String::new(),
+            content_type: None,
+            content_encoding: None,
+            hidden: false,
+            body: ItemBody::Metadata(aux_bytes),
+            properties: vec![(
+                Property::Iaux(crate::cenc::ItemAuxInfo::new(
+                    scheme,
+                    aux_info_type_parameter,
+                )),
+                true,
+            )],
+        });
+        self.references.push((*b"auxr", id, vec![aux_id]));
+        Ok(Some(aux_id))
+    }
+
     /// Add an arbitrary item reference.
     pub fn add_reference(&mut self, reference_type: FourCc, from: u32, to: Vec<u32>) {
         self.references.push((reference_type, from, to));
@@ -1236,21 +1322,7 @@ impl HeifWriter {
         let primary = self.primary?;
         // `dimg` closure of the primary (not the auxiliaries: an alpha
         // plane is not the image the profile is about).
-        let mut chain = vec![primary];
-        let mut i = 0;
-        while i < chain.len() {
-            let cur = chain[i];
-            for (t, f, to) in &self.references {
-                if t == &reference::DIMG && *f == cur {
-                    for x in to {
-                        if !chain.contains(x) {
-                            chain.push(*x);
-                        }
-                    }
-                }
-            }
-            i += 1;
-        }
+        let chain = self.closure_of(primary, false);
         let mut family: Option<FourCc> = None;
         for it in self.items.iter().filter(|i| chain.contains(&i.id)) {
             if !matches!(it.body, ItemBody::Coded(_) | ItemBody::CodedExtents(_)) {
@@ -1486,6 +1558,32 @@ impl HeifWriter {
         } else {
             full_boxed(b"pitm", 0, 0, &(primary as u16).to_be_bytes())
         };
+        // ipro (ISO/IEC 14496-12 §8.11.5): one sinf per distinct
+        // scheme; an item's item_protection_index is its 1-based entry.
+        let mut schemes: Vec<(FourCc, u32)> = Vec::new();
+        for (_, scheme, version) in &self.protections {
+            if !schemes.contains(&(*scheme, *version)) {
+                schemes.push((*scheme, *version));
+            }
+        }
+        let ipro = if schemes.is_empty() {
+            Vec::new()
+        } else {
+            let mut body = (schemes.len() as u16).to_be_bytes().to_vec();
+            for (scheme, version) in &schemes {
+                let mut schm = scheme.to_vec();
+                schm.extend_from_slice(&version.to_be_bytes());
+                body.extend(boxed(b"sinf", &full_boxed(b"schm", 0, 0, &schm)));
+            }
+            full_boxed(b"ipro", 0, 0, &body)
+        };
+        let protection_index = |id: u32| -> u16 {
+            self.protections
+                .iter()
+                .find(|(i, _, _)| *i == id)
+                .and_then(|(_, s, v)| schemes.iter().position(|x| x == &(*s, *v)))
+                .map_or(0, |p| p as u16 + 1)
+        };
         let mut infes = Vec::new();
         for it in &self.items {
             let mut b = Vec::new();
@@ -1495,7 +1593,7 @@ impl HeifWriter {
             } else {
                 b.extend_from_slice(&(it.id as u16).to_be_bytes());
             }
-            b.extend_from_slice(&0u16.to_be_bytes());
+            b.extend_from_slice(&protection_index(it.id).to_be_bytes());
             b.extend_from_slice(&it.item_type);
             b.extend_from_slice(it.name.as_bytes());
             b.push(0);
@@ -1566,12 +1664,14 @@ impl HeifWriter {
         let mut mdat_pieces: Vec<&[u8]> = Vec::new();
         // (item, extents as (offset in mdat, length)).
         let mut mdat_spans: Vec<(u32, Vec<(u64, u64)>)> = Vec::new();
+        let thumbnails: HashSet<u32> = self
+            .references
+            .iter()
+            .filter(|(t, _, _)| t == &reference::THMB)
+            .map(|(_, f, _)| *f)
+            .collect();
         let is_thumb_or_meta = |it: &WriterItem| {
-            matches!(it.body, ItemBody::Metadata(_))
-                || self
-                    .references
-                    .iter()
-                    .any(|(t, f, _)| t == &reference::THMB && *f == it.id)
+            matches!(it.body, ItemBody::Metadata(_)) || thumbnails.contains(&it.id)
         };
         let primary_chain = self.chain_of(primary);
         let mut order: Vec<&WriterItem> = Vec::with_capacity(self.items.len());
@@ -1715,6 +1815,7 @@ impl HeifWriter {
             body.extend_from_slice(&dinf);
             body.extend_from_slice(&iloc_placeholder_or(iloc));
             body.extend_from_slice(&iinf);
+            body.extend_from_slice(&ipro);
             body.extend_from_slice(&iref);
             body.extend_from_slice(&iprp);
             body.extend_from_slice(&grpl);
@@ -1762,26 +1863,43 @@ impl HeifWriter {
     }
 
     /// Items reachable from `id` through `dimg` / `auxl` (as targets).
-    fn chain_of(&self, id: u32) -> Vec<u32> {
-        let mut out = vec![id];
-        let mut i = 0;
-        while i < out.len() {
-            let cur = out[i];
-            for (t, f, to) in &self.references {
-                if t == &reference::DIMG && *f == cur {
-                    for x in to {
-                        if !out.contains(x) {
-                            out.push(*x);
-                        }
-                    }
-                }
-                if t == &reference::AUXL && to.contains(&cur) && !out.contains(f) {
-                    out.push(*f);
+    fn chain_of(&self, id: u32) -> HashSet<u32> {
+        self.closure_of(id, true)
+    }
+
+    /// `id` and everything it reaches through `dimg` references —
+    /// with `auxiliaries`, also the items carrying an `auxl` reference
+    /// to a member. One pass over the references builds the adjacency,
+    /// so a grid of thousands of tiles (or a burst with as many
+    /// references) costs what it holds, not its square.
+    fn closure_of(&self, id: u32, auxiliaries: bool) -> HashSet<u32> {
+        let mut inputs: HashMap<u32, Vec<&[u32]>> = HashMap::new();
+        let mut aux_of: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (t, f, to) in &self.references {
+            if t == &reference::DIMG {
+                inputs.entry(*f).or_default().push(to);
+            } else if auxiliaries && t == &reference::AUXL {
+                for x in to {
+                    aux_of.entry(*x).or_default().push(*f);
                 }
             }
-            i += 1;
         }
-        out
+        let mut seen: HashSet<u32> = HashSet::from([id]);
+        let mut work = vec![id];
+        while let Some(cur) = work.pop() {
+            let dimg = inputs
+                .get(&cur)
+                .into_iter()
+                .flatten()
+                .flat_map(|l| l.iter());
+            let aux = aux_of.get(&cur).into_iter().flatten();
+            for x in dimg.chain(aux) {
+                if seen.insert(*x) {
+                    work.push(*x);
+                }
+            }
+        }
+        seen
     }
 
     fn validate(&self, aliased: Option<u32>) -> Result<()> {
@@ -1799,8 +1917,18 @@ impl HeifWriter {
             return Err(HeifError::invalid("writer: duplicate item id"));
         }
         for (t, f, to) in &self.references {
+            // SingleItemTypeReferenceBox reference_count is 16 bits
+            // (ISO/IEC 14496-12 §8.11.12.2).
+            if to.len() > u16::MAX as usize {
+                return Err(HeifError::exhausted(format!(
+                    "writer: reference '{}' from item {f} names {} items (a reference box \
+                     holds at most 65535)",
+                    crate::boxes::fourcc_str(t),
+                    to.len()
+                )));
+            }
             for x in std::iter::once(f).chain(to) {
-                if !ids.contains(x) {
+                if ids.binary_search(x).is_err() {
                     return Err(HeifError::invalid(format!(
                         "writer: reference '{}' names item {x} which was not added",
                         crate::boxes::fourcc_str(t)
@@ -1850,6 +1978,16 @@ impl HeifWriter {
             // would have extent_length 0, which a reader takes as "to
             // the end of the source" (14496-12 §8.11.3.2.4.3) — the
             // item would silently claim every byte after its offset.
+            // iloc extent_count is 16 bits (ISO/IEC 14496-12 §8.11.3.2).
+            if let ItemBody::CodedExtents(tiles) = &it.body
+                && tiles.len() > u16::MAX as usize
+            {
+                return Err(HeifError::exhausted(format!(
+                    "writer: item {} has {} extents (an iloc entry holds at most 65535)",
+                    it.id,
+                    tiles.len()
+                )));
+            }
             let empty = match &it.body {
                 ItemBody::Coded(d) => d.is_empty() && aliased != Some(it.id),
                 ItemBody::Metadata(d) | ItemBody::ToneMap(d) => d.is_empty(),

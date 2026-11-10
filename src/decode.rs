@@ -2077,7 +2077,12 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
             )));
         }
         let rec = self.reconstruct(node)?;
-        let mut out = apply_transforms_owned(rec, node.properties.transformative(), false)?;
+        let mut out = crate::compose::apply_transforms_owned_threads(
+            rec,
+            node.properties.transformative(),
+            false,
+            self.decoder.threads,
+        )?;
         if let Some(a) = &node.alpha {
             let alpha = self.output(a)?;
             out = attach_alpha(&out, &alpha)?;

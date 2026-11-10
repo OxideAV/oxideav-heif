@@ -576,6 +576,15 @@ pub fn check<D: AsRef<[u8]>>(file: &HeifFile<D>, profile: MiafProfile) -> Result
     {
         rep.push("7.2.1.4", None, "XMLBox / BinaryXMLBox present in MetaBox");
     }
+    // ISO/IEC 14496-12 §8.11.14.1: each ipma is ordered by increasing
+    // item_ID.
+    if meta.ipma_unordered {
+        rep.push(
+            "ISOBMFF 8.11.14.1",
+            None,
+            "ItemPropertyAssociationBox rows are not ordered by increasing item_ID",
+        );
+    }
     // §7.2.1.10 / §7.3.2: primary item exists and is a master image.
     let primary = match file.primary_item() {
         Ok(p) => p.clone(),

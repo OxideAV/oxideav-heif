@@ -201,6 +201,76 @@ mod registry {
         }
     }
 
+    /// Overwrite item `id`'s coded bytes in a copy of `bytes` (the NAL
+    /// length prefixes then run past the item).
+    fn with_item_destroyed(bytes: &[u8], id: u32) -> Vec<u8> {
+        let file = oxideav_heif::HeifFile::parse_borrowed(bytes).unwrap();
+        let mut out = bytes.to_vec();
+        for extent in file.item_extents(id).unwrap() {
+            let at = extent.as_ptr() as usize - bytes.as_ptr() as usize;
+            out[at..at + extent.len()].fill(0xff);
+        }
+        out
+    }
+
+    #[test]
+    fn decode_all_partial_leaves_out_what_does_not_decode() {
+        use oxideav_heif::decode_all_partial;
+        let Some(root) = fixture_root() else {
+            return;
+        };
+        let opts = DecodeOptions::default();
+        let good = fixture_bytes(&root, "multi-image-burst-3");
+        let whole = decode_all(&good).unwrap();
+        // A file that decodes: the same frames, nothing skipped.
+        let p = decode_all_partial(&good, &opts).unwrap();
+        assert!(p.is_complete());
+        assert_eq!(p.frames, whole);
+        // The second picture destroyed: decode_all refuses the file,
+        // the partial decode returns the other two unchanged.
+        let bad = with_item_destroyed(&good, 2);
+        assert!(decode_all(&bad).is_err());
+        let p = decode_all_partial(&bad, &opts).unwrap();
+        assert_eq!(p.frames.len(), 2);
+        assert_eq!(p.frames[0], whole[0]);
+        assert_eq!(p.frames[1], whole[2]);
+        assert_eq!(p.skipped.len(), 1);
+        assert_eq!(p.skipped[0].item_ids, [2]);
+        assert_eq!(p.skipped[0].track_id, None);
+        assert!(!p.is_complete());
+        // Nothing decodes: the first entry's error.
+        let mut none = bad;
+        for id in [1, 3] {
+            none = with_item_destroyed(&none, id);
+        }
+        assert!(decode_all_partial(&none, &opts).is_err());
+        // A file that does not parse is an error either way.
+        assert!(decode_all_partial(&good[..good.len() / 8], &opts).is_err());
+
+        // A sequence whose track breaks keeps its still.
+        let seq = fixture_bytes(&root, "image-sequence-3frame");
+        let whole = decode_all(&seq).unwrap();
+        let file = oxideav_heif::HeifFile::parse_borrowed(&seq).unwrap();
+        let movie = oxideav_heif::sequence::parse_movie(&file).unwrap().unwrap();
+        let track = &movie.tracks[0];
+        let sample = oxideav_heif::sequence::sample_bytes(&file, &track.samples[1]).unwrap();
+        let at = sample.as_ptr() as usize - seq.as_ptr() as usize;
+        let mut broken = seq.clone();
+        broken[at..at + sample.len()].fill(0xff);
+        // The still shares no bytes with sample 1, so it still decodes.
+        match decode_all_partial(&broken, &opts) {
+            Ok(p) => {
+                assert!(decode_all(&broken).is_err());
+                assert_eq!(p.frames.len(), 1);
+                assert_eq!(p.frames[0], whole[0]);
+                assert_eq!(p.skipped.len(), 1);
+                assert!(p.skipped[0].item_ids.is_empty());
+                assert_eq!(p.skipped[0].track_id, Some(track.track_id));
+            }
+            Err(e) => panic!("the still should survive a broken track: {e}"),
+        }
+    }
+
     #[test]
     fn decode_all_yields_bursts_then_sequences() {
         let Some(root) = fixture_root() else {

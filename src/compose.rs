@@ -116,6 +116,14 @@ pub fn apply_clap(f: &HeifFrame, clap: &Clap) -> Result<HeifFrame> {
 
 /// Apply an `irot` property (§6.5.10): `angle × 90°` anti-clockwise.
 pub fn apply_irot(f: &HeifFrame, irot: &Irot) -> Result<HeifFrame> {
+    apply_irot_threads(f, irot, 1)
+}
+
+/// [`apply_irot`] on up to `threads` workers: the output rows of a
+/// large plane are filled in disjoint bands, one group per worker
+/// (the same bytes for every budget).
+#[doc(hidden)]
+pub fn apply_irot_threads(f: &HeifFrame, irot: &Irot, threads: usize) -> Result<HeifFrame> {
     let angle = irot.angle & 3;
     if angle == 0 {
         return Ok(f.clone());
@@ -137,22 +145,144 @@ pub fn apply_irot(f: &HeifFrame, irot: &Irot) -> Result<HeifFrame> {
         (src.width, src.height)
     };
     let mut out = HeifFrame::zeroed(ow, oh, src.format)?;
+    let bps = src.format.bytes_per_sample();
     for p in 0..src.format.plane_count() {
         let (pw, ph) = src.plane_dims(p);
-        for y in 0..ph {
-            for x in 0..pw {
-                let v = src.sample(p, x, y);
-                // Anti-clockwise rotation by 90°: (x, y) → (y, pw − 1 − x).
-                let (nx, ny) = match angle {
-                    1 => (y, pw - 1 - x),
-                    2 => (pw - 1 - x, ph - 1 - y),
-                    _ => (ph - 1 - y, x),
+        let (pw, ph) = (pw as usize, ph as usize);
+        let from = &src.planes[p];
+        // The plane must hold what its geometry says (a frame built by
+        // hand may not).
+        let needed = (ph - 1) * from.stride + pw * bps;
+        if from.stride < pw * bps || from.data.len() < needed {
+            return Err(HeifError::invalid(format!(
+                "plane {p} holds {} bytes at stride {}, {pw}x{ph} samples need {needed}",
+                from.data.len(),
+                from.stride
+            )));
+        }
+        let to = &mut out.planes[p];
+        let out_rows = if angle == 2 { ph } else { pw };
+        // Worth a thread only when each worker gets a real share.
+        let workers = threads
+            .min(pw * ph / ROTATE_SAMPLES_PER_WORKER)
+            .min(out_rows / ROTATE_BAND_ROWS)
+            .max(1);
+        if workers == 1 {
+            rotate_rows(
+                &from.data,
+                from.stride,
+                (pw, ph),
+                bps,
+                angle,
+                0,
+                &mut to.data,
+                to.stride,
+            );
+            continue;
+        }
+        // Whole bands per worker, so every worker walks the bands the
+        // serial pass does.
+        let rows_each = out_rows.div_ceil(workers).div_ceil(ROTATE_BAND_ROWS) * ROTATE_BAND_ROWS;
+        let (src_data, sstride, dstride) = (&from.data[..], from.stride, to.stride);
+        std::thread::scope(|scope| {
+            for (i, rows) in to
+                .data
+                .chunks_mut(rows_each * dstride)
+                .take(out_rows.div_ceil(rows_each))
+                .enumerate()
+            {
+                scope.spawn(move || {
+                    rotate_rows(
+                        src_data,
+                        sstride,
+                        (pw, ph),
+                        bps,
+                        angle,
+                        i * rows_each,
+                        rows,
+                        dstride,
+                    )
+                });
+            }
+        });
+    }
+    Ok(out)
+}
+
+/// A rotation worker takes at least this many samples of a plane.
+const ROTATE_SAMPLES_PER_WORKER: usize = 1 << 18;
+
+/// Output rows a quarter turn fills per pass: the source samples one
+/// pass reads sit in this many adjacent columns, so every source row
+/// is read once per pass, in memory order, and the writes go to as
+/// many row streams.
+const ROTATE_BAND_ROWS: usize = 32;
+
+/// Fill output rows `first_row..` (as many whole rows as `dst`
+/// holds, up to the plane's last) of one plane of `pw × ph` samples
+/// (`bps` bytes each) rotated by `angle × 90°` anti-clockwise; `dst`
+/// has rows of `dstride` bytes. The mapping is §6.5.10's — source
+/// `(x, y)` lands at `(y, pw − 1 − x)` for one quarter turn,
+/// `(pw − 1 − x, ph − 1 − y)` for two, `(ph − 1 − y, x)` for three —
+/// walked destination band by destination band rather than sample by
+/// sample.
+#[allow(clippy::too_many_arguments)]
+fn rotate_rows(
+    src: &[u8],
+    sstride: usize,
+    (pw, ph): (usize, usize),
+    bps: usize,
+    angle: u8,
+    first_row: usize,
+    dst: &mut [u8],
+    dstride: usize,
+) {
+    if angle == 2 {
+        let rows = ph.saturating_sub(first_row);
+        for (k, drow) in dst.chunks_mut(dstride).take(rows).enumerate() {
+            let ny = first_row + k;
+            let srow = &src[(ph - 1 - ny) * sstride..][..pw * bps];
+            let drow = &mut drow[..pw * bps];
+            if bps == 1 {
+                drow.copy_from_slice(srow);
+                drow.reverse();
+            } else {
+                for (d, s) in drow.chunks_exact_mut(bps).zip(srow.chunks_exact(bps).rev()) {
+                    d.copy_from_slice(s);
+                }
+            }
+        }
+        return;
+    }
+    // A quarter turn: the output is `ph` samples wide and `pw` rows
+    // high. Output row `ny` is source column `pw − 1 − ny` read top to
+    // bottom (one turn) or column `ny` read bottom to top (three).
+    let rows_here = (dst.len() / dstride.max(1)).min(pw.saturating_sub(first_row));
+    for (band, rows) in dst
+        .chunks_mut(dstride * ROTATE_BAND_ROWS)
+        .take(rows_here.div_ceil(ROTATE_BAND_ROWS))
+        .enumerate()
+    {
+        let ny0 = first_row + band * ROTATE_BAND_ROWS;
+        let n = ROTATE_BAND_ROWS.min(first_row + rows_here - ny0);
+        for nx in 0..ph {
+            let y = if angle == 1 { nx } else { ph - 1 - nx };
+            let srow = &src[y * sstride..][..pw * bps];
+            for k in 0..n {
+                let x = if angle == 1 {
+                    pw - 1 - (ny0 + k)
+                } else {
+                    ny0 + k
                 };
-                out.set_sample(p, nx, ny, v);
+                let at = k * dstride + nx * bps;
+                if bps == 1 {
+                    rows[at] = srow[x];
+                } else {
+                    rows[at..at + bps].copy_from_slice(&srow[x * bps..(x + 1) * bps]);
+                }
             }
         }
     }
-    Ok(out)
 }
 
 /// Apply an `imir` property (§6.5.12): axis 0 exchanges top and bottom,
@@ -226,6 +356,19 @@ pub fn apply_transforms_owned<'a>(
     chain: impl IntoIterator<Item = &'a PropertyEntry>,
     essential_only: bool,
 ) -> Result<HeifFrame> {
+    apply_transforms_owned_threads(f, chain, essential_only, 1)
+}
+
+/// [`apply_transforms_owned`] under a thread budget (the rotation of a
+/// large picture runs on up to `threads` workers; the output is the
+/// same for every budget).
+#[doc(hidden)]
+pub fn apply_transforms_owned_threads<'a>(
+    f: HeifFrame,
+    chain: impl IntoIterator<Item = &'a PropertyEntry>,
+    essential_only: bool,
+    threads: usize,
+) -> Result<HeifFrame> {
     let mut cur = f;
     for e in chain {
         if essential_only && !e.essential {
@@ -233,7 +376,7 @@ pub fn apply_transforms_owned<'a>(
         }
         cur = match &e.property {
             Property::Clap(c) => apply_clap(&cur, c)?,
-            Property::Irot(r) => apply_irot(&cur, r)?,
+            Property::Irot(r) => apply_irot_threads(&cur, r, threads)?,
             Property::Imir(m) => apply_imir(&cur, m)?,
             Property::Iscl(s) => apply_iscl(&cur, s)?,
             _ => continue,
@@ -1450,6 +1593,119 @@ mod tests {
         let m = apply_imir(&deep, &Imir { axis: 1 }).unwrap();
         assert_eq!(m.sample(0, 0, 0), 7);
         assert_eq!(m.sample(0, 2, 0), 1000);
+    }
+
+    /// §6.5.10 sample by sample — the definition the band-wise
+    /// rotation must reproduce byte for byte.
+    fn rotate_by_definition(src: &HeifFrame, angle: u8) -> HeifFrame {
+        let (ow, oh) = if angle % 2 == 1 {
+            (src.height, src.width)
+        } else {
+            (src.width, src.height)
+        };
+        let mut out = HeifFrame::zeroed(ow, oh, src.format).unwrap();
+        for p in 0..src.format.plane_count() {
+            let (pw, ph) = src.plane_dims(p);
+            for y in 0..ph {
+                for x in 0..pw {
+                    let (nx, ny) = match angle {
+                        1 => (y, pw - 1 - x),
+                        2 => (pw - 1 - x, ph - 1 - y),
+                        _ => (ph - 1 - y, x),
+                    };
+                    out.set_sample(p, nx, ny, src.sample(p, x, y));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn rotation_matches_the_definition_on_every_geometry() {
+        // Sizes around the band height, 8- and 10-bit, with and without
+        // alpha, 4:4:4 / 4:2:0 / mono, tight and padded strides.
+        for (w, h) in [
+            (1, 1),
+            (2, 6),
+            (31, 2),
+            (32, 32),
+            (34, 30),
+            (66, 4),
+            (4, 130),
+            (97, 65),
+        ] {
+            for (chroma, depth, alpha) in [
+                (Chroma::Yuv444, 8, false),
+                (Chroma::Yuv444, 10, true),
+                (Chroma::Yuv420, 8, true),
+                (Chroma::Yuv420, 10, false),
+                (Chroma::Mono, 8, false),
+            ] {
+                if chroma == Chroma::Yuv420 && (w % 2 == 1 || h % 2 == 1) {
+                    continue; // promoted first: covered by the 4:4:4 rows
+                }
+                let format = fmt(chroma, depth, alpha);
+                let mut f = HeifFrame::zeroed(w, h, format).unwrap();
+                let mut v = 1u32;
+                for p in 0..format.plane_count() {
+                    let (pw, ph) = f.plane_dims(p);
+                    for y in 0..ph {
+                        for x in 0..pw {
+                            v = v.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                            f.set_sample(p, x, y, ((v >> 16) & ((1 << depth) - 1)) as u16);
+                        }
+                    }
+                }
+                // The same picture with padded rows.
+                let mut padded = f.clone();
+                for pl in &mut padded.planes {
+                    let rows = pl.data.len() / pl.stride;
+                    let stride = pl.stride + 6;
+                    let mut data = vec![0xEEu8; rows * stride];
+                    for r in 0..rows {
+                        data[r * stride..r * stride + pl.stride]
+                            .copy_from_slice(&pl.data[r * pl.stride..(r + 1) * pl.stride]);
+                    }
+                    pl.data = data;
+                    pl.stride = stride;
+                }
+                for angle in 1..=3u8 {
+                    let want = rotate_by_definition(&f, angle);
+                    let got = apply_irot(&f, &Irot { angle }).unwrap();
+                    assert_eq!(
+                        got, want,
+                        "{w}x{h} {chroma:?} {depth} {alpha} angle {angle}"
+                    );
+                    let got = apply_irot(&padded, &Irot { angle }).unwrap();
+                    assert_eq!(got, want, "padded {w}x{h} {chroma:?} angle {angle}");
+                    for threads in [2, 3, 8] {
+                        let got = apply_irot_threads(&padded, &Irot { angle }, threads).unwrap();
+                        assert_eq!(got, want, "{threads} threads {w}x{h} angle {angle}");
+                    }
+                }
+            }
+        }
+        // A picture large enough for the workers to split (uneven
+        // band counts on both axes).
+        let mut big = HeifFrame::zeroed(1100, 770, fmt(Chroma::Yuv420, 8, false)).unwrap();
+        let mut v = 7u32;
+        for pl in &mut big.planes {
+            for b in &mut pl.data {
+                v = v.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                *b = (v >> 16) as u8;
+            }
+        }
+        for angle in 1..=3u8 {
+            let want = rotate_by_definition(&big, angle);
+            for threads in [1, 2, 3, 5, 8, 64] {
+                let got = apply_irot_threads(&big, &Irot { angle }, threads).unwrap();
+                assert!(got == want, "big picture, angle {angle}, {threads} threads");
+            }
+        }
+        // A plane shorter than its geometry is refused, not read past.
+        let mut short = HeifFrame::zeroed(8, 8, fmt(Chroma::Mono, 8, false)).unwrap();
+        short.planes[0].data.truncate(40);
+        assert!(apply_irot(&short, &Irot { angle: 1 }).is_err());
     }
 
     #[test]

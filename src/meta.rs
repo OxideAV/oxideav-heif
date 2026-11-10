@@ -776,6 +776,155 @@ impl DataReference {
     }
 }
 
+/// Below this many records (items + locations + `ipma` rows +
+/// reference boxes + entity groups) the lookups walk the vectors.
+const LOOKUP_THRESHOLD: usize = 64;
+
+/// Positions of a [`Meta`]'s records by id — what turns the per-item
+/// lookups of a large tree (a 1 000-tile grid, a burst of thousands)
+/// from a walk into a table read. Built once, on the first lookup;
+/// holds positions only, so the records are always read from the tree
+/// itself and an entry is used only when the record at its position
+/// still carries the id.
+#[derive(Debug, Default)]
+struct Lookup {
+    /// The vector lengths the tables were built from.
+    lens: [usize; 5],
+    /// `item_ID` → position in `items` (the first of that id).
+    items: std::collections::HashMap<u32, u32>,
+    /// `item_ID` → position in `locations` (the first of that id).
+    locations: std::collections::HashMap<u32, u32>,
+    /// `item_ID` → positions of its rows in `associations`.
+    associations: Positions,
+    /// `from_item_ID` → positions in `references`.
+    refs_from: Positions,
+    /// Target id → positions of the `references` boxes naming it.
+    refs_to: Positions,
+    /// Entity id → positions of the `entity_groups` holding it.
+    groups: Positions,
+}
+
+/// Ascending record positions per id, each with a slot — where in
+/// the record the id sits (the index among a reference box's targets
+/// or a group's entities; 0 where the id is the record's own key) —
+/// so a table entry is checked against the tree in constant time.
+/// Most ids have one position (an item's `ipma` row, a tile's `dimg`
+/// box), so the first is stored inline and only the others in a list.
+#[derive(Debug, Default)]
+struct Positions {
+    first: std::collections::HashMap<u32, (u32, u32)>,
+    more: std::collections::HashMap<u32, Vec<(u32, u32)>>,
+}
+
+impl Positions {
+    /// Record `id` at slot `slot` of the record at position `p`
+    /// (positions arrive in ascending order; a second slot of the same
+    /// record is dropped).
+    fn push(&mut self, id: u32, p: u32, slot: u32) {
+        match self.first.entry(id) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert((p, slot));
+            }
+            std::collections::hash_map::Entry::Occupied(first) => {
+                if first.get().0 == p {
+                    return;
+                }
+                let more = self.more.entry(id).or_default();
+                if more.last().map(|e| e.0) != Some(p) {
+                    more.push((p, slot));
+                }
+            }
+        }
+    }
+
+    /// The `(position, slot)` pairs of `id`, positions ascending.
+    fn of(&self, id: u32) -> impl Iterator<Item = (usize, usize)> + '_ {
+        let first = self.first.get(&id).copied();
+        let more = first
+            .and_then(|_| self.more.get(&id))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        first
+            .into_iter()
+            .chain(more.iter().copied())
+            .map(|(p, slot)| (p as usize, slot as usize))
+    }
+}
+
+impl Lookup {
+    fn lens(meta: &Meta) -> [usize; 5] {
+        [
+            meta.items.len(),
+            meta.locations.len(),
+            meta.associations.len(),
+            meta.references.len(),
+            meta.entity_groups.len(),
+        ]
+    }
+
+    fn matches(&self, meta: &Meta) -> bool {
+        self.lens == Self::lens(meta)
+    }
+
+    fn build(meta: &Meta) -> Self {
+        let mut l = Lookup {
+            lens: Self::lens(meta),
+            ..Lookup::default()
+        };
+        for (p, it) in meta.items.iter().enumerate() {
+            l.items.entry(it.id).or_insert(p as u32);
+        }
+        for (p, loc) in meta.locations.iter().enumerate() {
+            l.locations.entry(loc.item_id).or_insert(p as u32);
+        }
+        for (p, a) in meta.associations.iter().enumerate() {
+            l.associations.push(a.item_id, p as u32, 0);
+        }
+        // A box naming one target several times is listed once.
+        for (p, r) in meta.references.iter().enumerate() {
+            l.refs_from.push(r.from_item_id, p as u32, 0);
+            for (slot, to) in r.to_item_ids.iter().enumerate() {
+                l.refs_to.push(*to, p as u32, slot as u32);
+            }
+        }
+        for (p, g) in meta.entity_groups.iter().enumerate() {
+            for (slot, e) in g.entity_ids.iter().enumerate() {
+                l.groups.push(*e, p as u32, slot as u32);
+            }
+        }
+        l
+    }
+}
+
+/// The lazily built [`Lookup`] of a [`Meta`]. It is derived data: a
+/// clone starts without one, and it takes no part in comparisons.
+#[derive(Default)]
+struct LookupCell(std::sync::OnceLock<Lookup>);
+
+impl Clone for LookupCell {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PartialEq for LookupCell {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for LookupCell {}
+
+impl std::fmt::Debug for LookupCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.get().is_some() {
+            "Lookup(built)"
+        } else {
+            "Lookup(-)"
+        })
+    }
+}
+
 /// Parsed file-level `meta` box.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -810,6 +959,13 @@ pub struct Meta {
     /// The `ipro` box's `sinf` entries (an item's 1-based
     /// `item_protection_index` names one).
     pub protection_schemes: Vec<crate::cenc::ProtectionScheme>,
+    /// An `ipma` box listed its rows out of increasing `item_ID` order
+    /// (ISO/IEC 14496-12 §8.11.14.1 requires the order; the rows are
+    /// read all the same and [`crate::miaf::check`] reports it).
+    pub ipma_unordered: bool,
+    /// Positions by id, built on the first lookup of a large tree (see
+    /// [`Meta::reindex`]).
+    lookup: LookupCell,
     /// `xml ` box payload (UTF-8), when present.
     pub xml: Option<String>,
     /// Box types encountered directly inside `meta`, in file order.
@@ -852,6 +1008,8 @@ impl Meta {
             idat,
             protection_scheme_count,
             protection_schemes: Vec::new(),
+            ipma_unordered: false,
+            lookup: LookupCell::default(),
             xml,
             child_box_types,
         }
@@ -892,9 +1050,10 @@ impl Meta {
                 b"iloc" => me.locations = parse_iloc(p)?,
                 b"iref" => me.references = parse_iref(p)?,
                 b"iprp" => {
-                    let (props, assocs) = parse_iprp(p, &mut seen_ipma_keys)?;
+                    let (props, assocs, unordered) = parse_iprp(p, &mut seen_ipma_keys)?;
                     me.properties = props;
                     me.associations = assocs;
+                    me.ipma_unordered = unordered;
                 }
                 b"idat" => me.idat = Some(p.to_vec()),
                 b"grpl" => me.entity_groups = parse_grpl(p)?,
@@ -939,14 +1098,130 @@ impl Meta {
         Ok(())
     }
 
+    /// The id → position tables of a large tree (`None` for a small
+    /// one, or once a vector's length no longer matches — the linear
+    /// walk then answers).
+    fn lookup(&self) -> Option<&Lookup> {
+        let entries = self.items.len()
+            + self.locations.len()
+            + self.associations.len()
+            + self.references.len()
+            + self.entity_groups.len();
+        if entries < LOOKUP_THRESHOLD {
+            return None;
+        }
+        let l = self.lookup.0.get_or_init(|| Lookup::build(self));
+        l.matches(self).then_some(l)
+    }
+
+    /// Drop the id → position tables the lookups of a large tree use
+    /// (`item`, `location`, `properties_of`, `references_from` /
+    /// `references_to`, the entity-group queries); the next lookup
+    /// rebuilds them. The tables follow pushes and removals on their
+    /// own and never hand out an entry of another id — call this after
+    /// rewriting ids *in place* (an `item_ID`, a reference's
+    /// `from_item_ID` / targets, an `ipma` row's item, a group's
+    /// entities) in a tree that has already been queried.
+    pub fn reindex(&mut self) {
+        self.lookup = LookupCell::default();
+    }
+
     /// Look up an item by id.
     pub fn item(&self, id: u32) -> Option<&ItemInfo> {
+        if let Some(l) = self.lookup()
+            && let Some(it) = l.items.get(&id).and_then(|&p| self.items.get(p as usize))
+            && it.id == id
+        {
+            return Some(it);
+        }
         self.items.iter().find(|i| i.id == id)
     }
 
     /// Look up an item location by id.
     pub fn location(&self, id: u32) -> Option<&ItemLocation> {
+        if let Some(l) = self.lookup()
+            && let Some(loc) = l
+                .locations
+                .get(&id)
+                .and_then(|&p| self.locations.get(p as usize))
+            && loc.item_id == id
+        {
+            return Some(loc);
+        }
         self.locations.iter().find(|l| l.item_id == id)
+    }
+
+    /// The `ipma` rows of `item_id`, in file order.
+    fn association_rows(&self, item_id: u32) -> Vec<&ItemPropertyAssociations> {
+        if let Some(l) = self.lookup() {
+            let rows: Option<Vec<&ItemPropertyAssociations>> = l
+                .associations
+                .of(item_id)
+                .map(|(p, _)| self.associations.get(p).filter(|a| a.item_id == item_id))
+                .collect();
+            if let Some(rows) = rows {
+                return rows;
+            }
+        }
+        self.associations
+            .iter()
+            .filter(|a| a.item_id == item_id)
+            .collect()
+    }
+
+    /// The reference boxes whose source is `id` (`by_source`) or that
+    /// name `id` among their targets, in file order.
+    fn reference_boxes(&self, id: u32, by_source: bool) -> Vec<&ItemReference> {
+        if let Some(l) = self.lookup() {
+            let table = if by_source { &l.refs_from } else { &l.refs_to };
+            let boxes: Option<Vec<&ItemReference>> = table
+                .of(id)
+                .map(|(p, slot)| {
+                    self.references.get(p).filter(|r| {
+                        if by_source {
+                            r.from_item_id == id
+                        } else {
+                            r.to_item_ids.get(slot) == Some(&id)
+                        }
+                    })
+                })
+                .collect();
+            if let Some(boxes) = boxes {
+                return boxes;
+            }
+        }
+        self.references
+            .iter()
+            .filter(|r| {
+                if by_source {
+                    r.from_item_id == id
+                } else {
+                    r.to_item_ids.contains(&id)
+                }
+            })
+            .collect()
+    }
+
+    /// The entity groups holding `entity_id`, in file order.
+    fn groups_of(&self, entity_id: u32) -> Vec<&EntityGroup> {
+        if let Some(l) = self.lookup() {
+            let groups: Option<Vec<&EntityGroup>> = l
+                .groups
+                .of(entity_id)
+                .map(|(p, slot)| {
+                    self.entity_groups
+                        .get(p)
+                        .filter(|g| g.entity_ids.get(slot) == Some(&entity_id))
+                })
+                .collect();
+            if let Some(groups) = groups {
+                return groups;
+            }
+        }
+        self.entity_groups
+            .iter()
+            .filter(|g| g.entity_ids.contains(&entity_id))
+            .collect()
     }
 
     /// The primary item's info, when `pitm` names an existing item.
@@ -959,7 +1234,7 @@ impl Meta {
     /// boxes for the same item are concatenated in file order.
     pub fn properties_of(&self, item_id: u32) -> Vec<(u16, &RawProperty, bool)> {
         let mut out = Vec::new();
-        for a in self.associations.iter().filter(|a| a.item_id == item_id) {
+        for a in self.association_rows(item_id) {
             for e in &a.entries {
                 if let Some(p) = self.properties.get(e.index as usize - 1) {
                     out.push((e.index, p, e.essential));
@@ -971,9 +1246,8 @@ impl Meta {
 
     /// Raw association entries of an item, in `ipma` order.
     pub fn associations_of(&self, item_id: u32) -> Vec<PropertyAssociation> {
-        self.associations
-            .iter()
-            .filter(|a| a.item_id == item_id)
+        self.association_rows(item_id)
+            .into_iter()
             .flat_map(|a| a.entries.iter().copied())
             .collect()
     }
@@ -990,9 +1264,9 @@ impl Meta {
     /// `from`, in file order (HEIF §6.6.1 allows at most one `dimg` box
     /// per item; several boxes of other types are concatenated).
     pub fn references_from(&self, from: u32, reference_type: &FourCc) -> Vec<u32> {
-        self.references
-            .iter()
-            .filter(|r| r.from_item_id == from && &r.reference_type == reference_type)
+        self.reference_boxes(from, true)
+            .into_iter()
+            .filter(|r| &r.reference_type == reference_type)
             .flat_map(|r| r.to_item_ids.iter().copied())
             .collect()
     }
@@ -1000,9 +1274,9 @@ impl Meta {
     /// Sources of the references of `reference_type` that target `to`,
     /// in file order.
     pub fn references_to(&self, to: u32, reference_type: &FourCc) -> Vec<u32> {
-        self.references
-            .iter()
-            .filter(|r| &r.reference_type == reference_type && r.to_item_ids.contains(&to))
+        self.reference_boxes(to, false)
+            .into_iter()
+            .filter(|r| &r.reference_type == reference_type)
             .map(|r| r.from_item_id)
             .collect()
     }
@@ -1054,9 +1328,9 @@ impl Meta {
                 continue;
             }
             match self
-                .entity_groups
-                .iter()
-                .find(|g| g.is_alternatives() && g.entity_ids.contains(&it.id))
+                .groups_of(it.id)
+                .into_iter()
+                .find(|g| g.is_alternatives())
             {
                 Some(g) => {
                     if !seen_groups.contains(&g.group_id) {
@@ -1099,9 +1373,9 @@ impl Meta {
 
     /// Entity groups of `grouping_type` containing `entity_id`.
     pub fn groups_containing(&self, entity_id: u32, grouping_type: &FourCc) -> Vec<&EntityGroup> {
-        self.entity_groups
-            .iter()
-            .filter(|g| &g.grouping_type == grouping_type && g.entity_ids.contains(&entity_id))
+        self.groups_of(entity_id)
+            .into_iter()
+            .filter(|g| &g.grouping_type == grouping_type)
             .collect()
     }
 
@@ -1346,9 +1620,10 @@ fn parse_iref(p: &[u8]) -> Result<Vec<ItemReference>> {
 fn parse_iprp(
     p: &[u8],
     seen_ipma_keys: &mut Vec<(u8, u32)>,
-) -> Result<(Vec<RawProperty>, Vec<ItemPropertyAssociations>)> {
+) -> Result<(Vec<RawProperty>, Vec<ItemPropertyAssociations>, bool)> {
     let mut props = Vec::new();
     let mut assocs = Vec::new();
+    let mut unordered = false;
     let mut saw_ipco = false;
     for h in iter_boxes(p) {
         let h = h?;
@@ -1361,14 +1636,18 @@ fn parse_iprp(
                 saw_ipco = true;
                 props = parse_ipco(body)?;
             }
-            b"ipma" => assocs.extend(parse_ipma(body, seen_ipma_keys)?),
+            b"ipma" => {
+                let (rows, out_of_order) = parse_ipma(body, seen_ipma_keys)?;
+                assocs.extend(rows);
+                unordered |= out_of_order;
+            }
             _ => {}
         }
     }
     if !saw_ipco {
         return Err(HeifError::invalid("iprp without ipco"));
     }
-    Ok((props, assocs))
+    Ok((props, assocs, unordered))
 }
 
 fn parse_ipco(p: &[u8]) -> Result<Vec<RawProperty>> {
@@ -1390,7 +1669,10 @@ fn parse_ipco(p: &[u8]) -> Result<Vec<RawProperty>> {
     Ok(out)
 }
 
-fn parse_ipma(p: &[u8], seen: &mut Vec<(u8, u32)>) -> Result<Vec<ItemPropertyAssociations>> {
+fn parse_ipma(
+    p: &[u8],
+    seen: &mut Vec<(u8, u32)>,
+) -> Result<(Vec<ItemPropertyAssociations>, bool)> {
     let (version, flags, body) = parse_full_box(p)?;
     if version > 1 {
         return Err(HeifError::invalid(format!("ipma version {version}")));
@@ -1410,20 +1692,32 @@ fn parse_ipma(p: &[u8], seen: &mut Vec<(u8, u32)>) -> Result<Vec<ItemPropertyAss
             "ipma declares {entry_count} entries (limit {MAX_ITEMS})"
         )));
     }
-    let mut out = Vec::with_capacity(entry_count.min(4096));
+    let mut out: Vec<ItemPropertyAssociations> = Vec::with_capacity(entry_count.min(4096));
     let mut last_id: Option<u32> = None;
+    let mut unordered_ids: Option<std::collections::HashSet<u32>> = None;
     for _ in 0..entry_count {
         let item_id = if version == 0 {
             r.u16("ipma item_ID")? as u32
         } else {
             r.u32("ipma item_ID")?
         };
-        // §9.3.1: ordered by increasing item_ID, at most one row per item.
+        // ISO/IEC 14496-12 §8.11.14.1: "ordered by increasing item_ID"
+        // with at most one row per item. A repeated item is ambiguous
+        // and refused; rows merely out of order name the same
+        // associations, so they are read and the departure is recorded
+        // for the conformance check (`Meta::ipma_unordered`).
         if let Some(prev) = last_id
             && item_id <= prev
+            && unordered_ids.is_none()
+        {
+            // First departure: remember every id read so far.
+            unordered_ids = Some(out.iter().map(|a| a.item_id).collect());
+        }
+        if let Some(ids) = unordered_ids.as_mut()
+            && !ids.insert(item_id)
         {
             return Err(HeifError::invalid(format!(
-                "ipma rows not strictly increasing (item {item_id} after {prev})"
+                "ipma names item {item_id} twice in one box"
             )));
         }
         last_id = Some(item_id);
@@ -1449,7 +1743,7 @@ fn parse_ipma(p: &[u8], seen: &mut Vec<(u8, u32)>) -> Result<Vec<ItemPropertyAss
         }
         out.push(ItemPropertyAssociations { item_id, entries });
     }
-    Ok(out)
+    Ok((out, unordered_ids.is_some()))
 }
 
 fn parse_grpl(p: &[u8]) -> Result<Vec<EntityGroup>> {
@@ -1723,22 +2017,256 @@ mod tests {
     }
 
     #[test]
-    fn ipma_rows_must_increase_and_essential_zero_is_rejected() {
+    fn ipma_rows_out_of_order_are_read_and_flagged() {
+        // ISO/IEC 14496-12 §8.11.14.1 orders the rows by item_ID; a
+        // box that does not is read all the same and flagged.
         let m = meta_box(&[
             hdlr_pict(),
             iprp(
                 &[boxed(b"ispe", &[0; 12])],
-                &[(2, vec![0x01]), (1, vec![0x01])],
+                &[(2, vec![0x01]), (5, vec![]), (1, vec![0x81])],
             ),
         ]);
         let h = parse_box_header(&m, 0).unwrap();
-        assert!(Meta::parse(payload(&m, &h)).is_err());
+        let meta = Meta::parse(payload(&m, &h)).unwrap();
+        assert!(meta.ipma_unordered);
+        assert_eq!(meta.properties_of(1).len(), 1);
+        assert!(meta.properties_of(1)[0].2);
+        assert_eq!(meta.properties_of(2).len(), 1);
+        // In order: not flagged.
+        let m = meta_box(&[
+            hdlr_pict(),
+            iprp(
+                &[boxed(b"ispe", &[0; 12])],
+                &[(1, vec![0x01]), (2, vec![0x01])],
+            ),
+        ]);
+        let h = parse_box_header(&m, 0).unwrap();
+        assert!(!Meta::parse(payload(&m, &h)).unwrap().ipma_unordered);
+    }
+
+    #[test]
+    fn ipma_repeated_item_and_essential_zero_are_rejected() {
+        // The same item twice in one box, adjacent or not.
+        for rows in [
+            vec![(1u16, vec![0x01u8]), (1, vec![0x01])],
+            vec![(2, vec![0x01]), (1, vec![0x01]), (2, vec![0x01])],
+            vec![(3, vec![0x01]), (1, vec![0x01]), (4, vec![]), (1, vec![])],
+        ] {
+            let m = meta_box(&[hdlr_pict(), iprp(&[boxed(b"ispe", &[0; 12])], &rows)]);
+            let h = parse_box_header(&m, 0).unwrap();
+            let err = Meta::parse(payload(&m, &h)).unwrap_err();
+            assert!(err.to_string().contains("twice"), "{err}");
+        }
         let m = meta_box(&[
             hdlr_pict(),
             iprp(&[boxed(b"ispe", &[0; 12])], &[(1, vec![0x80])]),
         ]);
         let h = parse_box_header(&m, 0).unwrap();
         assert!(Meta::parse(payload(&m, &h)).is_err());
+    }
+
+    /// A tree past the lookup threshold, built field by field: items
+    /// 1..=n, a row per odd item (item 7 in two rows), references of
+    /// several types (one box naming a target twice), two groups.
+    fn large_tree(n: u32) -> Meta {
+        let mut m = Meta::default();
+        for id in 1..=n {
+            m.items.push(ItemInfo {
+                id,
+                version: 2,
+                flags: 0,
+                protection_index: 0,
+                item_type: *b"hvc1",
+                name: String::new(),
+                content_type: None,
+                content_encoding: None,
+                item_uri_type: None,
+            });
+            if id % 2 == 1 {
+                m.associations.push(ItemPropertyAssociations::new(
+                    id,
+                    vec![PropertyAssociation {
+                        index: 1,
+                        essential: id % 4 == 1,
+                    }],
+                ));
+            }
+            if id % 3 == 0 {
+                m.locations.push(ItemLocation {
+                    item_id: id,
+                    construction_method: 0,
+                    data_reference_index: 0,
+                    base_offset: id as u64,
+                    extents: Vec::new(),
+                });
+            }
+        }
+        m.associations.push(ItemPropertyAssociations::new(
+            7,
+            vec![PropertyAssociation {
+                index: 1,
+                essential: false,
+            }],
+        ));
+        m.properties
+            .push(RawProperty::new(*b"ispe", None, vec![0; 12], 20));
+        m.references
+            .push(ItemReference::new(*b"dimg", n, (1..n).collect()));
+        m.references.push(ItemReference::new(*b"thmb", 2, vec![n]));
+        m.references
+            .push(ItemReference::new(*b"cdsc", 3, vec![5, 5, n]));
+        m.references
+            .push(ItemReference::new(*b"auxl", 4, vec![n, 9]));
+        m.references
+            .push(ItemReference::new(*b"dimg", n, vec![n + 50]));
+        let group = |ty: &[u8; 4], id: u32, ents: Vec<u32>| EntityGroup {
+            grouping_type: *ty,
+            version: 0,
+            flags: 0,
+            group_id: id,
+            entity_ids: ents,
+            payload: Vec::new(),
+        };
+        m.entity_groups.push(group(b"altr", 900, vec![6, 8]));
+        m.entity_groups.push(group(b"ster", 901, vec![8, 10, 8]));
+        m
+    }
+
+    /// Every lookup answered by walking the vectors.
+    #[allow(clippy::type_complexity)]
+    fn walked(
+        m: &Meta,
+        id: u32,
+    ) -> (
+        Option<u32>,
+        Option<u64>,
+        Vec<bool>,
+        Vec<Vec<u32>>,
+        Vec<Vec<u32>>,
+        Vec<u32>,
+    ) {
+        let types: [&FourCc; 4] = [b"dimg", b"thmb", b"cdsc", b"auxl"];
+        (
+            m.items.iter().find(|i| i.id == id).map(|i| i.id),
+            m.locations
+                .iter()
+                .find(|l| l.item_id == id)
+                .map(|l| l.base_offset),
+            m.associations
+                .iter()
+                .filter(|a| a.item_id == id)
+                .flat_map(|a| a.entries.iter().map(|e| e.essential))
+                .collect(),
+            types
+                .iter()
+                .map(|t| {
+                    m.references
+                        .iter()
+                        .filter(|r| r.from_item_id == id && &&r.reference_type == t)
+                        .flat_map(|r| r.to_item_ids.iter().copied())
+                        .collect()
+                })
+                .collect(),
+            types
+                .iter()
+                .map(|t| {
+                    m.references
+                        .iter()
+                        .filter(|r| &&r.reference_type == t && r.to_item_ids.contains(&id))
+                        .map(|r| r.from_item_id)
+                        .collect()
+                })
+                .collect(),
+            m.entity_groups
+                .iter()
+                .filter(|g| g.entity_ids.contains(&id))
+                .map(|g| g.group_id)
+                .collect(),
+        )
+    }
+
+    /// The same through the public lookups (the tables, on a large tree).
+    #[allow(clippy::type_complexity)]
+    fn looked_up(
+        m: &Meta,
+        id: u32,
+    ) -> (
+        Option<u32>,
+        Option<u64>,
+        Vec<bool>,
+        Vec<Vec<u32>>,
+        Vec<Vec<u32>>,
+        Vec<u32>,
+    ) {
+        let types: [&FourCc; 4] = [b"dimg", b"thmb", b"cdsc", b"auxl"];
+        let mut groups: Vec<u32> = [b"altr", b"ster"]
+            .iter()
+            .flat_map(|t| m.groups_containing(id, t))
+            .map(|g| g.group_id)
+            .collect();
+        groups.sort_unstable();
+        (
+            m.item(id).map(|i| i.id),
+            m.location(id).map(|l| l.base_offset),
+            m.properties_of(id).iter().map(|p| p.2).collect(),
+            types.iter().map(|t| m.references_from(id, t)).collect(),
+            types.iter().map(|t| m.references_to(id, t)).collect(),
+            groups,
+        )
+    }
+
+    #[test]
+    fn lookups_of_a_large_tree_equal_the_walk() {
+        let n = 300;
+        let mut m = large_tree(n);
+        assert!(m.lookup().is_some(), "a tree this size is indexed");
+        for id in 0..=n + 60 {
+            assert_eq!(looked_up(&m, id), walked(&m, id), "item {id}");
+        }
+        assert_eq!(m.properties_of(7).len(), 2, "both rows of item 7");
+        assert_eq!(m.associations_of(7).len(), 2);
+        assert_eq!(m.display_order().len(), n as usize - 3);
+        // A small tree is walked.
+        assert!(large_tree(4).lookup().is_none());
+
+        // Records pushed after the tables were built: the lengths no
+        // longer match, the walk answers.
+        m.references
+            .push(ItemReference::new(*b"thmb", 11, vec![12]));
+        assert!(m.lookup().is_none());
+        assert_eq!(m.references_to(12, b"thmb"), [11]);
+        for id in [1, 11, 12, n] {
+            assert_eq!(looked_up(&m, id), walked(&m, id), "item {id} after a push");
+        }
+        m.reindex();
+        assert!(m.lookup().is_some());
+        assert_eq!(m.references_to(12, b"thmb"), [11]);
+
+        // Ids rewritten in place: an entry is never used for another
+        // id (the record at its position is checked), an item or a
+        // location is still found by the walk, and `reindex` brings
+        // the tables back in line for the rest.
+        m.items[4].id = 5000;
+        m.locations[0].item_id = 5001;
+        m.references[1].from_item_id = 5002;
+        m.entity_groups[0].entity_ids[0] = 5003;
+        m.associations[0].item_id = 5004;
+        assert_eq!(m.item(5000).map(|i| i.id), Some(5000));
+        assert!(m.item(5).is_none());
+        assert_eq!(m.location(5001).map(|l| l.item_id), Some(5001));
+        assert!(m.location(3).is_none());
+        assert_eq!(m.references_from(2, b"thmb"), Vec::<u32>::new());
+        assert!(m.groups_containing(6, b"altr").is_empty());
+        assert!(m.properties_of(1).is_empty());
+        m.reindex();
+        for id in [1, 2, 3, 5, 6, 8, n, 5000, 5001, 5002, 5003, 5004] {
+            assert_eq!(looked_up(&m, id), walked(&m, id), "item {id} after reindex");
+        }
+        // A clone starts without tables and compares equal.
+        let c = m.clone();
+        assert_eq!(c, m);
+        assert_eq!(looked_up(&c, n), walked(&m, n));
     }
 
     #[test]

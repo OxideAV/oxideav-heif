@@ -9,6 +9,7 @@
 mod common;
 
 use std::io::Cursor;
+use std::path::Path;
 
 use oxideav_core::RuntimeContext;
 use oxideav_heif::decode::{ItemDecoder, decode_item, decode_primary};
@@ -106,7 +107,16 @@ fn stereo_file() -> Vec<u8> {
     let right = w.add_coded_item(ITEM_TYPE_LHV1, au, lhv1_props(&hvcc, &lhvc, Some(1)));
     w.set_primary(left);
     w.add_entity_group(*b"ster", 10, vec![left, right]);
-    w.write_to_vec().unwrap()
+    let bytes = w.write_to_vec().unwrap();
+    // `OXIDEAV_HEIF_WRITE_SEEDS=<dir>`: the file as a fuzz seed.
+    if let Ok(dir) = std::env::var("OXIDEAV_HEIF_WRITE_SEEDS") {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(
+            Path::new(&dir).join("minimal.lhv1-stereo-pair.heic"),
+            &bytes,
+        );
+    }
+    bytes
 }
 
 /// The black-box decoder's per-view planes, re-derived when it is
