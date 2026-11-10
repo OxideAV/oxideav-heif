@@ -16,12 +16,25 @@
 //! [`crate::HeifFile`] expands a `mini` file on parse, so every reader
 //! of this crate takes the regular `meta` paths.
 //!
-//! One slot of the expansion is not implementable from the staged
-//! text: entry 30, the `AlphaInformationProperty` a codec with native
-//! translucency (`alpha_flag` = 1 and `alpha_item_data_size` = 0)
-//! expands to, is named but not defined by Amd 2 (neither its box type
-//! nor its syntax); such files are refused with a typed
-//! [`HeifError::Unsupported`].
+//! One slot of the expansion rests on a draft: entry 30, the
+//! `AlphaInformationProperty` a codec with native translucency
+//! (`alpha_flag` = 1 and `alpha_item_data_size` = 0) expands to, is
+//! named but not defined by Amd 2 (neither its box type nor its
+//! syntax). It is the item-property use of the ISOBMFF
+//! `AlphaInformationBox`, which no published text contains; the
+//! expansion writes it with the syntax and the `alpx` type of the
+//! latest public draft ([`crate::props::AlphaInformation`], whose
+//! flag layout — premultiplication in bits 0–1, `is_float` = 4 — is
+//! the one Amd 2's "flags set to alpha_is_premultiplied +
+//! float_flag×4" presumes). Two caveats, both recorded on the
+//! expanded property: the four-character code is not settled, and
+//! Amd 2 prints `opaque_value` as the channel's *bit depth* (8, 9..16,
+//! or 16 / 32 / 64 for floating point — the `bits_per_channel`
+//! expression of O.4.7.1), which the expansion reproduces literally
+//! and which is therefore not a usable opaque sample value: a consumer
+//! of such an item blends over the alpha channel's full range (the
+//! draft's default for an absent box and the §6.9.1 rule),
+//! [`MinimizedImage::native_alpha_information`] says so.
 
 use crate::boxes::FourCc;
 use crate::boxes::write::{boxed, full_boxed};
@@ -841,6 +854,33 @@ impl MinimizedImage {
         self.alpha && self.alpha_data.is_empty()
     }
 
+    /// The `AlphaInformationProperty` of O.4.6 entry 30, when the main
+    /// item carries its alpha natively (`alpha_flag` = 1 and
+    /// `alpha_item_data_size` = 0): flags `alpha_is_premultiplied +
+    /// float_flag × 4`, `transparent_value` 0 and `opaque_value` as
+    /// printed — the bit depth of the channel. **Interpretation
+    /// bound** (see the module documentation): the box type and syntax
+    /// are a draft's, and the printed `opaque_value` is a bit depth,
+    /// not a sample value — blend over the channel's full range
+    /// instead of reading it.
+    pub fn native_alpha_information(&self) -> Option<crate::props::AlphaInformation> {
+        use crate::props::{AlphaInformation, AlphaPremultiplication};
+        if !self.has_native_alpha() {
+            return None;
+        }
+        let mode = if self.alpha_premultiplied {
+            AlphaPremultiplication::NonLinear
+        } else {
+            AlphaPremultiplication::Straight
+        };
+        let bits = self.format.bits();
+        Some(if self.format.is_float() {
+            AlphaInformation::float(mode, bits as f32, 0.0)
+        } else {
+            AlphaInformation::integer(mode, bits as u16, 0)
+        })
+    }
+
     /// The O.2.1.2 equivalent `ftyp`: `mif1` added, the equivalent
     /// major brand for a codec brand in `minor_version` (`vvi3` →
     /// `vvic`), `tmap` when a gain map is present.
@@ -873,11 +913,6 @@ impl MinimizedImage {
     /// Rebuild the equivalent file of O.4 — `ftyp` (O.2.1.2), `meta`
     /// (O.4.1–O.4.9), `mdat` (O.4.10) — so the regular readers apply.
     pub fn equivalent_file(&self, original: &FileType) -> Result<Vec<u8>> {
-        if self.has_native_alpha() {
-            return Err(HeifError::unsupported(
-                "mini: alpha coded natively in the main item expands to an AlphaInformationProperty (O.4.6 entry 30), which ISO/IEC 23008-12 Amd 2:2026 does not define",
-            ));
-        }
         let (infe_type, cc_type) = self.codec_types(original.minor_version)?;
         let ftyp = self.equivalent_file_type(original).to_box();
         let gm = self.gain_map.as_ref();
@@ -1065,7 +1100,20 @@ impl MinimizedImage {
             )?);
         }
         slots[1] = Some(ispe(self.width, self.height));
-        slots[2] = Some(pixi_box(main_components, false, self.chroma, self.format));
+        // O.4.7.1: the main item's pixi lists the alpha channel when
+        // the alpha is coded natively in it.
+        let native_alpha = self.native_alpha_information();
+        slots[2] = Some(pixi_box(
+            main_components,
+            native_alpha.is_some(),
+            self.chroma,
+            self.format,
+        ));
+        if let Some(info) = native_alpha {
+            slots[29] = Some(crate::props::write::property_box(
+                &crate::props::Property::Alpx(info),
+            ));
+        }
         slots[3] = Some(nclx(p, t, m, self.full_range));
         if let Some(icc) = &self.icc {
             slots[4] = Some(prof(icc));
@@ -1166,6 +1214,9 @@ impl MinimizedImage {
         // ── ipma (O.4.6 association order), free slots dropped.
         let mut rows: Vec<(u32, Vec<(usize, bool)>)> = Vec::new();
         let mut main = vec![(1, true), (2, false), (3, false), (4, true), (5, true)];
+        if native_alpha.is_some() {
+            main.push((30, true));
+        }
         if self.hdr {
             main.extend([11, 12, 13, 14, 15, 16].map(|i| (i, false)));
         }
@@ -1768,19 +1819,102 @@ mod tests {
     }
 
     #[test]
-    fn native_alpha_and_unknown_codec_brands_are_refused() {
-        let mut m = sample();
-        m.alpha = true;
+    fn native_alpha_expands_to_the_draft_alpha_information_property() {
+        use crate::props::{AlphaInformation, AlphaPremultiplication, AlphaValues, Property};
         let ft = FileType {
             box_type: *b"ftyp",
             major_brand: BRAND_MIF3,
             minor_version: 0,
             compatible_brands: vec![],
         };
-        assert!(matches!(
-            m.equivalent_file(&ft),
-            Err(HeifError::Unsupported(_))
-        ));
+        // (float, bits) → the printed opaque_value: the bit depth.
+        for (format, premultiplied) in [
+            (SampleFormat::Integer { bits: 8 }, false),
+            (SampleFormat::Integer { bits: 12 }, true),
+            (SampleFormat::Float { bits: 32 }, true),
+        ] {
+            let mut m = sample();
+            m.alpha = true;
+            m.alpha_premultiplied = premultiplied;
+            m.format = format;
+            round_trip(&m);
+            let info = m.native_alpha_information().expect("native alpha");
+            let mode = if premultiplied {
+                AlphaPremultiplication::NonLinear
+            } else {
+                AlphaPremultiplication::Straight
+            };
+            let bits = format.bits();
+            match format {
+                SampleFormat::Float { .. } => {
+                    assert_eq!(info, AlphaInformation::float(mode, bits as f32, 0.0))
+                }
+                _ => assert_eq!(info, AlphaInformation::integer(mode, bits as u16, 0)),
+            }
+            // flags = alpha_is_premultiplied + float_flag × 4.
+            assert_eq!(
+                info.flags(),
+                premultiplied as u32 + 4 * format.is_float() as u32
+            );
+            let eq = m.equivalent_file(&ft).unwrap();
+            let f = crate::HeifFile::parse(&eq).unwrap();
+            let meta = f.meta().unwrap();
+            // Entry 30 of the 32-slot ipco, an `alpx` FullBox.
+            assert_eq!(meta.properties.len(), 32);
+            assert_eq!(meta.properties[29].box_type, *b"alpx");
+            assert!(meta.item(item_id::ALPHA).is_none(), "no alpha item");
+            let props = crate::props::ItemProperties::resolve(meta, item_id::MAIN).unwrap();
+            assert_eq!(props.alpha_information(), Some(info));
+            // Association order of O.4.6: 1, 2, 3, 4, 5, then 30
+            // (essential), ahead of the transformative entries.
+            let row: Vec<(u16, bool)> = props
+                .entries
+                .iter()
+                .map(|e| (e.index, e.essential))
+                .collect();
+            let at = row
+                .iter()
+                .position(|e| *e == (30, true))
+                .expect("30, essential");
+            assert_eq!(row[at - 1].0, 4, "after entry 4 (5 is absent without ICC)");
+            assert!(props.unsupported_essential().is_empty());
+            // O.4.7.1: the main pixi leads with the alpha channel.
+            let px = props
+                .entries
+                .iter()
+                .find_map(|e| match &e.property {
+                    Property::PixiExtended(p) => Some(p.clone()),
+                    _ => None,
+                })
+                .expect("extended pixi");
+            assert_eq!(px.channels.len(), 4);
+            assert_eq!(px.channels[0].channel_idc, 5);
+            assert_eq!(px.pixi.bits_per_channel, vec![bits; 4]);
+            if let AlphaValues::Integer { opaque, .. } = info.values {
+                assert_eq!(
+                    opaque as u8, bits,
+                    "the printed opaque_value is the bit depth"
+                );
+            }
+        }
+        // An alpha *item* keeps the auxiliary expansion: no entry 30.
+        let mut aux = sample();
+        aux.alpha = true;
+        aux.alpha_data = vec![1, 2, 3];
+        assert!(aux.native_alpha_information().is_none());
+        let eq = aux.equivalent_file(&ft).unwrap();
+        let f = crate::HeifFile::parse(&eq).unwrap();
+        assert_eq!(f.meta().unwrap().properties[29].box_type, *b"free");
+    }
+
+    #[test]
+    fn unknown_codec_brands_are_refused() {
+        let ft = FileType {
+            box_type: *b"ftyp",
+            major_brand: BRAND_MIF3,
+            minor_version: 0,
+            compatible_brands: vec![],
+        };
         let mut n = sample();
         n.explicit_codec_types = None;
         assert!(n.equivalent_file(&ft).is_err());

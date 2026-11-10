@@ -99,6 +99,20 @@ pub struct SampleEntry {
     pub mime_format: Option<String>,
 }
 impl SampleEntry {
+    /// The draft alpha information box (`alpx`) among the entry's
+    /// children — how the samples of an alpha track read as opacity
+    /// (see [`crate::props::AlphaInformation`] for its status). `None`
+    /// without the box or when it does not parse.
+    pub fn alpha_information(&self) -> Option<crate::props::AlphaInformation> {
+        self.children
+            .iter()
+            .filter(|c| &c.box_type == b"alpx")
+            .find_map(|c| match Property::parse(c) {
+                Ok(Property::Alpx(a)) => Some(a),
+                _ => None,
+            })
+    }
+
     /// Every field as a positional argument, in declaration order
     /// (the struct is `#[non_exhaustive]`: build it here or from
     /// `Default` where one exists, then read / assign its public fields).

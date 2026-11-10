@@ -788,6 +788,173 @@ impl Ndwt {
     }
 }
 
+/// How the colour channels relate to the alpha values
+/// (`premultiplication_mode` of the draft `AlphaInformationBox`,
+/// flag mask `0x000003`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AlphaPremultiplication {
+    /// 0: not pre-multiplied.
+    Straight,
+    /// 1: pre-multiplied in the non-linear RGB signal space.
+    NonLinear,
+    /// 2: pre-multiplied in the linear RGB display-light space.
+    Linear,
+    /// 3: reserved.
+    Reserved,
+}
+
+impl AlphaPremultiplication {
+    /// The two flag bits.
+    pub fn bits(self) -> u32 {
+        match self {
+            AlphaPremultiplication::Straight => 0,
+            AlphaPremultiplication::NonLinear => 1,
+            AlphaPremultiplication::Linear => 2,
+            AlphaPremultiplication::Reserved => 3,
+        }
+    }
+
+    /// From the two low flag bits.
+    pub fn from_bits(flags: u32) -> Self {
+        match flags & 3 {
+            0 => AlphaPremultiplication::Straight,
+            1 => AlphaPremultiplication::NonLinear,
+            2 => AlphaPremultiplication::Linear,
+            _ => AlphaPremultiplication::Reserved,
+        }
+    }
+}
+
+/// The alpha values that mean opaque and transparent, in the
+/// representation the `is_float` flag (`0x000004`) selects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AlphaValues {
+    /// `unsigned int(16) opaque_value, transparent_value`.
+    Integer {
+        /// The alpha value considered opaque.
+        opaque: u16,
+        /// The alpha value considered transparent.
+        transparent: u16,
+    },
+    /// `float(32) opaque_value, transparent_value`, kept as their
+    /// IEEE 754 bit patterns (so the record compares and round-trips
+    /// bit for bit); see [`AlphaInformation::opaque`].
+    Float {
+        /// Bits of the opaque value.
+        opaque_bits: u32,
+        /// Bits of the transparent value.
+        transparent_bits: u32,
+    },
+}
+
+/// `alpx` — the alpha information box / item property. **Draft
+/// status**: the syntax is the one of the latest public draft of
+/// ISO/IEC 14496-12 §12.11.5.2 (WG 03 N1702, "potential improvements"
+/// on DAM 2, *Carriage of depth and alpha*); no published text defines
+/// the box, and its four-character code is not settled (an earlier
+/// ballot text and the HEIF 4th edition working draft print `alpi`).
+/// It is what HEIF Amd 2:2026 O.4.6 entry 30 names
+/// `AlphaInformationProperty`. Containers: a visual sample entry or
+/// the `ipco`.
+///
+/// When the box is absent the draft's defaults apply: integer content
+/// is transparent at the minimum and opaque at the maximum
+/// representable sample value, floating-point content at 0.0 and 1.0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AlphaInformation {
+    /// `premultiplication_mode`.
+    pub premultiplication: AlphaPremultiplication,
+    /// `opaque_value` / `transparent_value`.
+    pub values: AlphaValues,
+    /// The flag bits above the three defined ones (kept so a box
+    /// re-serialises byte for byte).
+    pub reserved_flags: u32,
+}
+
+impl AlphaInformation {
+    /// Integer alpha values.
+    pub fn integer(
+        premultiplication: AlphaPremultiplication,
+        opaque: u16,
+        transparent: u16,
+    ) -> Self {
+        Self {
+            premultiplication,
+            values: AlphaValues::Integer {
+                opaque,
+                transparent,
+            },
+            reserved_flags: 0,
+        }
+    }
+
+    /// Floating-point alpha values.
+    pub fn float(premultiplication: AlphaPremultiplication, opaque: f32, transparent: f32) -> Self {
+        Self {
+            premultiplication,
+            values: AlphaValues::Float {
+                opaque_bits: opaque.to_bits(),
+                transparent_bits: transparent.to_bits(),
+            },
+            reserved_flags: 0,
+        }
+    }
+
+    /// `is_float`.
+    pub fn is_float(&self) -> bool {
+        matches!(self.values, AlphaValues::Float { .. })
+    }
+
+    /// The 24-bit box flags: `premultiplication_mode` (bits 0–1),
+    /// `is_float` (bit 2), the reserved bits as read.
+    pub fn flags(&self) -> u32 {
+        (self.reserved_flags & 0x00FF_FFF8)
+            | self.premultiplication.bits()
+            | ((self.is_float() as u32) << 2)
+    }
+
+    /// `opaque_value` as a number.
+    pub fn opaque(&self) -> f64 {
+        match self.values {
+            AlphaValues::Integer { opaque, .. } => opaque as f64,
+            AlphaValues::Float { opaque_bits, .. } => f32::from_bits(opaque_bits) as f64,
+        }
+    }
+
+    /// `transparent_value` as a number.
+    pub fn transparent(&self) -> f64 {
+        match self.values {
+            AlphaValues::Integer { transparent, .. } => transparent as f64,
+            AlphaValues::Float {
+                transparent_bits, ..
+            } => f32::from_bits(transparent_bits) as f64,
+        }
+    }
+
+    /// The colour channels are pre-multiplied (mode 1 or 2).
+    pub fn is_premultiplied(&self) -> bool {
+        matches!(
+            self.premultiplication,
+            AlphaPremultiplication::NonLinear | AlphaPremultiplication::Linear
+        )
+    }
+
+    /// The opacity in `0.0..=1.0` an alpha `sample` stands for: its
+    /// position between `transparent_value` and `opaque_value`,
+    /// clamped (the two may come in either order; equal values make
+    /// every sample at or past them opaque).
+    pub fn opacity(&self, sample: f64) -> f64 {
+        let (o, t) = (self.opaque(), self.transparent());
+        if o == t {
+            return if sample >= o { 1.0 } else { 0.0 };
+        }
+        ((sample - t) / (o - t)).clamp(0.0, 1.0)
+    }
+}
+
 /// `cexg` — constrained extents grid (HEIF Amd 1:2025 §6.5.41): every
 /// `iloc` extent of the item is one independently decodable tile of a
 /// `rows × columns` grid in row-major order.
@@ -1098,6 +1265,9 @@ pub enum Property {
     PixiExtended(PixiExtended),
     /// `tilC` (HEIF Amd 2:2026 §6.11.3).
     TilC(TilC),
+    /// `alpx` — alpha information (draft ISO/IEC 14496-12 §12.11.5.2;
+    /// see [`AlphaInformation`] for its status).
+    Alpx(AlphaInformation),
     /// A property type this crate does not model (raw box kept).
     Unknown(RawProperty),
 }
@@ -1139,6 +1309,7 @@ impl Property {
             Property::Altt(_) => *b"altt",
             Property::Reve(_) => *b"reve",
             Property::Ndwt(_) => *b"ndwt",
+            Property::Alpx(_) => *b"alpx",
             Property::Cexg(_) => *b"cexg",
             Property::Dadj(_) => *b"dadj",
             Property::Stag(_) => *b"stag",
@@ -1233,6 +1404,7 @@ impl Property {
             b"dadj" => Property::Dadj(parse_dadj(b)?),
             b"stag" => Property::Stag(parse_stag(b)?),
             b"tilC" => Property::TilC(parse_tilc(b)?),
+            b"alpx" => Property::Alpx(parse_alpx(b)?),
             _ => Property::Unknown(raw.clone()),
         };
         Ok(p)
@@ -1400,6 +1572,14 @@ impl ItemProperties {
     pub fn reve(&self) -> Option<Reve> {
         self.descriptive().find_map(|e| match &e.property {
             Property::Reve(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    /// `alpx` (draft alpha information; see [`AlphaInformation`]).
+    pub fn alpha_information(&self) -> Option<AlphaInformation> {
+        self.descriptive().find_map(|e| match &e.property {
+            Property::Alpx(v) => Some(*v),
             _ => None,
         })
     }
@@ -1760,6 +1940,35 @@ fn parse_reve(b: &[u8]) -> Result<Reve> {
         periphery_luminance: r.u32("reve periphery_luminance")?,
         periphery_light_x: r.u16("reve periphery_light_x")?,
         periphery_light_y: r.u16("reve periphery_light_y")?,
+    })
+}
+
+/// `AlphaInformationBox` (draft ISO/IEC 14496-12 §12.11.5.2.2): a
+/// version-0 FullBox whose flags select 16-bit integer or 32-bit
+/// floating-point `opaque_value` / `transparent_value`. Another
+/// version is `Unsupported` (the box is still a draft); bytes past the
+/// two values are tolerated.
+fn parse_alpx(b: &[u8]) -> Result<AlphaInformation> {
+    let (v, f, body) = parse_full_box(b)?;
+    if v != 0 {
+        return Err(HeifError::unsupported(format!("alpx version {v}")));
+    }
+    let mut r = Reader::new(body);
+    let values = if f & 4 != 0 {
+        AlphaValues::Float {
+            opaque_bits: r.u32("alpx opaque_value")?,
+            transparent_bits: r.u32("alpx transparent_value")?,
+        }
+    } else {
+        AlphaValues::Integer {
+            opaque: r.u16("alpx opaque_value")?,
+            transparent: r.u16("alpx transparent_value")?,
+        }
+    };
+    Ok(AlphaInformation {
+        premultiplication: AlphaPremultiplication::from_bits(f),
+        values,
+        reserved_flags: f & 0x00FF_FFF8,
     })
 }
 
@@ -2360,6 +2569,26 @@ pub mod write {
                 b.extend_from_slice(&r.periphery_light_y.to_be_bytes());
                 full_boxed(b"reve", 0, 0, &b)
             }
+            Property::Alpx(a) => {
+                let mut body = Vec::with_capacity(8);
+                match a.values {
+                    AlphaValues::Integer {
+                        opaque,
+                        transparent,
+                    } => {
+                        body.extend_from_slice(&opaque.to_be_bytes());
+                        body.extend_from_slice(&transparent.to_be_bytes());
+                    }
+                    AlphaValues::Float {
+                        opaque_bits,
+                        transparent_bits,
+                    } => {
+                        body.extend_from_slice(&opaque_bits.to_be_bytes());
+                        body.extend_from_slice(&transparent_bits.to_be_bytes());
+                    }
+                }
+                full_boxed(b"alpx", 0, a.flags(), &body)
+            }
             Property::Ndwt(n) => {
                 full_boxed(b"ndwt", 0, 0, &n.diffuse_white_luminance.to_be_bytes())
             }
@@ -2707,6 +2936,16 @@ mod tests {
         round_trip(Property::Ndwt(Ndwt {
             diffuse_white_luminance: 2_030_000,
         }));
+        round_trip(Property::Alpx(AlphaInformation::integer(
+            AlphaPremultiplication::NonLinear,
+            1023,
+            0,
+        )));
+        round_trip(Property::Alpx(AlphaInformation::float(
+            AlphaPremultiplication::Linear,
+            1.0,
+            0.0,
+        )));
         round_trip(Property::Cexg(Cexg {
             rows: 3,
             columns: 4,

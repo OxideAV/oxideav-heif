@@ -547,6 +547,28 @@ pub fn rescale_depth(f: &HeifFrame, depth: u8) -> Result<HeifFrame> {
     Ok(out)
 }
 
+/// Bring an alpha plane described by a draft alpha information
+/// property ([`crate::props::AlphaInformation`]) to the §6.9.1
+/// convention every consumer of this crate reads: 0 transparent, the
+/// maximum sample value opaque. Each luma sample becomes its position
+/// between `transparent_value` and `opaque_value`, clamped and rounded
+/// to nearest; the draft's own defaults (0 and the maximum) leave the
+/// plane untouched. Floating-point values are compared against the
+/// integer samples as numbers.
+pub fn normalise_alpha(alpha: &mut HeifFrame, info: &crate::props::AlphaInformation) {
+    let max = ((1u32 << alpha.format.bit_depth) - 1) as f64;
+    if info.transparent() == 0.0 && info.opaque() == max {
+        return;
+    }
+    let (w, h) = alpha.plane_dims(0);
+    for y in 0..h {
+        for x in 0..w {
+            let v = alpha.sample(0, x, y) as f64;
+            alpha.set_sample(0, x, y, (info.opacity(v) * max + 0.5) as u16);
+        }
+    }
+}
+
 /// Attach an alpha auxiliary (§6.9.1) to `master`: the auxiliary's luma
 /// plane is used, resized to the master's size when they differ, and
 /// rescaled to the master's bit depth.

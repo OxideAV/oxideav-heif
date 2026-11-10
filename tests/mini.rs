@@ -138,6 +138,41 @@ fn minimized_files_decode_like_the_regular_writer() {
     }
 }
 
+/// A `mini` box declaring alpha coded natively in the main item
+/// (`alpha_flag` = 1, `alpha_item_data_size` = 0) opens: the O.4.6
+/// expansion carries entry 30 as the draft alpha information property
+/// (essential, recognised), no alpha item, a main `pixi` that leads
+/// with the alpha channel; the codecs here code no alpha channel in the
+/// item, so the decode is the colour picture.
+#[test]
+fn native_alpha_declaration_expands_and_decodes_the_colour_picture() {
+    let frame = picture(64, 48, Chroma::Yuv420, 8);
+    let opts = EncodeOptions::default().with_hevc_mode("pcm".into());
+    let plain = encode_still_minimized(&frame, &opts).unwrap();
+    let pf = HeifFile::parse(&plain).unwrap();
+    let mut m = pf.minimized.clone().expect("mini parsed");
+    m.alpha = true;
+    m.alpha_premultiplied = true;
+    let info = m.native_alpha_information().expect("native alpha");
+    assert!(info.is_premultiplied());
+    assert_eq!((info.opaque(), info.transparent()), (8.0, 0.0));
+    let minor = u32::from_be_bytes(*b"heic");
+    let bytes = m.to_file_with_minor(minor).unwrap();
+    let f = HeifFile::parse(&bytes).unwrap();
+    assert_eq!(f.minimized.as_ref(), Some(&m));
+    let meta = f.meta().unwrap();
+    assert!(meta.auxiliaries_of(1).is_empty());
+    let props = oxideav_heif::props::ItemProperties::resolve(meta, 1).unwrap();
+    assert_eq!(props.alpha_information(), Some(info));
+    assert!(props.unsupported_essential().is_empty());
+    let a = decode_primary(&f, ItemDecoder::direct()).unwrap();
+    let b = decode_primary(&pf, ItemDecoder::direct()).unwrap();
+    assert_eq!(a.frame, b.frame);
+    assert!(!a.frame.format.has_alpha);
+    let info = oxideav_heif::info(&bytes).unwrap();
+    assert_eq!((info.width, info.height), (64, 48));
+}
+
 /// A gain map (AV1, single-channel map) travels through the box as the
 /// fixed item 3 / 4 pair with the altr group, and reads back with the
 /// same metadata and alternate colour.

@@ -720,7 +720,14 @@ fn build_node<D: AsRef<[u8]>>(
         };
         match node.properties.auxc().map(|a| a.kind()) {
             Some(AuxKind::Alpha) if alpha.is_none() => {
-                premultiplied_alpha = meta.is_premultiplied(item_id, aux_id);
+                // `prem` (§6.9.1), or the draft alpha information
+                // property of the alpha item (`premultiplication_mode`
+                // 1 / 2).
+                premultiplied_alpha = meta.is_premultiplied(item_id, aux_id)
+                    || node
+                        .properties
+                        .alpha_information()
+                        .is_some_and(|a| a.is_premultiplied());
                 alpha = Some(Box::new(node));
             }
             Some(AuxKind::Depth) if depth_aux.is_none() => depth_aux = Some(Box::new(node)),

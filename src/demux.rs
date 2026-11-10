@@ -387,6 +387,12 @@ pub fn synthesize_still(
                 aprops.push((p, true));
             }
         }
+        // The draft alpha information box of the alpha sample entry
+        // rides along as the alpha item's property (same box, both
+        // containers), so the still path interprets it.
+        if let Some(info) = ae.alpha_information() {
+            aprops.push((Property::Alpx(info), false));
+        }
         w.add_alpha(id, a_type, adata.to_vec(), aprops, false);
     }
     // The time-parallel metadata samples (HEIF §8.3) as the still's

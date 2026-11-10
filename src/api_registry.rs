@@ -435,7 +435,17 @@ fn decode_track<D: AsRef<[u8]>>(
         .ok_or_else(|| HeifError::invalid(format!("track {}: no sample entry", track.track_id)))?;
     let (pictures, durations, _) = decode_samples(file, track, opts)?;
     let alpha = match movie.alpha_track_of(track.track_id) {
-        Some(a) => Some(decode_samples(file, a, opts)?.0),
+        Some(a) => {
+            let mut planes = decode_samples(file, a, opts)?.0;
+            // The alpha entry's draft alpha information box names the
+            // opaque / transparent sample values.
+            if let Some(info) = a.primary_entry().and_then(|e| e.alpha_information()) {
+                for p in &mut planes {
+                    crate::compose::normalise_alpha(p, &info);
+                }
+            }
+            Some(planes)
+        }
         None => None,
     };
     let colr = entry

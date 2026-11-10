@@ -2140,7 +2140,10 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
             self.decoder.threads,
         )?;
         if let Some(a) = &node.alpha {
-            let alpha = self.output(a)?;
+            let mut alpha = self.output(a)?;
+            if let Some(info) = a.properties.alpha_information() {
+                crate::compose::normalise_alpha(&mut alpha, &info);
+            }
             out = attach_alpha(&out, &alpha)?;
         }
         Ok(out)
