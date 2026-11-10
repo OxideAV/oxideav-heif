@@ -2,7 +2,7 @@
 //! wall-clock at default settings for a set of files.
 //!
 //! ```text
-//! heifbench [--runs N] [--threads N|auto] [--no-encode] file.heic [file.avif ...]
+//! heifbench [--runs N] [--threads N|auto] [--no-encode] [--framework] file.heic [file.avif ...]
 //! ```
 //!
 //! * decode: `HeifFile::parse` + `decode_primary` (direct factories,
@@ -41,6 +41,47 @@ fn fnv1a64(planes: &[oxideav_heif::Plane]) -> u64 {
     h
 }
 
+/// The registry path: the `"heif"` demuxer's first still packet
+/// through the registry's `"heif"` decoder under `threads` workers.
+/// Returns the frame and the stream parameters describing it.
+fn framework_decode(
+    ctx: &oxideav_core::RuntimeContext,
+    bytes: &[u8],
+    threads: usize,
+) -> (oxideav_core::VideoFrame, oxideav_core::CodecParameters) {
+    use oxideav_core::Frame;
+    let mut demuxer = ctx
+        .containers
+        .open_demuxer(
+            "heif",
+            Box::new(std::io::Cursor::new(bytes.to_vec())),
+            &ctx.codecs,
+        )
+        .expect("demuxer");
+    let params = demuxer.streams()[0].params.clone();
+    let pkt = demuxer.next_packet().expect("packet");
+    drop(demuxer);
+    let mut dec = ctx.codecs.first_decoder(&params).expect("decoder");
+    dec.set_execution_context(&oxideav_core::ExecutionContext::with_threads(threads));
+    dec.send_packet(&pkt).expect("send_packet");
+    drop(pkt);
+    loop {
+        match dec.receive_frame().expect("frame") {
+            Frame::Video(v) => return (v, params),
+            _ => continue,
+        }
+    }
+}
+
+fn framework_context() -> oxideav_core::RuntimeContext {
+    let mut ctx = oxideav_core::RuntimeContext::new();
+    oxideav_h265::register(&mut ctx);
+    oxideav_av1::register(&mut ctx);
+    oxideav_h264::register(&mut ctx);
+    oxideav_heif::register(&mut ctx);
+    ctx
+}
+
 fn median(mut v: Vec<Duration>) -> Duration {
     v.sort();
     v[v.len() / 2]
@@ -56,6 +97,14 @@ fn main() {
         std::process::exit(2);
     }
     // Child mode: decode once (peak RSS measured by the parent).
+    if args[0] == "--child-framework" {
+        let bytes = std::fs::read(&args[1]).expect("read");
+        let threads: usize = args.get(2).and_then(|t| t.parse().ok()).unwrap_or(1);
+        let ctx = framework_context();
+        let (frame, _) = framework_decode(&ctx, &bytes, threads);
+        println!("{} planes", frame.planes.len());
+        return;
+    }
     if args[0] == "--child" {
         let bytes = std::fs::read(&args[1]).expect("read");
         let threads: usize = args.get(2).and_then(|t| t.parse().ok()).unwrap_or(1);
@@ -70,6 +119,10 @@ fn main() {
     let mut threads = 1usize;
     let mut encode = true;
     let mut all_encodes = false;
+    // `--framework`: time (and measure the peak RSS of) the registry
+    // path — demuxer packet → registry `"heif"` decoder — next to the
+    // direct one; its output digest must equal the direct decode's.
+    let mut framework = false;
     // `--grid none` codes one item whatever the size (the automatic
     // 512-px grid above 4 MP otherwise); `--grid <tile>` an explicit grid.
     let mut grid: Option<u32> = None;
@@ -93,6 +146,7 @@ fn main() {
                 i += 1;
             }
             "--no-encode" => encode = false,
+            "--framework" => framework = true,
             "--all-encodes" => all_encodes = true,
             "--grid" => {
                 grid = Some(match args[i + 1].as_str() {
@@ -131,30 +185,17 @@ fn main() {
         }
         let img = img.unwrap();
         let decode = median(times);
-        let layout = format!(
-            "{}×{} {:?} {}-bit{}",
-            img.width(),
-            img.height(),
-            img.frame.format.chroma,
-            img.frame.format.bit_depth,
-            if img.frame.format.has_alpha {
-                " +α"
-            } else {
-                ""
-            }
-        );
-        // Peak RSS of a fresh process decoding once.
-        let exe = std::env::current_exe().expect("exe");
-        let rss = {
+        let child_rss = |mode: &str| -> String {
             let flag = if cfg!(target_os = "macos") {
                 "-l"
             } else {
                 "-v"
             };
+            let exe = std::env::current_exe().expect("exe");
             match Command::new("/usr/bin/time")
                 .arg(flag)
                 .arg(&exe)
-                .arg("--child")
+                .arg(mode)
                 .arg(&path)
                 .arg(threads.to_string())
                 .output()
@@ -182,6 +223,46 @@ fn main() {
                 Err(_) => "n/a".into(),
             }
         };
+        if framework {
+            let ctx = framework_context();
+            let mut times = Vec::with_capacity(runs);
+            let mut hash = 0;
+            for _ in 0..runs {
+                let t = Instant::now();
+                let (frame, params) = framework_decode(&ctx, &bytes, threads);
+                times.push(t.elapsed());
+                // The digest is over the visible samples, as the direct
+                // path's (outside the timed span).
+                let f = oxideav_heif::HeifFrame::from_core(
+                    &frame,
+                    params.width.expect("width"),
+                    params.height.expect("height"),
+                    params.pixel_format.expect("pixel format"),
+                )
+                .expect("frame");
+                hash = fnv1a64(&f.tight().planes);
+            }
+            eprintln!(
+                "framework path: {} decode {:.3} s, peak RSS {}, output FNV-1a {hash:016x}",
+                path.file_name().unwrap().to_string_lossy(),
+                median(times).as_secs_f64(),
+                child_rss("--child-framework"),
+            );
+        }
+        let layout = format!(
+            "{}×{} {:?} {}-bit{}",
+            img.width(),
+            img.height(),
+            img.frame.format.chroma,
+            img.frame.format.bit_depth,
+            if img.frame.format.has_alpha {
+                " +α"
+            } else {
+                ""
+            }
+        );
+        // Peak RSS of a fresh process decoding once.
+        let rss = child_rss("--child");
         let mut enc_hevc = "—".to_string();
         let mut enc_av1 = "—".to_string();
         if let Some(out) = write.take() {

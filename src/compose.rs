@@ -108,6 +108,36 @@ pub fn crop(f: &HeifFrame, x: u32, y: u32, w: u32, h: u32) -> Result<HeifFrame> 
     Ok(out)
 }
 
+/// The `w × h` region of `f` at `(x, y)` in `f`'s own layout — no
+/// promotion: the offset must sit on the chroma sampling grid (a
+/// region that does not is `Unsupported`), and an odd extent keeps the
+/// chroma sample its last column / row shares, as a coded picture of
+/// that size does. HEIF §6.5.7 (`rloc`): the pixel sampling of the
+/// region is that of the related image, the grids aligned.
+#[doc(hidden)]
+pub fn region(f: &HeifFrame, x: u32, y: u32, w: u32, h: u32) -> Result<HeifFrame> {
+    if w == 0
+        || h == 0
+        || x as u64 + w as u64 > f.width as u64
+        || y as u64 + h as u64 > f.height as u64
+    {
+        return Err(HeifError::invalid(format!(
+            "region {w}x{h}@({x},{y}) outside the {}x{} picture",
+            f.width, f.height
+        )));
+    }
+    let (sx, sy) = f.format.chroma.shift();
+    if !x.is_multiple_of(1 << sx) || !y.is_multiple_of(1 << sy) {
+        return Err(HeifError::unsupported(format!(
+            "region at ({x},{y}) is off the chroma sampling grid of a {:?} picture",
+            f.format.chroma
+        )));
+    }
+    let mut out = HeifFrame::zeroed(w, h, f.format)?;
+    blit(&mut out, (0, 0), f, (x, y), (w, h));
+    Ok(out)
+}
+
 /// Apply a `clap` property (§6.5.9).
 pub fn apply_clap(f: &HeifFrame, clap: &Clap) -> Result<HeifFrame> {
     let r = clap.resolve(f.width, f.height)?;

@@ -1321,6 +1321,83 @@ fn ipco_is_a_pool_shared_by_every_item() {
     assert_eq!(check(&g, MiafProfile::Miaf).unwrap().violations, vec![]);
 }
 
+/// A tree past the lookup-table threshold, through a written file: an
+/// 81-item grid whose every tile also has a thumbnail reference and
+/// sits in an entity group — the graph, the display order and the MIAF
+/// check agree with a 4-tile file built the same way (small trees are
+/// walked). `OXIDEAV_HEIF_WRITE_SEEDS=<dir>` writes it as a fuzz seed.
+#[test]
+fn a_large_item_tree_reads_like_a_small_one() {
+    use oxideav_heif::derived::{GridDescriptor, build_primary_graph};
+    use oxideav_heif::props::{Colr, Ispe, Pixi};
+
+    let (hvcc, data) = hevc_record_and_data();
+    let build = |side: u16, data: &[u8]| -> Vec<u8> {
+        let props = || {
+            vec![
+                (hvcc.clone(), true),
+                (Property::Ispe(Ispe::new(64, 64)), false),
+                (Property::Pixi(Pixi::new(vec![8, 8, 8])), false),
+                (Property::Colr(Colr::MIAF_DEFAULT), false),
+            ]
+        };
+        let mut w = HeifWriter::new();
+        let n = side as usize * side as usize;
+        let tiles: Vec<u32> = (0..n)
+            .map(|_| w.add_coded_item(*b"hvc1", data.to_vec(), props()))
+            .collect();
+        let grid = w
+            .add_grid(
+                GridDescriptor::new(side, side, 64 * side as u32, 64 * side as u32),
+                &tiles,
+                vec![(Property::Colr(Colr::MIAF_DEFAULT), false)],
+            )
+            .unwrap();
+        w.set_primary(grid);
+        let thumb = w.add_coded_item(*b"hvc1", data.to_vec(), props());
+        w.add_reference(*b"thmb", thumb, vec![grid]);
+        w.add_entity_group(*b"brst", 9000, tiles.clone());
+        w.write_to_vec().unwrap()
+    };
+    let shape = |bytes: &[u8]| {
+        let f = HeifFile::parse(bytes).unwrap();
+        let meta = f.meta().unwrap();
+        let node = build_primary_graph(&f).unwrap();
+        let grid = node.item.id;
+        assert_eq!(node.inputs.len(), meta.items.len() - 2);
+        assert_eq!(node.coded_items().len(), meta.items.len() - 2);
+        assert_eq!(node.thumbnails.len(), 1);
+        let tile = node.inputs[0].item.id;
+        assert_eq!(meta.references_to(tile, b"dimg"), [grid]);
+        assert_eq!(meta.groups_containing(tile, b"brst").len(), 1);
+        assert_eq!(meta.properties_of(tile).len(), 4);
+        // The grid and every tile are displayable; the thumbnail is not.
+        assert_eq!(meta.display_order().len(), meta.items.len() - 1);
+        assert_eq!(check(&f, MiafProfile::Miaf).unwrap().violations, vec![]);
+        let again = HeifWriter::from_files(&[bytes])
+            .unwrap()
+            .write_to_vec()
+            .unwrap();
+        let g = HeifFile::parse(&again).unwrap();
+        // from_files carries the primary and what it needs: the grid,
+        // its tiles and its thumbnail.
+        assert_eq!(g.meta().unwrap().items.len(), meta.items.len());
+        meta.items.len()
+    };
+    assert_eq!(shape(&build(2, &data)), 6);
+    assert_eq!(shape(&build(9, &data)), 83);
+    // The seed keeps the tree and drops the pictures (a one-byte NAL
+    // unit per item): the fuzz targets want the item model.
+    if let Ok(dir) = std::env::var("OXIDEAV_HEIF_WRITE_SEEDS") {
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            std::path::Path::new(&dir).join("minimal.grid-81-tiles-large-tree.heic"),
+            build(9, &[0, 0, 0, 1, 0x40]),
+        )
+        .unwrap();
+    }
+}
+
 /// Counts that do not fit their box field are refused, never wrapped:
 /// a reference box names at most 65 535 items (its `reference_count`
 /// is 16 bits — a 256 × 256 grid, 65 536 tiles, cannot be written),

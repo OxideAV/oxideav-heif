@@ -1538,10 +1538,64 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         Ok(())
     }
 
+    /// An HEVC tile item (HEIF B.2.5): a rectangular set of tiles of
+    /// the HEVC image item its `tbas` reference names. Its
+    /// reconstructed image is the region of that item's reconstructed
+    /// image the `rloc` property places it at (§6.5.7: same pixel
+    /// sampling, aligned grids), `ispe` wide and high — so the tile is
+    /// read out of the picture it belongs to, deblocked across tile
+    /// boundaries as the picture is (B.2.5 NOTE 1), rather than
+    /// decoded from the item's own NAL units. An item without exactly
+    /// one `tbas` reference to an HEVC image item, without the `rloc`
+    /// B.2.5 requires, or whose region leaves the picture is refused.
+    fn tile_item(&mut self, node: &ImageNode) -> Result<HeifFrame> {
+        let id = node.item.id;
+        let meta = self.file.meta()?;
+        let bases = meta.references_from(id, &crate::meta::reference::TBAS);
+        let [base] = bases[..] else {
+            return Err(HeifError::invalid(format!(
+                "hvt1 item {id}: {} 'tbas' references (HEIF §6.5.7: the one HEVC image item \
+                 the tiles belong to)",
+                bases.len()
+            )));
+        };
+        let rloc = node.properties.rloc().ok_or_else(|| {
+            HeifError::invalid(format!(
+                "hvt1 item {id} has no rloc property (HEIF B.2.5: its position in the HEVC \
+                 image item)"
+            ))
+        })?;
+        let (w, h) = node.reconstructed_size()?;
+        let base_node = build_graph(self.file, base)?;
+        if !matches!(
+            base_node.item.item_type,
+            crate::meta::ITEM_TYPE_HVC1 | crate::meta::ITEM_TYPE_HEV1
+        ) {
+            return Err(HeifError::invalid(format!(
+                "hvt1 item {id}: its 'tbas' reference names item {base} ('{}'), not an HEVC \
+                 image item",
+                crate::boxes::fourcc_str(&base_node.item.item_type)
+            )));
+        }
+        // Several tile items of one picture (a grid of them, a burst)
+        // decode it once: the picture stays cached for the session.
+        *self.uses.entry(base).or_insert(1) += 1;
+        let picture = self.coded(&base_node)?;
+        crate::compose::region(&picture, rloc.horizontal_offset, rloc.vertical_offset, w, h)
+            .map_err(|e| match e {
+                HeifError::InvalidData(m) => HeifError::invalid(format!("hvt1 item {id}: {m}")),
+                HeifError::Unsupported(m) => HeifError::unsupported(format!("hvt1 item {id}: {m}")),
+                other => other,
+            })
+    }
+
     /// A decoded coded item: from the cache (the last use takes it
     /// out), or freshly decoded (cached when another use follows).
     fn coded(&mut self, node: &ImageNode) -> Result<HeifFrame> {
         let id = node.item.id;
+        if node.item.item_type == crate::meta::ITEM_TYPE_HVT1 {
+            return self.tile_item(node);
+        }
         let left = self.uses.get(&id).copied().unwrap_or(1).saturating_sub(1);
         self.uses.insert(id, left);
         if let Some(f) = self.cache.remove(&id) {
@@ -1694,6 +1748,8 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         grid.inputs.len() > 1
             && grid.inputs.iter().all(|t| {
                 matches!(t.kind, ImageKind::Coded(_))
+                    // A tile item is read out of its `tbas` picture.
+                    && t.item.item_type != crate::meta::ITEM_TYPE_HVT1
                     && t.alpha.is_none()
                     && t.properties.transformative().next().is_none()
                     && t.properties.unsupported_essential().is_empty()
