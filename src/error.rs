@@ -69,14 +69,15 @@ impl HeifError {
         Self::Io(std::io::Error::other(msg.into()))
     }
 
-    /// The refusal for an L-HEVC (`lhv1`) item whose `tols` asks for
-    /// an output layer set beyond the base layer (this crate decodes
-    /// the base layer only; opt in with
-    /// `ItemDecoder::base_layer_fallback`). An [`HeifError::Unsupported`]
+    /// The refusal for an L-HEVC (`lhv1`) item whose `tols` output
+    /// layer set names enhancement layers the decoded bitstream does
+    /// not yield (its VPS describes fewer layers than the item's
+    /// `oinf`); settle for the base layer with
+    /// `ItemDecoder::base_layer_fallback`. An [`HeifError::Unsupported`]
     /// whose message [`HeifError::layered_hevc_info`] reads back.
     pub fn layered_hevc(item_id: u32, target_ols_idx: u16) -> Self {
         Self::Unsupported(format!(
-            "{LAYERED_HEVC_PREFIX}item {item_id} output layer set {target_ols_idx} needs enhancement layers (base layer only)"
+            "{LAYERED_HEVC_PREFIX}item {item_id} output layer set {target_ols_idx} needs enhancement layers the bitstream does not carry"
         ))
     }
 

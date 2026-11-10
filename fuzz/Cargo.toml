@@ -65,7 +65,7 @@ path = ".."
 version = "0.1.43"
 
 [dependencies.oxideav-h265]
-version = ">=0.0.15, <0.1"
+version = ">=0.0.17, <0.1"
 
 [dependencies.oxideav-av1]
 version = "0.1.21"

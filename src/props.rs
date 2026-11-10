@@ -2538,7 +2538,7 @@ mod tests {
             temporal_id_nested: true,
             length_size: 4,
             arrays: vec![],
-            raw: vec![1, 0xf0, 0, 0xfc, 0x0f, 0],
+            raw: vec![1, 0xf0, 0, 0xfc, 0xcf, 0],
         }));
         round_trip(Property::AvcC(AvcConfig {
             configuration_version: 1,

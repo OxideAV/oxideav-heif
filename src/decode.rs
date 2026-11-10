@@ -193,10 +193,12 @@ impl<'r> ItemDecoder<'r> {
         self.tone_map
     }
 
-    /// Decode the base layer of an `lhv1` item whose `tols` asks for
-    /// an output layer set with enhancement layers, instead of the
-    /// refusal [`HeifError::layered_hevc`] (recognisable through
-    /// [`HeifError::layered_hevc_info`]).
+    /// Decode only the base layer of an `lhv1` item without an `lsel`
+    /// (and of one whose selected enhancement layer cannot be output),
+    /// instead of its `tols` output layer set — or of the refusal
+    /// [`HeifError::layered_hevc`] (recognisable through
+    /// [`HeifError::layered_hevc_info`]) for a bitstream that does not
+    /// carry those layers.
     pub fn base_layer_fallback(mut self) -> Self {
         self.base_layer_fallback = true;
         self
@@ -221,7 +223,15 @@ impl<'r> ItemDecoder<'r> {
         };
         let mut options = oxideav_core::CodecOptions::new();
         let (id, extradata, layout) = match kind {
-            CodedKind::Hevc(cfg) => (CODEC_ID_HEVC, cfg.raw.clone(), hevc_layout(cfg)?),
+            CodedKind::Hevc(cfg) => {
+                // HEIF B.2.2.1.2: an `hvc1` item is its base layer. Its
+                // `hvcC` VPS may describe an L-HEVC bitstream whose
+                // default output layer set lies above layer 0, so the
+                // decoder is pointed at nuh_layer_id 0 (single-layer
+                // streams ignore the option).
+                options = options.set("layer", "0");
+                (CODEC_ID_HEVC, cfg.raw.clone(), hevc_layout(cfg)?)
+            }
             CodedKind::Av1(cfg) => (CODEC_ID_AV1, cfg.raw.clone(), av1_layout(cfg)?),
             CodedKind::Avc(cfg) => (CODEC_ID_AVC, cfg.raw.clone(), cfg.layout()?),
             CodedKind::Vvc(cfg) => {
@@ -243,9 +253,16 @@ impl<'r> ItemDecoder<'r> {
                         };
                         (CODEC_ID_HEVC, x.clone(), plan.layout)
                     }
-                    // No base record: the base layer travels Annex B
-                    // (parameter sets in band), so the decoder gets none.
-                    None => (CODEC_ID_HEVC, Vec::new(), plan.layout),
+                    // No base record: the access unit travels Annex B
+                    // (every layer's parameter sets in band), so the
+                    // decoder gets no extradata, only the operating point.
+                    None => {
+                        options = match plan.layer {
+                            Some(l) => options.set("layer", l.to_string()),
+                            None => options.set("ols", plan.tols.to_string()),
+                        };
+                        (CODEC_ID_HEVC, Vec::new(), plan.layout)
+                    }
                 }
             }
         };
@@ -293,15 +310,71 @@ impl<'r> ItemDecoder<'r> {
         // it (AV1); the others stay serial and the budget is spent on
         // independent items (see `codec_takes_budget`).
         let job = self.prepare(file, node)?;
-        let dec = self.make_budgeted(&job.params)?;
-        job.run(dec)
+        Ok(job.execute(self, true)?.swap_remove(0).frame)
     }
 
     /// Everything a coded item's decode needs, gathered from the file
     /// (the codec instance is made separately, so jobs can run on
     /// worker threads without touching the file).
     fn prepare<D: AsRef<[u8]>>(&self, file: &HeifFile<D>, node: &ImageNode) -> Result<CodedJob> {
-        self.prepare_with(node, |id| file.item_data(id), node.ispe())
+        let mut job = self.prepare_with(node, |id| file.item_data(id), node.ispe())?;
+        job.external_base = self.external_base(file, node, &job)?;
+        job.predicted = predicted_stream(file, node, &job.data)?;
+        Ok(job)
+    }
+
+    /// HEIF B.2.2.1.3: the decoded picture of the image item an `lhv1`
+    /// item names through an `exbl` reference serves as its
+    /// `nuh_layer_id` 0 picture (H.265 F.8.1.8 hybrid scalability — the
+    /// base layer may be coded with another codec, e.g. an `avc1`
+    /// item). `None` for every other item and for a base-layer-only
+    /// decode ([`ItemDecoder::base_layer_fallback`] without an `lsel`,
+    /// which then has no layer to decode — refused below).
+    fn external_base<D: AsRef<[u8]>>(
+        &self,
+        file: &HeifFile<D>,
+        node: &ImageNode,
+        job: &CodedJob,
+    ) -> Result<Option<HeifFrame>> {
+        if !matches!(node.kind, ImageKind::Coded(t) if t == ITEM_TYPE_LHV1) {
+            return Ok(None);
+        }
+        let Ok(meta) = file.meta() else {
+            return Ok(None);
+        };
+        let targets = meta.references_from(node.item.id, &crate::meta::reference::EXBL);
+        let Some(&base_id) = targets.first() else {
+            return Ok(None);
+        };
+        let id = node.item.id;
+        if targets.len() > 1 {
+            return Err(HeifError::invalid(format!(
+                "item {id}: {} exbl references (one external base layer item)",
+                targets.len()
+            )));
+        }
+        if job.base_only {
+            return Err(HeifError::invalid(format!(
+                "item {id}: the base layer of this lhv1 item is item {base_id} (exbl); decode that item"
+            )));
+        }
+        let base = build_graph(file, base_id)?;
+        if !matches!(base.kind, ImageKind::Coded(_)) {
+            return Err(HeifError::invalid(format!(
+                "item {id}: exbl names item {base_id}, which is not a coded image item"
+            )));
+        }
+        if !meta
+            .references_from(base_id, &crate::meta::reference::EXBL)
+            .is_empty()
+        {
+            return Err(HeifError::invalid(format!(
+                "item {id}: exbl base item {base_id} has an external base layer of its own"
+            )));
+        }
+        // "the decoded pixel array of that other image item": its
+        // reconstructed picture, no transformative property applied.
+        self.decode_coded(file, &base).map(Some)
     }
 
     /// [`ItemDecoder::prepare`] over a caller-supplied payload source
@@ -321,43 +394,71 @@ impl<'r> ItemDecoder<'r> {
         };
         let mut params = Self::codec_parameters(node)?;
         let mut layers: Option<Vec<u8>> = None;
+        let mut base_only = false;
+        let mut expect_layers: Option<(u16, Vec<u8>)> = None;
         let owned = |id: u32| item_data(id).map(std::borrow::Cow::into_owned);
         let (layout, data) = match &kind {
-            CodedKind::Hevc(c) => (hevc_layout(c)?, owned(node.item.id)?),
+            // HEIF B.2.2.1.2: readers ignore the NAL units with
+            // nuh_layer_id > 0 an `hvc1` item may carry (the access unit
+            // an `lhv1` item of the same bitstream shares).
+            CodedKind::Hevc(c) => (
+                hevc_layout(c)?,
+                base_layer_units(owned(node.item.id)?, c.length_size),
+            ),
             CodedKind::Av1(c) => (av1_layout(c)?, owned(node.item.id)?),
             CodedKind::Avc(c) => (c.layout()?, owned(node.item.id)?),
             CodedKind::Vvc(c) => (vvc_layout(c)?, owned(node.item.id)?),
             CodedKind::LayeredHevc(cfg) => {
                 let plan = LayeredPlan::of(node, cfg)?;
-                match &plan.extradata {
-                    Some(_) => {
-                        // HEIF B.2.2.1.3 + §6.5.11: the tols output layer
-                        // set decodes in full; an lsel picks one
-                        // reconstructed image, otherwise every output
-                        // layer comes back (base first) and the item's
-                        // image is the first.
-                        if self.base_layer_fallback && plan.layer.is_none() {
-                            params.options = params.options.set("layer", "0");
-                        } else if plan.layer.is_none() {
-                            layers = Some(plan.output_layers.clone());
-                        }
-                        (plan.layout, owned(node.item.id)?)
-                    }
-                    None => {
-                        // Without a base record only the base layer can be
-                        // decoded (Annex B, filtered to nuh_layer_id 0):
-                        // an output layer set with enhancement layers is a
-                        // typed refusal unless the caller settles for it.
-                        let enhancement = plan.output_layers.iter().any(|l| *l != 0);
-                        if enhancement && !self.base_layer_fallback {
-                            return Err(HeifError::layered_hevc(node.item.id, plan.tols));
-                        }
-                        (
-                            plan.layout,
-                            base_layer_annex_b(cfg, &item_data(node.item.id)?)?,
-                        )
-                    }
+                let payload = owned(node.item.id)?;
+                // HEIF B.2.2.1.3 NOTE 1: an `lhv1` item is an initial
+                // IRAP access unit. A non-IRAP picture of a layer above
+                // the base starts that layer uninitialised, and H.265
+                // F.8.1.6 sets PicOutputFlag to 0 for it — the item has
+                // no picture of that output layer.
+                let wanted: Vec<u8> = match plan.layer {
+                    Some(l) => vec![l.min(63) as u8],
+                    None => plan.output_layers.clone(),
+                };
+                let uninitialised = first_non_irap_layer(&payload, cfg.length_size, &wanted);
+                // HEIF B.2.2.1.3 + §6.5.11: the tols output layer set
+                // decodes in full; an lsel picks one reconstructed
+                // image, otherwise every output layer comes back (base
+                // first) and the item's image is the first. The caller
+                // may settle for the base layer instead.
+                let fallback =
+                    self.base_layer_fallback && (plan.layer.is_none() || uninitialised.is_some());
+                if let (Some((layer, nal_type)), false) = (uninitialised, fallback) {
+                    return Err(HeifError::invalid(format!(
+                        "item {}: the layer-{layer} picture of this lhv1 item is not an IRAP \
+                         picture (nal_unit_type {nal_type}); an lhv1 item is an initial IRAP \
+                         access unit (HEIF B.2.2.1.3) and H.265 F.8.1.6 outputs no picture \
+                         of a layer that is not initialised",
+                        node.item.id
+                    )));
                 }
+                if fallback {
+                    params.options = params.options.set("layer", "0");
+                    base_only = true;
+                } else {
+                    if plan.layer.is_none() {
+                        layers = Some(plan.output_layers.clone());
+                    }
+                    expect_layers = Some((plan.tols, wanted));
+                }
+                let data = match (&plan.extradata, fallback) {
+                    // hvcC ++ lhvC extradata: the access unit as stored.
+                    (Some(_), _) => payload,
+                    // No base record, base layer only: Annex B filtered
+                    // to nuh_layer_id 0.
+                    (None, true) => base_layer_annex_b(cfg, &payload)?,
+                    // No base record: the `lhvC` arrays carry every
+                    // layer's parameter sets (the base layer's included
+                    // when the base is internal), so the whole access
+                    // unit travels Annex B with them in band.
+                    (None, false) => layered_annex_b(cfg, &payload)?,
+                };
+                (plan.layout, data)
             }
         };
         if data.is_empty() {
@@ -373,6 +474,10 @@ impl<'r> ItemDecoder<'r> {
             layout,
             ispe,
             layers,
+            base_only,
+            expect_layers,
+            external_base: None,
+            predicted: None,
         })
     }
 
@@ -387,9 +492,7 @@ impl<'r> ItemDecoder<'r> {
         file: &HeifFile<D>,
         node: &ImageNode,
     ) -> Result<Vec<LayerFrame>> {
-        let job = self.prepare(file, node)?;
-        let dec = self.make_budgeted(&job.params)?;
-        job.run_all(dec)
+        self.prepare(file, node)?.execute(self, true)
     }
 }
 
@@ -477,12 +580,141 @@ struct CodedJob {
     /// The output layers whose pictures the decoder emits in turn
     /// (`None`: a single picture, layer 0).
     layers: Option<Vec<u8>>,
+    /// An `lhv1` item decoded to its base layer alone
+    /// ([`ItemDecoder::base_layer_fallback`]).
+    base_only: bool,
+    /// An `lhv1` item's operating point: `target_ols_idx` and the
+    /// `nuh_layer_id` of each picture the item yields, in order (the
+    /// output layers, or the `lsel` layer). A picture the codec does
+    /// not tag with that layer means the bitstream did not carry it.
+    expect_layers: Option<(u16, Vec<u8>)>,
+    /// The `exbl` item's decoded picture: the F.8.1.8 external base
+    /// layer of an `lhv1` item (HEIF B.2.2.1.3).
+    external_base: Option<HeifFrame>,
+    /// A predictively coded item (HEIF §6.4.9): the Annex B bitstream
+    /// of its `pred` references' item data in reference order followed
+    /// by its own, and the decode-order index of its access unit.
+    predicted: Option<(Vec<u8>, u64)>,
 }
 
 impl CodedJob {
-    fn run(self, dec: Box<dyn Decoder>) -> Result<HeifFrame> {
-        let mut frames = self.run_all(dec)?;
-        Ok(frames.swap_remove(0).frame)
+    /// Decode the job: through a codec instance from `decoder` (made
+    /// with the item decoder's budget when `budgeted`), or — for an
+    /// `lhv1` item with an external base layer — through the HEVC
+    /// sequence decoder fed that base picture.
+    fn execute(self, decoder: &ItemDecoder<'_>, budgeted: bool) -> Result<Vec<LayerFrame>> {
+        if self.external_base.is_some() {
+            return self.run_external_base();
+        }
+        if self.predicted.is_some() {
+            return self.run_predicted();
+        }
+        let dec = if budgeted {
+            decoder.make_budgeted(&self.params)?
+        } else {
+            decoder.make(&self.params)?
+        };
+        self.run_all(dec)
+    }
+
+    /// HEIF §6.4.9: the bitstream formed by the `pred` references'
+    /// item data followed by the item's own decodes through one HEVC
+    /// sequence decoder; the item's picture is the base-layer picture
+    /// of its own (the last) access unit, wherever output order puts it.
+    fn run_predicted(mut self) -> Result<Vec<LayerFrame>> {
+        use oxideav_h265::sequence::{LayerTarget, SequenceDecoder};
+        let id = self.item_id;
+        let (stream, au) = self.predicted.take().expect("checked by execute");
+        let mut seq = SequenceDecoder::new();
+        seq.set_layer_target(LayerTarget::Layer(0));
+        let fail = |e: oxideav_h265::sequence::SequenceError| {
+            HeifError::invalid(format!(
+                "item {id}: predictively coded item decode failed: {e}"
+            ))
+        };
+        seq.push_annexb(&stream).map_err(fail)?;
+        let decoded = seq.finish().map_err(fail)?;
+        let f = decoded
+            .into_iter()
+            .find(|f| f.au_index == au && f.layer_id == 0)
+            .ok_or_else(|| {
+                HeifError::invalid(format!(
+                    "item {id}: the predicted bitstream yields no picture for the item's access unit"
+                ))
+            })?;
+        let pic = if f.crop.is_whole(&f.picture) {
+            f.picture
+        } else {
+            f.output_picture()
+        };
+        Ok(vec![LayerFrame {
+            layer_id: 0,
+            frame: heif_frame_from_picture(&pic, self.layout, self.ispe, id)?,
+        }])
+    }
+
+    /// HEIF B.2.2.1.3 `exbl` / H.265 F.8.1.8: the access unit's
+    /// enhancement layers decoded against the external base picture
+    /// (installed as the layer-0 inter-layer reference of the access
+    /// unit; F.8.1.8 treats it as an IRAP picture). The operating point
+    /// is the item's (`layer` / `ols` option as for the registry path).
+    fn run_external_base(mut self) -> Result<Vec<LayerFrame>> {
+        use oxideav_h265::sequence::{ExternalBasePicture, LayerTarget, SequenceDecoder};
+        let id = self.item_id;
+        let base = self.external_base.take().expect("checked by execute");
+        let picture = h265_picture(&base);
+        let option = |k: &str| -> Option<u32> { self.params.options.get(k)?.parse().ok() };
+        let target = match (option("layer"), option("ols")) {
+            (Some(l), _) if l < 64 => LayerTarget::Layer(l as u8),
+            (_, Some(o)) => LayerTarget::Ols(o as usize),
+            _ => LayerTarget::HighestOls,
+        };
+        let mut seq = SequenceDecoder::new();
+        seq.set_layer_target(target);
+        seq.set_external_base_layer(move |_| Some(ExternalBasePicture::new(picture.clone())));
+        let fail = |e: oxideav_h265::sequence::SequenceError| {
+            HeifError::invalid(format!(
+                "item {id}: decode against the external base layer failed: {e}"
+            ))
+        };
+        seq.push_annexb(&self.data).map_err(fail)?;
+        let mut decoded = seq.finish().map_err(fail)?;
+        decoded.retain(|f| f.output);
+        decoded.sort_by_key(|f| f.layer_id);
+        if decoded.is_empty() {
+            return Err(HeifError::invalid(format!(
+                "item {id}: decoder produced no picture"
+            )));
+        }
+        let want = self.layers.as_ref().map(Vec::len).unwrap_or(1);
+        if decoded.len() < want {
+            return Err(HeifError::invalid(format!(
+                "item {id}: decoder produced {} of the {want} output layers",
+                decoded.len()
+            )));
+        }
+        decoded.truncate(want);
+        if let Some((tols, expected)) = &self.expect_layers {
+            let got: Vec<u8> = decoded.iter().map(|f| f.layer_id).collect();
+            if got != *expected {
+                return Err(HeifError::layered_hevc(id, *tols));
+            }
+        }
+        decoded
+            .into_iter()
+            .map(|f| {
+                let layer_id = f.layer_id;
+                let pic = if f.crop.is_whole(&f.picture) {
+                    f.picture
+                } else {
+                    f.output_picture()
+                };
+                Ok(LayerFrame {
+                    layer_id,
+                    frame: heif_frame_from_picture(&pic, self.layout, self.ispe, id)?,
+                })
+            })
+            .collect()
     }
 
     fn run_all(self, mut dec: Box<dyn Decoder>) -> Result<Vec<LayerFrame>> {
@@ -530,6 +762,24 @@ impl CodedJob {
                 layers.len()
             )));
         }
+        if let Some((tols, expected)) = &self.expect_layers {
+            for ((vf, _), want) in frames.iter().zip(expected) {
+                match vf.layer().map(|l| l.layer_id) {
+                    Some(l) if l == u16::from(*want) => {}
+                    // An untagged picture is a single-layer decode: the
+                    // bitstream (its VPS) does not describe the layers
+                    // the item's oinf / tols name.
+                    None if *want == 0 => {}
+                    None => return Err(HeifError::layered_hevc(id, *tols)),
+                    Some(l) => {
+                        return Err(HeifError::invalid(format!(
+                            "item {id}: decoder output layer {l} where output layer set {tols} \
+                             names layer {want}"
+                        )));
+                    }
+                }
+            }
+        }
         frames
             .into_iter()
             .zip(layers)
@@ -548,6 +798,150 @@ impl CodedJob {
             })
             .collect()
     }
+}
+
+/// A predictively coded item's bitstream (HEIF §6.4.9): `None` for an
+/// item without `pred` references; else the `hvcC` parameter sets, the
+/// item data of every referenced item in reference order ("the list of
+/// referenced items ... shall indicate the decoding order") and the
+/// item's own access unit `own` (its prepared payload), Annex B, with
+/// the decode-order index of that last access unit. HEVC items decode
+/// this way; a predictively coded item of another coding format is a
+/// typed refusal.
+fn predicted_stream<D: AsRef<[u8]>>(
+    file: &HeifFile<D>,
+    node: &ImageNode,
+    own: &[u8],
+) -> Result<Option<(Vec<u8>, u64)>> {
+    let ImageKind::Coded(item_type) = node.kind else {
+        return Ok(None);
+    };
+    let Ok(meta) = file.meta() else {
+        return Ok(None);
+    };
+    let id = node.item.id;
+    let refs = meta.references_from(id, &crate::meta::reference::PRED);
+    if refs.is_empty() {
+        return Ok(None);
+    }
+    let Some(cfg) = node
+        .properties
+        .hvcc()
+        .filter(|_| matches!(item_type, ITEM_TYPE_HVC1 | ITEM_TYPE_HEV1))
+    else {
+        return Err(HeifError::unsupported(format!(
+            "item {id}: predictively coded '{}' items are decoded for HEVC only",
+            crate::boxes::fourcc_str(&item_type)
+        )));
+    };
+    if refs.contains(&id) || refs.len() >= MAX_ITEM_DECODES {
+        return Err(HeifError::invalid(format!(
+            "item {id}: pred references {refs:?} (§6.4.9: other items, in decoding order)"
+        )));
+    }
+    let mut out = Vec::with_capacity(own.len() * (refs.len() + 1));
+    let mut push = |nal: &[u8]| {
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(nal);
+    };
+    for arr in &cfg.arrays {
+        for n in &arr.nal_units {
+            push(n);
+        }
+    }
+    for r in &refs {
+        let data = base_layer_units(file.item_data(*r)?.into_owned(), cfg.length_size);
+        for n in crate::hvcc::split_length_prefixed(&data, cfg.length_size)? {
+            push(n);
+        }
+    }
+    for n in crate::hvcc::split_length_prefixed(own, cfg.length_size)? {
+        push(n);
+    }
+    Ok(Some((out, refs.len() as u64)))
+}
+
+/// An HEVC [`oxideav_h265::picture::Picture`] holding `frame`'s
+/// samples (the F.8.1.8 external base layer picture).
+fn h265_picture(frame: &HeifFrame) -> oxideav_h265::picture::Picture {
+    use crate::image::Chroma;
+    let cat = match frame.format.chroma {
+        Chroma::Mono => 0,
+        Chroma::Yuv420 => 1,
+        Chroma::Yuv422 => 2,
+        Chroma::Yuv444 => 3,
+    };
+    let plane = |i: usize| -> Vec<u16> {
+        if i >= frame.format.plane_count() || (cat == 0 && i > 0) {
+            return Vec::new();
+        }
+        let (w, h) = frame.plane_dims(i);
+        let mut v = Vec::with_capacity(w as usize * h as usize);
+        for y in 0..h {
+            for x in 0..w {
+                v.push(frame.sample(i, x, y));
+            }
+        }
+        v
+    };
+    let depth = frame.format.bit_depth;
+    oxideav_h265::picture::Picture::from_planes(
+        frame.width as usize,
+        frame.height as usize,
+        cat,
+        depth,
+        depth,
+        plane(0),
+        plane(1),
+        plane(2),
+    )
+}
+
+/// A decoded HEVC picture as a [`HeifFrame`] of `layout` (the sample
+/// structure the picture carries; its bit depth when it differs),
+/// cropped to `ispe` when the picture is larger.
+fn heif_frame_from_picture(
+    pic: &oxideav_h265::picture::Picture,
+    layout: HeifPixelFormat,
+    ispe: Option<(u32, u32)>,
+    item_id: u32,
+) -> Result<HeifFrame> {
+    use crate::image::Chroma;
+    use oxideav_h265::picture::Plane as HPlane;
+    let chroma = match pic.chroma_array_type() {
+        0 => Chroma::Mono,
+        1 => Chroma::Yuv420,
+        2 => Chroma::Yuv422,
+        _ => Chroma::Yuv444,
+    };
+    let depth = pic.bit_depth_luma().max(pic.bit_depth_chroma());
+    let format = if layout.chroma == chroma && layout.bit_depth == depth {
+        layout
+    } else {
+        HeifPixelFormat::new(chroma, depth, false)?
+    };
+    let (pw, ph) = (pic.width_luma() as u32, pic.height_luma() as u32);
+    let (w, h) = match ispe {
+        Some((w, h)) if w <= pw && h <= ph => (w, h),
+        Some((w, h)) => {
+            return Err(HeifError::invalid(format!(
+                "item {item_id}: decoded {pw}x{ph} picture is smaller than its ispe {w}x{h}"
+            )));
+        }
+        None => (pw, ph),
+    };
+    let mut frame = HeifFrame::zeroed(w, h, format)?;
+    let planes = [HPlane::Luma, HPlane::Cb, HPlane::Cr];
+    for (i, hp) in planes.iter().enumerate().take(format.plane_count()) {
+        let (fw, fh) = frame.plane_dims(i);
+        for y in 0..fh {
+            for x in 0..fw {
+                let v = pic.sample(*hp, x as usize, y as usize);
+                frame.set_sample(i, x, y, v as u16);
+            }
+        }
+    }
+    Ok(frame)
 }
 
 /// The layout and output size decoded pictures are read at
@@ -583,10 +977,74 @@ pub enum CodedKind<'a> {
     Av1(&'a Av1Config),
     /// `avc1` with its `avcC`.
     Avc(&'a crate::avcc::AvcConfig),
-    /// `lhv1` with its `lhvC` (base layer decoded).
+    /// `lhv1` with its `lhvC` (multi-layer decode).
     LayeredHevc(&'a crate::lhvc::LhevcConfig),
     /// `vvc1` with its `vvcC` (HEIF Annex L).
     Vvc(&'a VvcConfig),
+}
+
+/// An `hvc1` item's payload without the NAL units of layers above the
+/// base (HEIF B.2.2.1.2: readers shall ignore NAL units with
+/// `nuh_layer_id` greater than 0 in an item of type `hvc1`). The
+/// length-prefixed form is kept; a payload with no such unit — or one
+/// whose framing does not parse, which the decoder then reports — is
+/// returned unchanged.
+pub(crate) fn base_layer_units(data: Vec<u8>, length_size: u8) -> Vec<u8> {
+    let Ok(units) = crate::hvcc::split_length_prefixed(&data, length_size) else {
+        return data;
+    };
+    let above = |n: &&[u8]| crate::lhvc::nuh_layer_id(n).is_some_and(|l| l > 0);
+    if !units.iter().any(above) {
+        return data;
+    }
+    let ls = length_size as usize;
+    let mut out = Vec::with_capacity(data.len());
+    for n in units.iter().filter(|n| !above(n)) {
+        out.extend_from_slice(&(n.len() as u32).to_be_bytes()[4 - ls..]);
+        out.extend_from_slice(n);
+    }
+    out
+}
+
+/// The first of `layers` (above the base) whose VCL NAL units in the
+/// length-prefixed access unit `item` are not IRAP NAL unit types
+/// (H.265 Table 7-1: 16..=23), with that type. `None` when every such
+/// picture is IRAP, or the framing does not parse (the decoder reports
+/// that).
+fn first_non_irap_layer(item: &[u8], length_size: u8, layers: &[u8]) -> Option<(u8, u8)> {
+    let units = crate::hvcc::split_length_prefixed(item, length_size).ok()?;
+    units.iter().find_map(|n| {
+        let layer = crate::lhvc::nuh_layer_id(n)?;
+        let nal_type = (n[0] >> 1) & 0x3f;
+        (layer > 0 && nal_type < 32 && !(16..=23).contains(&nal_type) && layers.contains(&layer))
+            .then_some((layer, nal_type))
+    })
+}
+
+/// A whole `lhv1` access unit as an Annex B stream: the `lhvC`
+/// record's parameter sets first (VPS, SPS, PPS, then the remaining
+/// arrays, each group in record order — HEIF B.2.3.2 / ISO/IEC 14496-15
+/// §9.5 do not order the arrays, a decoder activates in arrival order),
+/// then the item's length-prefixed NAL units of every layer.
+pub fn layered_annex_b(cfg: &crate::lhvc::LhevcConfig, item: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(item.len() + cfg.raw.len() + 64);
+    let rank = |nal: &&[u8]| match nal.first().map(|b| (b >> 1) & 0x3f) {
+        Some(32) => 0u8,
+        Some(33) => 1,
+        Some(34) => 2,
+        _ => 3,
+    };
+    let mut sets: Vec<&[u8]> = cfg.nal_units().collect();
+    sets.sort_by_key(rank);
+    let units = crate::hvcc::split_length_prefixed(item, cfg.length_size)?;
+    if units.is_empty() {
+        return Err(HeifError::invalid("lhv1 item carries no NAL units"));
+    }
+    for n in sets.into_iter().chain(units) {
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(n);
+    }
+    Ok(out)
 }
 
 /// The base layer (`nuh_layer_id` 0) of an `lhv1` access unit as an
@@ -1448,8 +1906,7 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         if workers == 1 {
             // One job at a time: the whole budget is the codec's.
             for (i, job) in jobs {
-                let dec = self.decoder.make_budgeted(&job.params)?;
-                let f = job.run(dec)?;
+                let f = job.execute(&self.decoder, true)?.swap_remove(0).frame;
                 canvas.place(i, &f)?;
             }
             return Ok(());
@@ -1471,7 +1928,9 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
                         let Some((i, job)) = next else {
                             break;
                         };
-                        let r = decoder.make(&job.params).and_then(|d| job.run(d));
+                        let r = job
+                            .execute(&decoder, false)
+                            .map(|mut f| f.swap_remove(0).frame);
                         if tx.send((i, r)).is_err() {
                             break;
                         }

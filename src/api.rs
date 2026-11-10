@@ -1174,8 +1174,9 @@ pub struct DecodeOptions {
     /// decoded gain map stays available through
     /// [`decode_primary`](crate::decode_primary).
     pub tone_mapped: bool,
-    /// Decode the base layer of a layered (`lhv1`) item whose `tols`
-    /// asks for enhancement layers, instead of refusing.
+    /// Decode only the base layer of a layered (`lhv1`) item instead of
+    /// its `tols` output layer set (`ItemDecoder::base_layer_fallback`
+    /// with the `registry` feature).
     pub base_layer_fallback: bool,
     /// Thread budget for independent coded items (grid tiles);
     /// `None` / `Some(1)` = serial. Output is identical for every budget.

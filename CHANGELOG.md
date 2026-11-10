@@ -7,6 +7,13 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - `HeifFrame::new`, `BoxHeader::new`, and `with_<field>` setters on `HeifFrame`, `HeifPixelFormat` and `BoxHeader`.
+- **L-HEVC enhancement-layer decode** (round 485; oxideav-h265 0.0.17 multi-layer decoder, floor raised to `>=0.0.17, <0.1`): `lhv1` items without an `hvcC` decode every layer — the `lhvC` parameter sets (VPS / SPS / PPS first) in band ahead of the access unit, the `tols` output layer set or the `lsel` layer as the operating point — instead of the base layer alone; an `lhv1` item with an `exbl` reference (HEIF B.2.2.1.3) decodes the referenced item (an `avc1` base, say) first and hands its picture to the HEVC sequence decoder as the H.265 F.8.1.8 external base layer. A decoded layer the codec does not tag with the expected `nuh_layer_id` (a bitstream whose VPS lacks the layers the `oinf` names) is the typed `HeifError::layered_hevc` refusal; an `lhv1` item whose output-layer picture is not IRAP is a typed refusal (B.2.2.1.3 NOTE 1, H.265 F.8.1.6: no output for an uninitialised layer), `base_layer_fallback` yields its base. The five MPEG multi-layer conformance files decode: base items and both MV-HEVC views byte-exact against the black-box decoder, SHVC SNR / hybrid enhancement layers equal to the producer's streams through the sequence decoder (`tests/multilayer_conformance.rs`).
+- **Predictively coded items** (HEIF §6.4.9): an `hvc1` item with `pred` references decodes the bitstream its references' item data and its own form and yields its own access unit's picture — C043 / C044 byte-exact against the black-box decoder (`tests/predictive_items.rs`); other coding formats refuse typed. `import_item` brings `exbl` / `pred` dependencies along.
+
+### Fixed
+
+- **`hvc1` items carrying enhancement layers** (HEIF B.2.2.1.2: readers ignore NAL units with `nuh_layer_id` > 0 in an `hvc1` item): such items (multilayer001 / 002 / 005) were refused ("pps never activated"); their layer > 0 units are dropped and the decoder is pointed at layer 0.
+- **`lhvC` writer reserved bits**: the `bit(2) reserved = '11'b` ahead of `numTemporalLayers` (ISO/IEC 14496-15 §9.5) was written as `00`; re-muxed `lhv1` items now carry their `lhvC` byte for byte.
 
 ### Changed
 

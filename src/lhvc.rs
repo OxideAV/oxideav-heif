@@ -6,15 +6,19 @@
 //! An `lhv1` item (HEIF B.2.2.1.3) is one access unit that may hold
 //! coded pictures of several layers; its `tols` names the output layer
 //! set to decode. This crate types the layer structure and decodes the
-//! base layer (`nuh_layer_id` 0) through the HEVC decoder; enhancement
-//! layers are a typed refusal ([`crate::HeifError::layered_hevc`]).
+//! item through oxideav-h265's multi-layer decoder (H.265 Annexes F /
+//! G / H): every output layer of the `tols` set, or the `lsel` layer;
+//! an `exbl` external base layer (an `avc1` item, say) is decoded first
+//! and supplied as the layer-0 picture (H.265 F.8.1.8). An item whose
+//! bitstream does not carry the layers its `oinf` names is a typed
+//! refusal ([`crate::HeifError::layered_hevc`]).
 //!
 //! ```text
 //! LHEVCDecoderConfigurationRecord {
 //!   unsigned int(8) configurationVersion = 1;
-//!   bit(4) reserved; unsigned int(12) min_spatial_segmentation_idc;
-//!   bit(6) reserved; unsigned int(2)  parallelismType;
-//!   bit(2) reserved; unsigned int(3)  numTemporalLayers;
+//!   bit(4) reserved = '1111'b; unsigned int(12) min_spatial_segmentation_idc;
+//!   bit(6) reserved = '111111'b; unsigned int(2)  parallelismType;
+//!   bit(2) reserved = '11'b; unsigned int(3)  numTemporalLayers;
 //!   unsigned int(1) temporalIdNested; unsigned int(2) lengthSizeMinusOne;
 //!   unsigned int(8) numOfArrays;
 //!   for (j) { array_completeness(1) reserved(1) NAL_unit_type(6)
@@ -125,8 +129,10 @@ impl LhevcConfig {
         let mut v = vec![1u8];
         v.extend_from_slice(&(0xf000 | (self.min_spatial_segmentation_idc & 0x0fff)).to_be_bytes());
         v.push(0xfc | (self.parallelism_type & 0x03));
+        // ISO/IEC 14496-15 §9.5: `bit(2) reserved = '11'b` ahead of
+        // numTemporalLayers.
         v.push(
-            ((self.num_temporal_layers & 0x07) << 3)
+            0xc0 | ((self.num_temporal_layers & 0x07) << 3)
                 | ((self.temporal_id_nested as u8) << 2)
                 | ((self.length_size.clamp(1, 4) - 1) & 0x03),
         );

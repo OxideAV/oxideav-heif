@@ -202,9 +202,12 @@ typed refusals.
 registry decoders against `decode_all` / `info` over every HEIF-family
 file the checkout sees — 57 vendored fixtures, the 14 staged corpus
 bundles, the 2 device samples, the 66 MPEG / Nokia conformance files
-and the 13 encrypted ones: **152 files, 132 decode on both paths, 20
-refused on both** (r482 count) (the `cenc` items, the predictive `pred` items C043 /
-C044 and the L-HEVC enhancement layers this crate does not decode),
+and the 13 encrypted ones: **152 files, 136 decode on both paths, 16
+refused on both** (r485 count) (the 13 `cenc` items; `iff_hevc_tile_multiple_items_tbas`,
+whose `ipma` rows are out of order; C046, whose sequence track starts at
+a non-IRAP sample the black-box decoder refuses too; multilayer002,
+whose three `TRAIL_R` `lhv1` items have no output picture — see
+**L-HEVC conformance** below),
 0 disagreements — every contract image item is a packet of a still
 stream with byte-identical pixels, label, colour signal and metadata
 (r476: the frame's ICC / Exif / XMP blobs refined over the stream's
@@ -559,7 +562,7 @@ and real-world producers, and the production defaults.
 | Low-overhead files | Amd 2:2026 Annex O `mini` box (O.3.2 in full: bit-packed header, chunk sizes, HDR block with gain map) expanded to the normative O.4 equivalent `meta` + `mdat` on parse (`HeifFile::minimized`; a `vvi3` file's `CompactVvcDecoderConfigurationRecord` becomes the equivalent `vvcC` and its header-less `IDR_N_LP` payload the `VVCItemData`, L.4.3.3.4); `encode_still_minimized` writes `mif3` files (HEVC / AV1 / VVC, alpha, ICC, Exif, XMP, gain map, Exif orientation) that libheif renders identically to the regular file; `image/hif2`, `.hmg`; `dExf` / deflated XMP inflate (`deflate` feature) |
 | `meta` tree | `hdlr`, `pitm` v0/v1, `iinf` v0/v1 + `infe` v2/v3 (`mime` / `uri ` tails, hidden flag), `iloc` v0–v2 (all widths, construction methods 0 / 1 / 2, multi-extent, zero-length "to end"), `iref` v0/v1, `iprp` / `ipco` / `ipma` v0/v1 (7 / 15-bit indices, essential flag, index-0 placeholders), `idat`, `grpl`, `dinf` / `dref`, `ipro` |
 | Properties | `ispe` `pixi` `colr` (nclx + `rICC` / `prof`) `pasp` `clap` `irot` `imir` `iscl` `auxC` `hvcC` `av1C` `lhvC` `oinf` `tols` `avcC` `vvcC` (14496-15 §11.2.4 FullBox, `VvcPtlRecord`, `ptl_present_flag = 0` records read the SPS head in their arrays) `clli` `mdcv` `cclv` `amve` (14496-12 8th ed. §12.1.6–9 plain-Box syntax, FullBox-prefixed writers tolerated) `rloc` `lsel` `a1op` `a1lx` `rref` `crtt` `mdft` `udes` `altt` `reve` `ndwt` `cexg` `dadj` `stag` (Amd 1:2025 §6.5.41–45) `tilC` + `tipa` and the per-channel `pixi` (`px_flags & 1`, Amd 2:2026); §6.5.1 descriptive-before-transformative order, unrecognised-essential refusal, exact rational `clap` |
-| Coded items | `hvc1` / `hev1` → oxideav-h265 (`hvcC` extradata, length-prefixed AU); `av01` → oxideav-av1 (`av1C` extradata, temporal unit); `avc1` → oxideav-h264 (`avcC` extradata, length-prefixed AU; byte-exact against a black-box AVC decoder on Baseline / Main / High / 4:2:2 / 4:4:4 / 10-bit); `lhv1` → oxideav-h265's multi-layer decoder (`hvcC` ++ `lhvC` extradata, `layer=<lsel>` / `ols=<tols>`): the stereo shape (two `lhv1` items with `lsel` 0 / 1 in a `ster` group) yields each view, an item without `lsel` every output layer (`DecodedImage::layers`), both views byte-exact against a black-box decoder's per-view output; `vvc1` → oxideav-h266's Annex B stream decoder through this crate's `vvcdec` wrapper (the h266 registry factory is a parser-only placeholder on 0.0.9): `vvcC` arrays + `VVCItemData` re-assembled per L.2.2.2 (AUD / OPI first, the L.2.2.1.2 `tols` OPI rule), conformance window applied, byte-exact against ffmpeg's VVC decoder on every item; `cexg` items decode extent by extent; 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8–16 bit; via direct factories or a caller `CodecRegistry`; grid / `tili` / `cexg` tiles decode in parallel under `ItemDecoder::with_execution_context` (byte-identical for every budget) |
+| Coded items | `hvc1` / `hev1` → oxideav-h265 (`hvcC` extradata, length-prefixed AU, layer 0 only — B.2.2.1.2; `pred` items through the bitstream their references form, §6.4.9); `av01` → oxideav-av1 (`av1C` extradata, temporal unit); `avc1` → oxideav-h264 (`avcC` extradata, length-prefixed AU; byte-exact against a black-box AVC decoder on Baseline / Main / High / 4:2:2 / 4:4:4 / 10-bit); `lhv1` → oxideav-h265's multi-layer decoder (`hvcC` ++ `lhvC` extradata, or the `lhvC` parameter sets in band without an `hvcC`; `layer=<lsel>` / `ols=<tols>`; an `exbl` item's picture as the external base layer — SHVC SNR / hybrid AVC base / MV-HEVC conformance files exact, below): the stereo shape (two `lhv1` items with `lsel` 0 / 1 in a `ster` group) yields each view, an item without `lsel` every output layer (`DecodedImage::layers`), both views byte-exact against a black-box decoder's per-view output; `vvc1` → oxideav-h266's Annex B stream decoder through this crate's `vvcdec` wrapper (the h266 registry factory is a parser-only placeholder on 0.0.9): `vvcC` arrays + `VVCItemData` re-assembled per L.2.2.2 (AUD / OPI first, the L.2.2.1.2 `tols` OPI rule), conformance window applied, byte-exact against ffmpeg's VVC decoder on every item; `cexg` items decode extent by extent; 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8–16 bit; via direct factories or a caller `CodecRegistry`; grid / `tili` / `cexg` tiles decode in parallel under `ItemDecoder::with_execution_context` (byte-identical for every budget) |
 | Derived images | `grid` (row-major, trim, tile alpha), `iovl` (sRGB fill via the H.273 matrix of the output `colr`, offsets, clipping, §6.9.1 straight / pre-multiplied alpha, translucent canvas → output alpha), `iden`, `tmap` (23008-12:2025/Amd 1:2025 §6.6.2.4: base by default, normative tone-mapped reconstruction on request or as an input of another derived item; see Gain maps), `cfen` (Amd 1 §6.6.2.5: the inputs' luma planes become Y / Cb / Cr or R / G / B and alpha; packed inputs (`is_packed_flag`) cut into `rows × cols` regions with guard bands per the Amd 2 §6.6.2.5.3 derivation — see Packed `cfen` below; depth (6) and K (7, the Amd 2 CMYK column) refused typed), `tili` tiled items (Amd 2 §6.11: `deti` offset tables, empty tiles, `ispe` crop; external tiles — one HEIF file per tile, addressed by the `deti` URL template — through a caller-supplied `ExternalTileResolver`, a typed refusal naming the first URL without one), `sato` pixel transforms (4th edition WD §6.6.2.6: postfix integer expressions over the inputs' co-located samples at 8 / 16 / 32 / 64-bit saturating precision, clamped to the item's `pixi` depth and the `nclx` range — the Annex J.9 bit-depth extensions decode sample-exact) |
 | Transforms | `clap` → `irot` → `imir` → `iscl` in `ipma` order; `iscl` (§6.5.13) resizes by the exact ceil-ratio with an area/bilinear resampler; sub-sample chroma positions promote to 4:4:4 (MIAF §7.3.6.7) |
 | Auxiliaries | alpha (`urn:mpeg:mpegB:cicp:systems:auxiliary:alpha` and `urn:mpeg:hevc:2015:auxid:1`, resized / depth-matched, `prem`), depth (both URN families, surfaced as a frame); alpha *tracks* (§7.5.3 `auxv` + `auxl` + `auxi`, plain-Box `auxi` tolerated) composed into a `"heif"` stream of frames with alpha by the demuxer, written by `SequenceWriter::alpha` |
@@ -734,6 +737,38 @@ decodes **byte-exact** against the black-box decoder's per-view output
 two views (`CodecParameters::layers`) and the `"heif"` decoder emits
 both frames tagged with the core `LayerIdentity`. No third-party reader
 on the machine opens `lhv1` items (reported, not asserted).
+
+**L-HEVC conformance** (`tests/multilayer_conformance.rs`, r485): the
+five MPEG multi-layer files (`docs/image/heif/conformance/heic/multilayer00*`)
+against their producer's elementary streams (`nokia/bitstreams/`):
+
+| File | Shape | Result |
+|---|---|---|
+| multilayer001 | `hvc1` base + SHVC SNR `lhv1` (`tols` 1) over one access unit, `altr` | base **byte-exact** vs the black-box decoder (B020 base layer); enhancement layer = B020 layer 1 through the HEVC sequence decoder, 43.7 dB over the base |
+| multilayer002 | two 2x2 grids: 4 `hvc1` items (1 IDR + 3 `TRAIL_R`) and 4 `lhv1` items over the same data | 4 base items **byte-exact** (B021 pictures 0–3), base grid exact; IDR `lhv1` item = B021 layer 1 (44.7 dB); the 3 `TRAIL_R` `lhv1` items refuse typed (HEIF B.2.2.1.3 NOTE 1: an `lhv1` item is an initial IRAP access unit; H.265 F.8.1.6 outputs no picture of an uninitialised layer), base layer under `base_layer_fallback` |
+| multilayer003 | `ster` pair of single-layer `hvc1` items | both **byte-exact** (B022) |
+| multilayer004 | `avc1` base + SHVC `lhv1` with `exbl` (VPS without an internal base layer) | AVC base **byte-exact** (B024); enhancement decoded against the AVC item's picture (H.265 F.8.1.8) = B023 layer 1 over the black-box B024 picture, 40.5 dB over the base |
+| multilayer005 | MV-HEVC: `hvc1` view + `lhv1` `lsel` 1, `ster` | both views **byte-exact** vs `ffmpeg -view_ids` (layer 0 carries ViewId 1) |
+
+`hvc1` items drop the `nuh_layer_id` > 0 NAL units they share with the
+`lhv1` item (B.2.2.1.2) and decode layer 0; `lhv1` items without an
+`hvcC` take every layer's parameter sets from the `lhvC` (VPS / SPS /
+PPS order, Annex B); an `exbl` base is decoded first and handed to the
+HEVC sequence decoder as the external base layer. No black-box decoder
+here decodes SHVC, so the enhancement-layer oracle is the HEVC crate's
+sequence decoder over the producer's stream (its SHVC decode is pinned
+to the official SHVC conformance MD5s). `import_item` carries every
+item of the five files with its `lhvC` / `oinf` / `tols` / `lsel` byte
+for byte and its `exbl` base along (the `lhvC` writer now sets the
+`'11'b` reserved bits of 14496-15 §9.5 it dropped).
+
+**Predictively coded items** (`tests/predictive_items.rs`, HEIF §6.4.9,
+r485): an `hvc1` item with `pred` references decodes the bitstream its
+references' item data (in reference order) and its own form, and is the
+picture of its own access unit — C043's two `TRAIL_N` items and C044's
+predicted primary are **byte-exact** against the black-box decoder's
+pictures 1 / 2 of B010. A predictively coded item of another coding
+format is a typed refusal.
 
 **AVC items written by this crate** (`tests/avc_lhevc.rs`
 `avc1_items_written_by_this_crate_decode_in_both_decoders`):
@@ -1107,7 +1142,9 @@ whose base is inter-coded), `iff_hevc_single_item` /
 `_main10` (the h265 crate's SPS parser refuses their VUI
 `max_bytes_per_pic_denom` — a sibling ask), `iff_hevc_tile_multiple_items_tbas`
 (`hvt1` tile items), `multilayer001` / `002` / `005` (L-HEVC
-enhancement layers and a PPS the base decoder never activates). C034
+enhancement layers and a PPS the base decoder never activates; all
+three decode since r485 — multilayer002 refuses only its non-IRAP
+`lhv1` items). C034
 was the 21st before this round: its `Exif` item has no `exif_tiff_header_offset`
 word (the item is exactly the staged Exif blob, TIFF header first), and
 the magic read as an offset refused the whole decode; `exif_payload`

@@ -941,6 +941,8 @@ impl HeifWriter {
     /// needs to display as it did there: its derivation inputs (`dimg`,
     /// recursively), its auxiliaries (`auxl`), thumbnails (`thmb`) and
     /// metadata items (`cdsc`: Exif / XMP / any `mime` or `uri `
+    /// item), its decoding dependencies (the `exbl` external base layer
+    /// of an `lhv1` item, the `pred` references of a predictively coded
     /// item), the members of every `altr` group it is in (a `tmap`
     /// alternate and its gain map come along with their base), every
     /// reference among the imported items (`prem`, `base`, … included)
@@ -1085,6 +1087,11 @@ impl HeifWriter {
             // What this item needs: its inputs, and the items that
             // describe or accompany it.
             work.extend(dimg);
+            // Decoding dependencies: the external base layer of an
+            // `lhv1` item (HEIF B.2.2.1.3 `exbl`) and the items a
+            // predictively coded item is predicted from (§6.4.9 `pred`).
+            work.extend(meta.references_from(src, &reference::EXBL));
+            work.extend(meta.references_from(src, &reference::PRED));
             for t in [reference::AUXL, reference::THMB, reference::CDSC] {
                 work.extend(meta.references_to(src, &t));
             }
