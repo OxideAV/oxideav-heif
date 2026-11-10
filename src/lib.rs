@@ -157,7 +157,9 @@ pub use registry::{register, register_codecs, register_containers};
 pub use rgb::{RgbImage16, to_rgb};
 pub use sequence::{Movie, Sample, SampleEntry, Track};
 pub use vvcc::{CompactVvcConfig, VvcConfig, VvcPtlRecord};
-pub use writer::{HeifWriter, SequenceAlphaTrack, SequenceWriter};
+pub use writer::{
+    HeifWriter, SequenceAlphaTrack, SequenceMetadataTrack, SequenceSample, SequenceWriter,
+};
 
 /// Parse a HEIF file held in memory. Direct entry point of the
 /// standalone container surface; see [`HeifFile`] for what it exposes.

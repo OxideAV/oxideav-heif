@@ -466,11 +466,17 @@ fn sequence_writer_alpha_track_round_trips_and_opens_in_readers() {
                 Vec::new(),
             )
         });
-        at.samples.push(oxideav_heif::writer::SequenceSample::new(
-            apic.data.clone(),
-            1,
-            true,
-        ));
+        // The sample record is part of the public surface (crate
+        // root): both ways of queueing agree.
+        at.push_sample(apic.data.clone(), 1, true);
+        assert_eq!(
+            at.samples.last(),
+            Some(&oxideav_heif::SequenceSample::new(
+                apic.data.clone(),
+                1,
+                true
+            ))
+        );
     }
     let mut sw = sw.unwrap();
     sw.alpha = alpha_track;

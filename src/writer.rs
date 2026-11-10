@@ -2034,9 +2034,11 @@ fn ensure_ispe(props: &mut Vec<(Property, bool)>, w: u32, h: u32) {
     }
 }
 
-#[doc(hidden)]
-/// One sample queued for an image-sequence track.
-#[derive(Clone, Debug)]
+/// One sample queued for a track of a [`SequenceWriter`] — the master
+/// track ([`SequenceWriter::push_sample`]), an alpha auxiliary track
+/// ([`SequenceAlphaTrack`]) or a timed metadata track
+/// ([`SequenceMetadataTrack`]). Build it with [`SequenceSample::new`].
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SequenceSample {
     /// Coded sample bytes (length-prefixed NAL units / an AV1 TU).
     pub data: Vec<u8>,
@@ -2079,6 +2081,18 @@ pub struct SequenceAlphaTrack {
     pub entry_properties: Vec<Property>,
 }
 impl SequenceAlphaTrack {
+    /// Queue one alpha sample (time-parallel to the master sample of
+    /// the same index; `duration` in the master's timescale).
+    pub fn push_sample(&mut self, data: Vec<u8>, duration: u32, sync: bool) {
+        self.samples.push(SequenceSample::new(data, duration, sync));
+    }
+
+    /// Replace the queued samples.
+    pub fn with_samples(mut self, samples: Vec<SequenceSample>) -> Self {
+        self.samples = samples;
+        self
+    }
+
     /// Every field as a positional argument, in declaration order
     /// (the struct is `#[non_exhaustive]`: build it here or from
     /// `Default` where one exists, then read / assign its public fields).
