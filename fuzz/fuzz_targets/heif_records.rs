@@ -22,7 +22,7 @@ const TYPES: &[&[u8; 4]] = &[
     b"clli", b"mdcv", b"cclv", b"amve", b"avcC", b"lhvC", b"oinf", b"tols", b"ispe", b"pixi",
     b"colr", b"pasp", b"clap", b"irot", b"imir", b"iscl", b"auxC", b"hvcC", b"av1C", b"rloc",
     b"lsel", b"a1op", b"a1lx", b"rref", b"crtt", b"mdft", b"udes", b"altt", b"reve", b"ndwt",
-    b"cexg", b"dadj", b"stag", b"tilC", b"ienc", b"iaux",
+    b"cexg", b"dadj", b"stag", b"tilC", b"ienc", b"iaux", b"alpx",
 ];
 
 /// A toy block "cipher" (a keyed byte substitution whose directions
