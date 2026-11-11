@@ -1642,3 +1642,79 @@ fn degenerate_derived_items_are_refused() {
     w.set_primary(g);
     assert!(w.write_to_vec().is_ok());
 }
+
+/// A tiled picture's alpha plane and depth map are tiled too (r487):
+/// the auxiliary image item is a hidden `grid` (`auxC` + `auxl`) over
+/// hidden coded tiles, coded under the same thread budget as the
+/// master's tiles — byte-identical for every budget — and decodes to
+/// the source plane exactly under the lossless mode.
+#[test]
+fn auxiliary_planes_of_a_tiled_picture_are_grids() {
+    use oxideav_heif::decode::{ItemDecoder, decode_primary};
+    use oxideav_heif::derived::build_primary_graph;
+    let (w, h) = (200u32, 150u32);
+    let mono = |seed: u32| {
+        let mut f =
+            HeifFrame::zeroed(w, h, HeifPixelFormat::new(Chroma::Mono, 8, false).unwrap()).unwrap();
+        for y in 0..h {
+            for x in 0..w {
+                f.set_sample(0, x, y, ((x * seed + y * 5 + seed) % 256) as u16);
+            }
+        }
+        f
+    };
+    let (alpha, depth) = (mono(3), mono(11));
+    let src = picture(w, h).with_alpha_plane(&alpha).unwrap();
+    for codec in [StillCodec::Hevc, StillCodec::Av1] {
+        let opts = |threads: usize| {
+            let mut o = lossless()
+                .with_codec(codec)
+                .with_grid_tile(Some(64))
+                .with_depth_map(Some(depth.clone()))
+                .with_threads(Some(threads));
+            o.transforms = vec![Property::Irot(Irot::new(1))];
+            o
+        };
+        let bytes = encode_still(&src, &opts(1)).unwrap();
+        for threads in [2, 5] {
+            assert_eq!(
+                encode_still(&src, &opts(threads)).unwrap(),
+                bytes,
+                "{codec:?}: {threads} threads"
+            );
+        }
+        let f = HeifFile::parse(&bytes).unwrap();
+        let rep = check(&f, MiafProfile::Miaf).unwrap();
+        assert!(rep.is_conformant(), "{codec:?}: {:#?}", rep.violations);
+        let node = build_primary_graph(&f).unwrap();
+        assert_eq!(&node.item.item_type, b"grid");
+        for (what, aux) in [("alpha", &node.alpha), ("depth", &node.depth)] {
+            let aux = aux.as_ref().unwrap_or_else(|| panic!("{codec:?}: {what}"));
+            assert_eq!(&aux.item.item_type, b"grid", "{codec:?}: {what} is a grid");
+            assert!(aux.item.is_hidden(), "{codec:?}: {what} hidden");
+            assert!(aux.properties.auxc().is_some(), "{codec:?}: {what} auxC");
+            assert_eq!(aux.inputs.len(), 4 * 3, "{codec:?}: {what} tiles");
+            assert!(aux.inputs.iter().all(|t| t.item.is_hidden()));
+            // One channel, no colour information on the plane.
+            assert_eq!(
+                aux.properties.pixi().map(|p| p.bits_per_channel.clone()),
+                Some(vec![8]),
+                "{codec:?}: {what} pixi"
+            );
+            assert!(aux.properties.nclx().is_none(), "{codec:?}: {what} colr");
+        }
+        // 90° rotation on every item: the output is h × w and the
+        // planes are the rotated source planes.
+        let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+        assert_eq!((img.width(), img.height()), (h, w), "{codec:?}");
+        let turn = Irot::new(1);
+        let want = oxideav_heif::compose::apply_irot(&src, &turn).unwrap();
+        assert_eq!(img.frame, want, "{codec:?}: colour + alpha");
+        let want_depth = oxideav_heif::compose::apply_irot(&depth, &turn).unwrap();
+        assert_eq!(
+            img.depth.as_ref().map(|d| d.planes[0].clone()),
+            Some(want_depth.planes[0].clone()),
+            "{codec:?}: depth"
+        );
+    }
+}

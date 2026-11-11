@@ -125,7 +125,9 @@ fn grid_tiles_in_parallel_are_byte_identical_to_serial() {
                 .iter()
                 .filter(|i| i.is_hidden())
                 .count(),
-            tiles + 1,
+            // The colour tiles, the alpha plane's tiles and its grid
+            // (r487: the alpha auxiliary of a tiled picture is tiled).
+            2 * tiles + 1,
             "{codec:?}: tile count"
         );
     }
@@ -635,4 +637,175 @@ fn framework_encoder_honours_the_colour_signal() {
             full_range: true
         }
     );
+}
+
+/// The packed → planar conversion on a thread budget (round 487): the
+/// bands of rows give the planes of the serial conversion for every
+/// worker count, layout and size (odd sizes, a last band shorter than
+/// the others, a chroma row shared by no two bands).
+#[test]
+fn packed_conversion_on_a_thread_budget_keeps_the_planes() {
+    use oxideav_heif::encode::packed_to_planar_threads;
+    let colr = Colr::MIAF_DEFAULT;
+    let limited = Colr::Nclx {
+        primaries: 1,
+        transfer: 1,
+        matrix: 1,
+        full_range: false,
+    };
+    // Above the 2^18-pixel floor under which the conversion stays serial.
+    for (w, h) in [(517u32, 523u32), (640, 480), (1031, 257)] {
+        for (alpha, wide) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (vf, pf) = packed_rgb(w, h, alpha, wide);
+            for (chroma, depth) in [
+                (Chroma::Yuv420, 8u8),
+                (Chroma::Yuv422, 8),
+                (Chroma::Yuv444, 8),
+                (Chroma::Mono, 8),
+                (Chroma::Yuv420, 10),
+                (Chroma::Yuv444, 12),
+            ] {
+                let target = HeifPixelFormat::new(chroma, depth, alpha).unwrap();
+                for colr in [&colr, &limited] {
+                    let serial = packed_to_planar_for(&vf, w, h, pf, colr, target).unwrap();
+                    for threads in [2usize, 3, 7, 16, 1000] {
+                        let banded =
+                            packed_to_planar_threads(&vf, w, h, pf, colr, target, threads).unwrap();
+                        assert_eq!(
+                            banded, serial,
+                            "{w}x{h} {pf:?} → {chroma:?} {depth}-bit, {threads} threads"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A tiled picture already in its coding layout is cut from the
+/// caller's planes (round 487): the borrowing entry points give the
+/// file of the owning one, with or without alpha, for planes with
+/// padded strides, on the grid and the tiled-item carriers.
+#[test]
+fn tiles_cut_from_borrowed_planes_give_the_same_file() {
+    use oxideav_heif::encode::TileCarrier;
+    for (chroma, depth, alpha) in [
+        (Chroma::Yuv420, 8u8, false),
+        (Chroma::Yuv420, 8, true),
+        (Chroma::Yuv444, 10, false),
+        (Chroma::Mono, 8, true),
+    ] {
+        let src = picture(200, 150, depth, chroma, alpha);
+        // The same picture with 5 bytes of padding behind every row.
+        let mut padded = src.clone();
+        for (i, p) in padded.planes.iter_mut().enumerate() {
+            let rows = src.plane_dims(i).1 as usize;
+            let stride = p.stride + 5;
+            let mut data = vec![0xa5u8; stride * rows];
+            for r in 0..rows {
+                data[r * stride..r * stride + p.stride]
+                    .copy_from_slice(&p.data[r * p.stride..(r + 1) * p.stride]);
+            }
+            *p = oxideav_heif::Plane { stride, data };
+        }
+        for carrier in [TileCarrier::Grid, TileCarrier::Tiled] {
+            for threads in [1usize, 4] {
+                let opts = EncodeOptions::default()
+                    .with_hevc_mode("pcm".into())
+                    .with_grid_tile(Some(64))
+                    .with_tile_carrier(carrier)
+                    .with_threads(Some(threads));
+                let owned = encode_still_owned(src.clone(), &opts).unwrap();
+                let what = format!("{chroma:?} {depth}-bit alpha {alpha} {carrier:?} t{threads}");
+                assert_eq!(encode_still(&src, &opts).unwrap(), owned, "{what}");
+                assert_eq!(
+                    encode_still(&padded, &opts).unwrap(),
+                    owned,
+                    "{what}: padded strides"
+                );
+                // The contract entry point takes the same route.
+                let image = oxideav_heif::HeifImage::from(src.clone());
+                assert_eq!(
+                    oxideav_heif::encode(&image, &opts).unwrap(),
+                    oxideav_heif::encode_owned(image, &opts).unwrap(),
+                    "{what}: contract"
+                );
+                assert_eq!(decode(&owned).frame, src, "{what}: lossless");
+                // With a thumbnail the picture is scaled first: the
+                // owning route, the same pixels.
+                let thumb = opts.clone().with_thumbnail_max_dim(Some(48));
+                assert_eq!(
+                    encode_still(&src, &thumb).unwrap(),
+                    encode_still_owned(src.clone(), &thumb).unwrap(),
+                    "{what}: thumbnail"
+                );
+            }
+        }
+    }
+}
+
+/// An image sequence is coded picture by picture on the thread budget
+/// (round 487): the file is the serial one for every budget — HEVC and
+/// AV1, with an alpha track, packed and planar sources — and frames of
+/// another geometry are still refused.
+#[test]
+fn sequence_frames_in_parallel_are_byte_identical_to_serial() {
+    use std::time::Duration;
+    let frames = |n: u32, alpha: bool, w: u32| -> Vec<oxideav_heif::Frame> {
+        (0..n)
+            .map(|i| {
+                let mut f = picture(w, 72, 8, Chroma::Yuv420, alpha);
+                // Every frame differs.
+                for x in 0..w {
+                    f.set_sample(0, x, i % 72, (i * 9 % 256) as u16);
+                }
+                oxideav_heif::Frame::new(
+                    oxideav_heif::HeifImage::from(f),
+                    Some(Duration::from_millis(40 + i as u64)),
+                    None,
+                    None,
+                )
+            })
+            .collect()
+    };
+    for (codec, mode, alpha) in [
+        (StillCodec::Hevc, "pcm", false),
+        (StillCodec::Hevc, "intra", true),
+        (StillCodec::Av1, "pcm", false),
+        (StillCodec::Av1, "pcm", true),
+        (StillCodec::Avc, "intra", false),
+    ] {
+        let opts = |threads: usize| {
+            EncodeOptions::default()
+                .with_codec(codec)
+                .with_hevc_mode(mode.into())
+                .with_threads(Some(threads))
+        };
+        let seq = frames(7, alpha, 100);
+        let serial = oxideav_heif::encode_all(&seq, &opts(1)).unwrap();
+        for threads in [2usize, 3, 8, 32] {
+            assert_eq!(
+                oxideav_heif::encode_all(&seq, &opts(threads)).unwrap(),
+                serial,
+                "{codec:?} {mode} alpha {alpha}: {threads} threads"
+            );
+        }
+        // The samples come back in order with their own durations.
+        let back = oxideav_heif::decode_all(&serial).unwrap();
+        let timed: Vec<_> = back.iter().filter(|f| f.delay.is_some()).collect();
+        assert_eq!(timed.len(), 7, "{codec:?}");
+        for (i, f) in timed.iter().enumerate() {
+            assert_eq!(f.delay, Some(Duration::from_millis(40 + i as u64)));
+            if mode == "pcm" && codec != StillCodec::Avc {
+                assert_eq!(f.image.planes, seq[i].image.planes, "{codec:?} frame {i}");
+            }
+        }
+        // A frame of another size is refused whatever the budget.
+        let mut bad = frames(4, alpha, 100);
+        bad[2] = frames(1, alpha, 120).remove(0);
+        for threads in [1usize, 4] {
+            let e = oxideav_heif::encode_all(&bad, &opts(threads)).unwrap_err();
+            assert!(e.to_string().contains("frame 2"), "{codec:?}: {e}");
+        }
+    }
 }

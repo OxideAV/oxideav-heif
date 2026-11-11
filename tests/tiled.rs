@@ -903,16 +903,28 @@ fn encoder_writes_a_tiled_item_equal_to_its_grid() {
     assert_eq!(meta.thumbnails_of(primary.id).len(), 1);
     assert_eq!(meta.auxiliaries_of(primary.id).len(), 1, "alpha");
     assert_eq!(meta.metadata_of(primary.id).len(), 2, "Exif + XMP");
-    // One deti, one tili: the tiles are not items.
-    assert_eq!(meta.data_references.len(), 1);
+    // The tiles are not items: one tiled item (and its deti) for the
+    // picture, one for its alpha plane (r487: an auxiliary plane is
+    // tiled like its master), and the thumbnail as the one coded item.
+    assert_eq!(meta.data_references.len(), 2);
     assert_eq!(
         meta.items
             .iter()
             .filter(|i| i.item_type == *b"hvc1")
             .count(),
-        2,
-        "alpha + thumbnail"
+        1,
+        "thumbnail"
     );
+    let alpha_id = meta.auxiliaries_of(primary.id)[0];
+    let alpha_item = meta.item(alpha_id).unwrap();
+    assert!(alpha_item.is_tiled_image() && alpha_item.is_hidden());
+    let alpha_props = oxideav_heif::props::ItemProperties::resolve(meta, alpha_id).unwrap();
+    assert_eq!(
+        alpha_props.pixi().map(|p| p.bits_per_channel.clone()),
+        Some(vec![8]),
+        "one channel"
+    );
+    assert!(alpha_props.auxc().is_some() && alpha_props.nclx().is_none());
     let rep = check(&f, MiafProfile::Miaf).unwrap();
     assert!(rep.is_conformant(), "{:#?}", rep.violations);
     // Exact under every budget; identical to the grid carrier.

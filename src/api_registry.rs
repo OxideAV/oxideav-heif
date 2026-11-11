@@ -561,6 +561,19 @@ pub fn encode(image: &HeifImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
             opts,
         );
     }
+    // A planar YCbCr / grey picture already in its coding layout that
+    // is coded as tiles: the tiles are cut from the caller's planes,
+    // no copy of the picture is made.
+    if !image.format.is_planar_rgb()
+        && let Ok(format) = crate::image::HeifPixelFormat::try_from(image.format)
+    {
+        let colr = effective_colr(&image.color, image.format, opts);
+        let opts = effective_options(&image.metadata, colr, opts);
+        let view = crate::encode::PlanesRef::new(image.width, image.height, format, &image.planes);
+        if let Some(bytes) = crate::encode::encode_still_in_place(view, &opts)? {
+            return Ok(bytes);
+        }
+    }
     encode_owned(image.clone(), opts)
 }
 
@@ -599,22 +612,29 @@ pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
             w.set_primary(id);
         }
     }
-    let timed: Vec<SequenceInput> = frames
+    // The timed pictures are prepared (converted to their coding
+    // layout) by the sequence encoder's workers, one in flight each.
+    let timed: Vec<(&Frame, Duration)> = frames
         .iter()
         .filter_map(|f| f.delay.map(|d| (f, d)))
-        .map(|(f, d)| {
-            let (frame, o) = prepare_item(&f.image, opts)?;
-            Ok(SequenceInput {
-                frame,
-                opts: o,
-                duration_ms: u32::try_from(d.as_millis()).unwrap_or(u32::MAX),
-            })
-        })
-        .collect::<Result<_>>()?;
+        .collect();
     match (timed.is_empty(), still) {
         (true, Some(w)) => w.write_to_vec(),
         (true, None) => unreachable!("frames are non-empty"),
-        (false, still) => encode_sequence(timed, still),
+        (false, still) => encode_sequence(
+            timed.len(),
+            opts.workers(),
+            |i| {
+                let (f, d) = timed[i];
+                let (frame, o) = prepare_item(&f.image, opts)?;
+                Ok(SequenceInput {
+                    frame,
+                    opts: o,
+                    duration_ms: u32::try_from(d.as_millis()).unwrap_or(u32::MAX),
+                })
+            },
+            still,
+        ),
     }
 }
 

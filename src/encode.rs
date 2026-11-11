@@ -2112,7 +2112,6 @@ fn add_auxiliary_plane(
     } else {
         &[]
     };
-    let padded = pad_owned(a_src, alignment(opts))?;
     // No colour description: full range, every code point unspecified.
     let aux_colr = Colr::Nclx {
         primaries: 2,
@@ -2120,30 +2119,106 @@ fn add_auxiliary_plane(
         matrix: 2,
         full_range: true,
     };
-    let pic = encode_picture_for(padded, opts, &aux_colr, extra)?;
-    let mut props: Vec<(Property, bool)> = coded_props(&pic, &opts.colr, None)
-        .into_iter()
-        .filter(|(p, _)| !matches!(p, Property::Colr(_)))
-        .map(|(p, e)| match p {
-            // One channel: the plane (the neutral chroma of a 4:2:0
-            // coding carries nothing).
-            Property::Pixi(_) => (
-                Property::Pixi(Pixi {
-                    bits_per_channel: vec![pic.layout.bit_depth],
-                }),
-                e,
-            ),
-            other => (other, e),
-        })
-        .collect();
-    props.push((
+    // The descriptive set of a coded picture of the plane: no colour
+    // information, one channel (the neutral chroma of a 4:2:0 coding
+    // carries nothing).
+    let plane_props = |pic: &CodedPicture| -> Vec<(Property, bool)> {
+        coded_props(pic, &opts.colr, None)
+            .into_iter()
+            .filter(|(p, _)| !matches!(p, Property::Colr(_)))
+            .map(|(p, e)| match p {
+                Property::Pixi(_) => (
+                    Property::Pixi(Pixi {
+                        bits_per_channel: vec![pic.layout.bit_depth],
+                    }),
+                    e,
+                ),
+                other => (other, e),
+            })
+            .collect()
+    };
+    let aux_c = (
         Property::AuxC(crate::props::AuxC {
             aux_type: urn.into(),
             aux_subtype: Vec::new(),
         }),
         true,
-    ));
+    );
     let is_depth = urn == crate::props::AUX_URN_DEPTH || urn == crate::props::AUX_URN_DEPTH_HEVC;
+    // A plane that tiles like a master picture is coded the same way:
+    // a `grid` of hidden tiles (coded in parallel under the thread
+    // budget, one tile of codec state per worker) whose derived item
+    // is the auxiliary image — an auxiliary image item is any image
+    // item with an `auxC` and an `auxl` reference (HEIF §6.4.5), coded
+    // or derived. A single 12 MP plane item costs the codec's whole-
+    // picture state and none of the budget.
+    if let Some((tile, cols, rows)) = grid_layout(vis.0, vis.1, opts)? {
+        // The canvas is the visible plane (no padding crop): the alpha
+        // plane carries the master's chain, the depth map its
+        // orientation.
+        let mut chain = vec![aux_c];
+        if !is_depth {
+            chain.extend(item_transform_props(opts));
+        } else if opts.transform_carrier != TransformCarrier::Identity {
+            chain.extend(orientation_props(opts));
+        }
+        let layout = (tile, cols, rows);
+        let id = if opts.tile_carrier == TileCarrier::Tiled {
+            // One tiled item, like the master.
+            encode_tiled_item_for(
+                w,
+                PlanesRef::of(&a_src),
+                layout,
+                opts,
+                (&aux_colr, extra),
+                Some(1),
+                chain,
+            )?
+        } else {
+            let mut tiles = Vec::with_capacity((rows * cols) as usize);
+            let mut bit_depth = depth;
+            encode_tiles_with(
+                w,
+                PlanesRef::of(&a_src),
+                layout,
+                opts,
+                (&aux_colr, extra),
+                |w, pic| {
+                    bit_depth = pic.layout.bit_depth;
+                    let props = plane_props(&pic);
+                    let id = w.add_coded_item(pic.item_type, pic.data, props);
+                    w.set_hidden(id, true);
+                    tiles.push(id);
+                    Ok(())
+                },
+            )?;
+            let mut props = vec![(
+                Property::Pixi(Pixi {
+                    bits_per_channel: vec![bit_depth],
+                }),
+                false,
+            )];
+            props.extend(chain);
+            let desc = GridDescriptor {
+                rows: rows as u16,
+                columns: cols as u16,
+                output_width: vis.0,
+                output_height: vis.1,
+            };
+            w.add_grid(desc, &tiles, props)?
+        };
+        drop(a_src);
+        w.set_hidden(id, true);
+        w.add_reference(crate::meta::reference::AUXL, id, vec![master]);
+        if premultiplied && !is_depth {
+            w.add_reference(crate::meta::reference::PREM, master, vec![id]);
+        }
+        return Ok(id);
+    }
+    let padded = pad_owned(a_src, alignment(opts))?;
+    let pic = encode_picture_for(padded, opts, &aux_colr, extra)?;
+    let mut props = plane_props(&pic);
+    props.push(aux_c);
     if is_depth {
         // The map has its own geometry: the crop is the primary's.
         props.extend(companion_chain(
@@ -2409,100 +2484,75 @@ pub(crate) struct SequenceInput {
     pub(crate) duration_ms: u32,
 }
 
-/// Write `timed` as an image-sequence track (plus an alpha track when
-/// the pictures carry alpha) — the [`crate::encode_all`] shape. Every
-/// picture is coded as a sync sample with the first picture's codec and
-/// coding layout; `still`, when given, becomes the file-level `meta`
-/// (image items decoded before the sequence), otherwise a cover item
-/// aliasing sample 0 is written (MIAF §7.2.1.4). Timescale is 1000.
-pub(crate) fn encode_sequence(
-    timed: Vec<SequenceInput>,
-    still: Option<HeifWriter>,
-) -> Result<Vec<u8>> {
-    use crate::writer::{SequenceAlphaTrack, SequenceSample, SequenceWriter};
+/// The pixels [`encode_sequence`] keeps in flight across its workers
+/// (2²⁴: eight 1080p pictures, two 4K ones, one 12 MP one): each
+/// worker holds one picture of codec state, some tens of bytes per
+/// pixel, so the bound keeps the resident set of a parallel sequence
+/// encode within a few hundred MiB whatever the thread budget. The
+/// bytes do not depend on it.
+pub const SEQUENCE_PIXELS_IN_FLIGHT: u64 = 1 << 24;
 
-    let Some(first) = timed.first() else {
-        return Err(HeifError::invalid("sequence: no timed frames"));
-    };
-    let vis = (first.frame.width, first.frame.height);
+/// One coded sample of [`encode_sequence`] with its time-parallel
+/// alpha sample: what a frame job hands back to the writer.
+struct CodedSample {
+    /// Visible size and alpha presence of the source frame.
+    vis: (u32, u32),
+    has_alpha: bool,
+    codec: StillCodec,
+    duration_ms: u32,
+    pic: CodedPicture,
+    sync: bool,
+    /// The coded alpha picture, its sync flag and its `auxi` URN.
+    alpha: Option<(CodedPicture, bool, &'static str)>,
+    /// What the first sample's entry needs: the colour information and
+    /// the ICC profile of the frame.
+    colr: Colr,
+    icc: Option<Vec<u8>>,
+}
+
+/// Code one timed picture (and its alpha plane) as a sample pair.
+/// `inner` is the thread budget handed to the codec for this picture;
+/// `avc` holds the colour / alpha AVC sessions of a sequence coded as
+/// one bitstream each (in frame order), `None` for the codecs whose
+/// pictures are coded independently.
+fn code_sequence_frame(
+    i: usize,
+    input: SequenceInput,
+    inner: usize,
+    avc: Option<&mut (AvcSequenceEncoder, AvcSequenceEncoder)>,
+) -> Result<CodedSample> {
+    let SequenceInput {
+        frame,
+        opts,
+        duration_ms,
+    } = input;
+    let vis = (frame.width, frame.height);
     if vis.0 > u16::MAX as u32 || vis.1 > u16::MAX as u32 {
         return Err(HeifError::unsupported(format!(
-            "sequence: {}x{} exceeds the 16-bit track size",
+            "sequence: frame {i} is {}x{}, beyond the 16-bit track size",
             vis.0, vis.1
         )));
     }
-    let has_alpha = first.frame.format.has_alpha;
-    let first_opts = first.opts.clone();
-    let mut sw: Option<SequenceWriter> = None;
-    let mut alpha_track: Option<SequenceAlphaTrack> = None;
-    // AVC sequences code as one encoder session each (colour, alpha):
-    // IDR + P pictures, one access unit per frame.
-    let avc = first_opts.codec == StillCodec::Avc;
-    let mut avc_colour = avc.then(|| AvcSequenceEncoder::new(timed.len()));
-    let mut avc_alpha = avc.then(|| AvcSequenceEncoder::new(timed.len()));
-    for (i, input) in timed.into_iter().enumerate() {
-        let SequenceInput {
-            frame,
-            opts,
-            duration_ms,
-        } = input;
-        if (frame.width, frame.height) != vis || frame.format.has_alpha != has_alpha {
-            return Err(HeifError::invalid(format!(
-                "sequence: frame {i} is {}x{} (alpha: {}), frame 0 is {}x{} (alpha: {}) — \
-                 encode_all frames share one geometry and alpha presence",
-                frame.width, frame.height, frame.format.has_alpha, vis.0, vis.1, has_alpha
-            )));
-        }
-        if opts.codec != first_opts.codec {
-            return Err(HeifError::invalid("sequence: frames must share one codec"));
-        }
-        let native_av1 = native_av1(&frame, &opts);
-        let (colour, alpha) = coding_picture_owned(frame, &opts)?;
-        let depth = colour.format.bit_depth;
-        let colour_format = colour.format;
-        let padded = pad_owned_to(colour, sequence_alignment(colour_format, &opts))?;
-        let (pic, sync) = match avc_colour.as_mut() {
-            Some(s) => s.encode(padded, &opts)?,
-            None => (encode_picture_for(padded, &opts, &opts.colr, &[])?, true),
-        };
-        let w = match sw.as_mut() {
-            Some(w) => {
-                if w.config != pic.config {
-                    return Err(HeifError::invalid(format!(
-                        "sequence: frame {i} codes with a different decoder configuration \
-                         (depth or chroma layout) than frame 0"
-                    )));
-                }
-                w
-            }
-            None => {
-                let mut w = SequenceWriter::new(
-                    pic.item_type,
-                    pic.config.clone(),
-                    pic.coded_width as u16,
-                    pic.coded_height as u16,
-                    1000,
-                );
-                let icc = opts.icc_profile.as_deref();
-                w.entry_properties.push(Property::Pixi(Pixi {
-                    bits_per_channel: vec![pic.layout.bit_depth; pic.layout.chroma.colour_planes()],
-                }));
-                w.entry_properties
-                    .push(Property::Colr(nclx_for_icc(&opts.colr, icc.is_some())));
-                if let Some(icc) = icc {
-                    w.entry_properties.push(Property::Colr(Colr::Icc {
-                        restricted: false,
-                        profile: icc.to_vec(),
-                    }));
-                }
-                if let Some((clap, _)) = clap_for(&pic, vis) {
-                    w.entry_properties.push(clap);
-                }
-                sw.insert(w)
-            }
-        };
-        w.push_sample(pic.data, duration_ms, sync);
-        if let Some(alpha) = alpha {
+    let has_alpha = frame.format.has_alpha;
+    let opts = EncodeOptions {
+        threads: Some(inner),
+        ..opts
+    };
+    let native_av1 = native_av1(&frame, &opts);
+    let (colour, alpha) = coding_picture_owned(frame, &opts)?;
+    let depth = colour.format.bit_depth;
+    let colour_format = colour.format;
+    let padded = pad_owned_to(colour, sequence_alignment(colour_format, &opts))?;
+    let (mut avc_colour, mut avc_alpha) = match avc {
+        Some((c, a)) => (Some(c), Some(a)),
+        None => (None, None),
+    };
+    let (pic, sync) = match avc_colour.as_mut() {
+        Some(s) => s.encode(padded, &opts)?,
+        None => (encode_picture_for(padded, &opts, &opts.colr, &[])?, true),
+    };
+    let alpha = match alpha {
+        Some(alpha) => {
             let a_src = if native_av1 {
                 mono_at_depth(alpha, depth)?
             } else {
@@ -2529,6 +2579,165 @@ pub(crate) fn encode_sequence(
                 StillCodec::Hevc => crate::props::AUX_URN_ALPHA_HEVC,
                 StillCodec::Av1 | StillCodec::Vvc | StillCodec::Avc => crate::props::AUX_URN_ALPHA,
             };
+            Some((apic, alpha_sync, urn))
+        }
+        None => None,
+    };
+    Ok(CodedSample {
+        vis,
+        has_alpha,
+        codec: opts.codec,
+        duration_ms,
+        pic,
+        sync,
+        alpha,
+        colr: opts.colr,
+        icc: opts.icc_profile,
+    })
+}
+
+/// Run `job(0..n)` on up to `workers` threads and hand every result to
+/// `sink` in index order, each as soon as its predecessors are in (the
+/// side buffer holds only out-of-order completions). The first error —
+/// a job's or the sink's — stops the remaining jobs from starting and
+/// is returned. With one worker the jobs run on the calling thread.
+fn ordered_parallel<T: Send>(
+    n: usize,
+    workers: usize,
+    job: impl Fn(usize) -> Result<T> + Sync,
+    mut sink: impl FnMut(usize, T) -> Result<()>,
+) -> Result<()> {
+    if workers <= 1 || n <= 1 {
+        for i in 0..n {
+            sink(i, job(i)?)?;
+        }
+        return Ok(());
+    }
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let (tx, rx) = std::sync::mpsc::channel::<(usize, Result<T>)>();
+    std::thread::scope(|s| {
+        for _ in 0..workers.min(n) {
+            let tx = tx.clone();
+            let (next, stop, job) = (&next, &stop, &job);
+            s.spawn(move || {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= n || stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if tx.send((i, job(i))).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(tx);
+        let mut drain = || -> Result<()> {
+            let mut pending: std::collections::BTreeMap<usize, T> =
+                std::collections::BTreeMap::new();
+            let mut expect = 0usize;
+            while expect < n {
+                let (i, done) = rx
+                    .recv()
+                    .map_err(|_| HeifError::invalid("a parallel encode worker stopped early"))?;
+                pending.insert(i, done?);
+                while let Some(v) = pending.remove(&expect) {
+                    sink(expect, v)?;
+                    expect += 1;
+                }
+            }
+            Ok(())
+        };
+        let result = drain();
+        if result.is_err() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        result
+    })
+}
+
+/// Write `count` timed pictures (`input(i)` prepares picture `i`) as an
+/// image-sequence track (plus an alpha track when the pictures carry
+/// alpha) — the [`crate::encode_all`] shape. Every picture is coded as
+/// a sync sample with the first picture's codec and coding layout;
+/// `still`, when given, becomes the file-level `meta` (image items
+/// decoded before the sequence), otherwise a cover item aliasing sample
+/// 0 is written (MIAF §7.2.1.4). Timescale is 1000.
+///
+/// HEVC, AV1 and VVC pictures are coded independently, so they are
+/// prepared and coded as parallel jobs on `threads` workers — one
+/// picture in flight per worker, each handing its coded sample to the
+/// writer in order; a budget left over by a short sequence goes to the
+/// codec of each picture. The bytes are those of the serial encode for
+/// every budget. An AVC sequence is one bitstream per track (IDR + P
+/// pictures) and codes in order on the calling thread.
+pub(crate) fn encode_sequence(
+    count: usize,
+    threads: usize,
+    input: impl Fn(usize) -> Result<SequenceInput> + Sync,
+    still: Option<HeifWriter>,
+) -> Result<Vec<u8>> {
+    use crate::writer::{SequenceAlphaTrack, SequenceWriter};
+
+    if count == 0 {
+        return Err(HeifError::invalid("sequence: no timed frames"));
+    }
+    let mut sw: Option<SequenceWriter> = None;
+    let mut alpha_track: Option<SequenceAlphaTrack> = None;
+    let mut first: Option<((u32, u32), bool, StillCodec)> = None;
+    let mut collect = |i: usize, c: CodedSample| -> Result<()> {
+        let (vis, has_alpha, codec) = *first.get_or_insert((c.vis, c.has_alpha, c.codec));
+        if c.vis != vis || c.has_alpha != has_alpha {
+            return Err(HeifError::invalid(format!(
+                "sequence: frame {i} is {}x{} (alpha: {}), frame 0 is {}x{} (alpha: {}) — \
+                 encode_all frames share one geometry and alpha presence",
+                c.vis.0, c.vis.1, c.has_alpha, vis.0, vis.1, has_alpha
+            )));
+        }
+        if c.codec != codec {
+            return Err(HeifError::invalid("sequence: frames must share one codec"));
+        }
+        let pic = c.pic;
+        let w = match sw.as_mut() {
+            Some(w) => {
+                if w.config != pic.config {
+                    return Err(HeifError::invalid(format!(
+                        "sequence: frame {i} codes with a different decoder configuration \
+                         (depth or chroma layout) than frame 0"
+                    )));
+                }
+                w
+            }
+            None => {
+                let mut w = SequenceWriter::new(
+                    pic.item_type,
+                    pic.config.clone(),
+                    pic.coded_width as u16,
+                    pic.coded_height as u16,
+                    1000,
+                );
+                let icc = c.icc.as_deref();
+                w.entry_properties.push(Property::Pixi(Pixi {
+                    bits_per_channel: vec![pic.layout.bit_depth; pic.layout.chroma.colour_planes()],
+                }));
+                w.entry_properties
+                    .push(Property::Colr(nclx_for_icc(&c.colr, icc.is_some())));
+                if let Some(icc) = icc {
+                    w.entry_properties.push(Property::Colr(Colr::Icc {
+                        restricted: false,
+                        profile: icc.to_vec(),
+                    }));
+                }
+                if let Some((clap, _)) = clap_for(&pic, vis) {
+                    w.entry_properties.push(clap);
+                }
+                sw.insert(w)
+            }
+        };
+        w.push_sample(pic.data, c.duration_ms, c.sync);
+        if let Some((apic, alpha_sync, urn)) = c.alpha {
             let at = alpha_track.get_or_insert_with(|| {
                 let mut props = vec![Property::Pixi(Pixi {
                     bits_per_channel: vec![apic.layout.bit_depth],
@@ -2549,9 +2758,73 @@ pub(crate) fn encode_sequence(
                     "sequence: alpha of frame {i} codes with a different decoder configuration"
                 )));
             }
-            at.samples
-                .push(SequenceSample::new(apic.data, duration_ms, alpha_sync));
+            at.push_sample(apic.data, c.duration_ms, alpha_sync);
         }
+        Ok(())
+    };
+    // The first picture decides how the rest are coded: an AVC sequence
+    // is one encoder session per track, in order.
+    let first_input = input(0)?;
+    let threads = threads.max(1);
+    if first_input.opts.codec == StillCodec::Avc {
+        let mut avc = (
+            AvcSequenceEncoder::new(count),
+            AvcSequenceEncoder::new(count),
+        );
+        let shape = (
+            (first_input.frame.width, first_input.frame.height),
+            first_input.frame.format.has_alpha,
+        );
+        collect(
+            0,
+            code_sequence_frame(0, first_input, threads, Some(&mut avc))?,
+        )?;
+        for i in 1..count {
+            let next = input(i)?;
+            // The session codes one geometry: name the frame before it
+            // reaches the encoder.
+            let this = (
+                (next.frame.width, next.frame.height),
+                next.frame.format.has_alpha,
+            );
+            if this != shape {
+                return Err(HeifError::invalid(format!(
+                    "sequence: frame {i} is {}x{} (alpha: {}), frame 0 is {}x{} (alpha: {}) — \
+                     encode_all frames share one geometry and alpha presence",
+                    this.0.0, this.0.1, this.1, shape.0.0, shape.0.1, shape.1
+                )));
+            }
+            collect(i, code_sequence_frame(i, next, threads, Some(&mut avc))?)?;
+        }
+    } else {
+        // One picture of codec state per worker: the pictures in flight
+        // are bounded in pixels as well as by the budget, so a sequence
+        // of large pictures does not multiply the codec's whole-picture
+        // working set by the worker count.
+        let pixels = (first_input.frame.width as u64 * first_input.frame.height as u64).max(1);
+        let by_memory = (SEQUENCE_PIXELS_IN_FLIGHT / pixels).max(1) as usize;
+        let workers = oxideav_core::ExecutionContext::with_threads(threads.min(by_memory))
+            .effective_workers(count);
+        let inner = (threads / workers.max(1)).max(1);
+        // Picture 0 is already prepared; the workers prepare the rest.
+        let first_input = std::sync::Mutex::new(Some(first_input));
+        ordered_parallel(
+            count,
+            workers,
+            |i| {
+                let prepared = if i == 0 {
+                    first_input.lock().ok().and_then(|mut f| f.take())
+                } else {
+                    None
+                };
+                let frame = match prepared {
+                    Some(f) => f,
+                    None => input(i)?,
+                };
+                code_sequence_frame(i, frame, inner, None)
+            },
+            &mut collect,
+        )?;
     }
     let mut sw = sw.expect("at least one timed frame");
     sw.alpha = alpha_track;
@@ -2591,25 +2864,85 @@ fn native_av1(_frame: &HeifFrame, opts: &EncodeOptions) -> bool {
     opts.codec == StillCodec::Av1
 }
 
-/// The `tile × tile` tile at `(x, y)` of `f` (both multiples of the
-/// codec alignment, so the chroma planes cut on sample boundaries):
+/// The planes of a planar picture used where they are: a caller's
+/// frame (or contract image) whose tiles are cut without copying the
+/// picture first. An alpha plane behind the colour planes is ignored
+/// by the tile cut.
+#[derive(Clone, Copy, Debug)]
+#[doc(hidden)]
+pub struct PlanesRef<'a> {
+    width: u32,
+    height: u32,
+    format: HeifPixelFormat,
+    planes: &'a [crate::image::Plane],
+}
+
+impl<'a> PlanesRef<'a> {
+    /// A view over `planes` in `format` (the planes are checked by the
+    /// caller: a validated frame or image).
+    pub fn new(
+        width: u32,
+        height: u32,
+        format: HeifPixelFormat,
+        planes: &'a [crate::image::Plane],
+    ) -> Self {
+        Self {
+            width,
+            height,
+            format,
+            planes,
+        }
+    }
+
+    /// The planes of `frame`.
+    pub fn of(frame: &'a HeifFrame) -> Self {
+        Self::new(frame.width, frame.height, frame.format, &frame.planes)
+    }
+
+    /// The colour layout (no alpha).
+    fn colour_format(&self) -> HeifPixelFormat {
+        self.format.without_alpha()
+    }
+
+    /// The alpha plane as a monochrome frame (a copy), when present.
+    fn alpha_as_frame(&self) -> Option<HeifFrame> {
+        let i = self.format.alpha_plane()?;
+        Some(HeifFrame {
+            width: self.width,
+            height: self.height,
+            format: HeifPixelFormat {
+                chroma: Chroma::Mono,
+                bit_depth: self.format.bit_depth,
+                has_alpha: false,
+            },
+            planes: vec![self.planes.get(i)?.clone()],
+        })
+    }
+}
+
+/// The `tile × tile` colour tile at `(x, y)` of `f` (both multiples of
+/// the codec alignment, so the chroma planes cut on sample boundaries):
 /// the inside part copied plane by plane, the samples beyond the
 /// picture's right / bottom edge replicated from the last column /
 /// row — no padded copy of the whole picture is ever made.
-fn tile_from(f: &HeifFrame, x: u32, y: u32, tile: u32) -> Result<HeifFrame> {
-    let mut out = HeifFrame::zeroed(tile, tile, f.format)?;
-    let bps = f.format.bytes_per_sample();
-    for p in 0..f.format.plane_count() {
-        let (sx, sy) = if p == 0 || Some(p) == f.format.alpha_plane() {
+fn tile_from(f: PlanesRef<'_>, x: u32, y: u32, tile: u32) -> Result<HeifFrame> {
+    let format = f.colour_format();
+    let mut out = HeifFrame::zeroed(tile, tile, format)?;
+    let bps = format.bytes_per_sample();
+    for p in 0..format.plane_count() {
+        let (sx, sy) = if p == 0 {
             (0, 0)
         } else {
-            f.format.chroma.shift()
+            format.chroma.shift()
         };
-        let (spw, sph) = f.plane_dims(p);
+        let (spw, sph) = format.plane_dims(p, f.width, f.height);
         let (pw, ph) = out.plane_dims(p);
         let (x0, y0) = (x >> sx, y >> sy);
         let run = (spw.saturating_sub(x0)).min(pw) as usize;
-        let src = &f.planes[p];
+        let src = f
+            .planes
+            .get(p)
+            .ok_or_else(|| HeifError::invalid("picture with fewer planes than its layout"))?;
         let dst_stride = out.planes[p].stride;
         let dst = &mut out.planes[p].data;
         for row in 0..ph {
@@ -2635,20 +2968,27 @@ fn tile_from(f: &HeifFrame, x: u32, y: u32, tile: u32) -> Result<HeifFrame> {
 /// Returns the tile item ids.
 fn encode_grid_tiles(
     w: &mut HeifWriter,
-    colour: &HeifFrame,
+    colour: PlanesRef<'_>,
     tile: u32,
     cols: u32,
     rows: u32,
     opts: &EncodeOptions,
 ) -> Result<Vec<u32>> {
     let mut ids = Vec::with_capacity((rows * cols) as usize);
-    encode_tiles_with(w, colour, tile, cols, rows, opts, |w, pic| {
-        let props = coded_props(&pic, &opts.colr, None);
-        let id = w.add_coded_item(pic.item_type, pic.data, props);
-        w.set_hidden(id, true);
-        ids.push(id);
-        Ok(())
-    })?;
+    encode_tiles_with(
+        w,
+        colour,
+        (tile, cols, rows),
+        opts,
+        (&opts.colr, &[]),
+        |w, pic| {
+            let props = coded_props(&pic, &opts.colr, None);
+            let id = w.add_coded_item(pic.item_type, pic.data, props);
+            w.set_hidden(id, true);
+            ids.push(id);
+            Ok(())
+        },
+    )?;
     Ok(ids)
 }
 
@@ -2661,72 +3001,29 @@ fn encode_grid_tiles(
 /// tiled-item carrier).
 fn encode_tiles_with(
     w: &mut HeifWriter,
-    colour: &HeifFrame,
-    tile: u32,
-    cols: u32,
-    rows: u32,
+    colour: PlanesRef<'_>,
+    (tile, cols, rows): (u32, u32, u32),
     opts: &EncodeOptions,
+    (colr, extra): (&Colr, &[(&str, &str)]),
     mut sink: impl FnMut(&mut HeifWriter, CodedPicture) -> Result<()>,
 ) -> Result<()> {
     let n = (rows * cols) as usize;
-    let tile_at = |i: usize| -> Result<HeifFrame> {
-        let (r, c) = ((i as u32) / cols, (i as u32) % cols);
-        tile_from(colour, c * tile, r * tile, tile)
-    };
     // Each tile's codec runs serial; the budget is spent across tiles.
     let tile_opts = EncodeOptions {
         threads: None,
         ..opts.clone()
     };
     let workers = oxideav_core::ExecutionContext::with_threads(opts.workers()).effective_workers(n);
-    if workers <= 1 {
-        for i in 0..n {
-            sink(w, encode_picture(tile_at(i)?, &tile_opts)?)?;
-        }
-        return Ok(());
-    }
-    // Work-stealing over a shared counter; finished tiles come back
-    // over a channel and are reordered on the main thread, which hands
-    // each tile to the writer as soon as its predecessors are in — the
-    // side buffer holds only the out-of-order completions.
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let (tx, rx) = std::sync::mpsc::channel::<(usize, Result<CodedPicture>)>();
-    let result: Result<()> = std::thread::scope(|s| {
-        for _ in 0..workers {
-            let tx = tx.clone();
-            let next = &next;
-            let tile_opts = &tile_opts;
-            let tile_at = &tile_at;
-            s.spawn(move || {
-                loop {
-                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if i >= n {
-                        break;
-                    }
-                    let coded = tile_at(i).and_then(|t| encode_picture(t, tile_opts));
-                    if tx.send((i, coded)).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        drop(tx);
-        let mut pending: std::collections::BTreeMap<usize, CodedPicture> =
-            std::collections::BTreeMap::new();
-        let mut expect = 0usize;
-        while expect < n {
-            let (i, coded) = rx
-                .recv()
-                .map_err(|_| HeifError::invalid("grid: a tile worker stopped early"))?;
-            pending.insert(i, coded?);
-            while let Some(pic) = pending.remove(&expect) {
-                sink(w, pic)?;
-                expect += 1;
-            }
-        }
-        Ok(())
-    });
-    result
+    ordered_parallel(
+        n,
+        workers,
+        |i| {
+            let (r, c) = ((i as u32) / cols, (i as u32) % cols);
+            let tile = tile_from(colour, c * tile, r * tile, tile)?;
+            encode_picture_for(tile, &tile_opts, colr, extra)
+        },
+        |_, pic| sink(w, pic),
+    )
 }
 
 /// Code `colour` as one `tili` tiled image item (HEIF Amd 2:2026
@@ -2742,17 +3039,40 @@ fn encode_tiles_with(
 #[allow(clippy::too_many_arguments)]
 fn encode_tiled_item(
     w: &mut HeifWriter,
-    colour: &HeifFrame,
+    colour: PlanesRef<'_>,
     tile: u32,
     cols: u32,
     rows: u32,
     opts: &EncodeOptions,
     props: Vec<(Property, bool)>,
 ) -> Result<u32> {
+    encode_tiled_item_for(
+        w,
+        colour,
+        (tile, cols, rows),
+        opts,
+        (&opts.colr, &[]),
+        None,
+        props,
+    )
+}
+
+/// [`encode_tiled_item`] for a picture coded under its own colour
+/// signal and codec options (`coding`), whose `pixi` lists `channels`
+/// channels (`None`: every colour plane; an auxiliary plane has one).
+fn encode_tiled_item_for(
+    w: &mut HeifWriter,
+    colour: PlanesRef<'_>,
+    (tile, cols, rows): (u32, u32, u32),
+    opts: &EncodeOptions,
+    coding: (&Colr, &[(&str, &str)]),
+    channels: Option<usize>,
+    props: Vec<(Property, bool)>,
+) -> Result<u32> {
     let n = (rows * cols) as usize;
     let mut tiles: Vec<Option<Vec<u8>>> = Vec::with_capacity(n);
     let mut first: Option<([u8; 4], Property, HeifPixelFormat)> = None;
-    encode_tiles_with(w, colour, tile, cols, rows, opts, |_, pic| {
+    encode_tiles_with(w, colour, (tile, cols, rows), opts, coding, |_, pic| {
         match &first {
             None => first = Some((pic.item_type, pic.config.clone(), pic.layout)),
             Some((t, c, _)) if *t != pic.item_type || *c != pic.config => {
@@ -2779,7 +3099,10 @@ fn encode_tiled_item(
     ];
     let mut item_props = vec![(
         Property::Pixi(Pixi {
-            bits_per_channel: vec![layout.bit_depth; layout.chroma.colour_planes()],
+            bits_per_channel: vec![
+                layout.bit_depth;
+                channels.unwrap_or(layout.chroma.colour_planes())
+            ],
         }),
         false,
     )];
@@ -2922,11 +3245,56 @@ pub fn encode_pixel_transform_still(frame: &HeifFrame, opts: &EncodeOptions) -> 
 /// `opts`. Returns the file bytes.
 pub fn encode_still(frame: &HeifFrame, opts: &EncodeOptions) -> Result<Vec<u8>> {
     frame.validate()?;
+    if let Some(bytes) = encode_still_in_place(PlanesRef::of(frame), opts)? {
+        return Ok(bytes);
+    }
     let mut w = HeifWriter::new();
     let colour = coding_picture(frame, opts)?;
-    let master = encode_still_planes(&mut w, colour, frame.alpha_as_frame(), opts)?;
+    let master = encode_still_planes(
+        &mut w,
+        ColourSource::Owned(colour),
+        frame.alpha_as_frame(),
+        opts,
+    )?;
     w.set_primary(master);
     w.write_to_vec()
+}
+
+/// The coding picture of a still: converted / owned, or the caller's
+/// own planes when nothing has to change before the tiles are cut.
+enum ColourSource<'a> {
+    Owned(HeifFrame),
+    Borrowed(PlanesRef<'a>),
+}
+
+/// The caller's planes as the coding picture, when they can be used in
+/// place: the picture is already in the layout the codec codes, it is
+/// coded as tiles (each tile is cut — and padded — on its own, so the
+/// whole picture is never needed as one owned buffer), and no thumbnail
+/// has to be scaled from it.
+fn in_place_source<'a>(
+    view: PlanesRef<'a>,
+    opts: &EncodeOptions,
+) -> Result<Option<ColourSource<'a>>> {
+    let coded = coded_layout(view.format, opts)?;
+    let same = coded.chroma == view.format.chroma && coded.bit_depth == view.format.bit_depth;
+    Ok((same
+        && opts.thumbnail_max_dim.is_none()
+        && grid_layout(view.width, view.height, opts)?.is_some())
+    .then_some(ColourSource::Borrowed(view)))
+}
+
+/// [`encode_still`] over planes used in place (see [`in_place_source`]);
+/// `None` when the picture has to be converted or owned first.
+#[doc(hidden)]
+pub fn encode_still_in_place(view: PlanesRef<'_>, opts: &EncodeOptions) -> Result<Option<Vec<u8>>> {
+    let Some(source) = in_place_source(view, opts)? else {
+        return Ok(None);
+    };
+    let mut w = HeifWriter::new();
+    let master = encode_still_planes(&mut w, source, view.alpha_as_frame(), opts)?;
+    w.set_primary(master);
+    w.write_to_vec().map(Some)
 }
 
 /// [`encode_still`] over an owned frame: a picture already in the
@@ -2937,7 +3305,7 @@ pub fn encode_still_owned(frame: HeifFrame, opts: &EncodeOptions) -> Result<Vec<
     frame.validate()?;
     let mut w = HeifWriter::new();
     let (colour, alpha) = coding_picture_owned(frame, opts)?;
-    let master = encode_still_planes(&mut w, colour, alpha, opts)?;
+    let master = encode_still_planes(&mut w, ColourSource::Owned(colour), alpha, opts)?;
     w.set_primary(master);
     w.write_to_vec()
 }
@@ -2952,32 +3320,57 @@ pub fn encode_still_into(
     opts: &EncodeOptions,
 ) -> Result<u32> {
     frame.validate()?;
-    let colour = coding_picture(frame, opts)?;
-    encode_still_planes(w, colour, frame.alpha_as_frame(), opts)
+    let view = PlanesRef::of(frame);
+    let source = match in_place_source(view, opts)? {
+        Some(source) => source,
+        None => ColourSource::Owned(coding_picture(frame, opts)?),
+    };
+    encode_still_planes(w, source, frame.alpha_as_frame(), opts)
+}
+
+/// The tiling `opts` codes a `width × height` picture with: the tile
+/// edge and the `columns × rows` layout, or `None` for a single item
+/// ([`EncodeOptions::effective_grid_tile`]: no tiling asked for, or a
+/// picture that fits one tile).
+fn grid_layout(width: u32, height: u32, opts: &EncodeOptions) -> Result<Option<(u32, u32, u32)>> {
+    match opts.effective_grid_tile(width, height) {
+        Some(tile) if width > tile || height > tile => {
+            // MIAF §7.3.11.4.2: tiles are at least 64 pixels; keep them
+            // aligned to the codec block size on both axes.
+            let tile = align_up(tile.max(crate::miaf::MIN_TILE_EDGE), alignment(opts) * 2);
+            let cols = width.div_ceil(tile);
+            let rows = height.div_ceil(tile);
+            if rows > 256 || cols > 256 {
+                return Err(HeifError::invalid("grid: more than 256 rows or columns"));
+            }
+            Ok(Some((tile, cols, rows)))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// The item graph over an already-converted colour picture and its
 /// (source-depth, monochrome) alpha plane.
 fn encode_still_planes(
     w: &mut HeifWriter,
-    colour: HeifFrame,
+    colour: ColourSource<'_>,
     alpha: Option<HeifFrame>,
     opts: &EncodeOptions,
 ) -> Result<u32> {
     validate_transforms(opts)?;
-    let native_av1 = native_av1(&colour, opts);
-    let (cw, ch, cfmt) = (colour.width, colour.height, colour.format);
-    let (master, thumb) = match opts.effective_grid_tile(cw, ch) {
-        Some(tile) if cw > tile || ch > tile => {
-            // MIAF §7.3.11.4.2: tiles are at least 64 pixels; keep them
-            // aligned to the codec block size on both axes.
-            let tile = align_up(tile.max(crate::miaf::MIN_TILE_EDGE), alignment(opts) * 2);
-            let cols = cw.div_ceil(tile);
-            let rows = ch.div_ceil(tile);
-            if rows > 256 || cols > 256 {
-                return Err(HeifError::invalid("grid: more than 256 rows or columns"));
-            }
-            let thumb = thumbnail_source(&colour, opts)?;
+    let native_av1 = opts.codec == StillCodec::Av1;
+    let view = match &colour {
+        ColourSource::Owned(f) => PlanesRef::of(f),
+        ColourSource::Borrowed(v) => *v,
+    };
+    let (cw, ch, cfmt) = (view.width, view.height, view.colour_format());
+    let (master, thumb) = match grid_layout(cw, ch, opts)? {
+        Some((tile, cols, rows)) => {
+            // Planes used in place never carry a thumbnail request.
+            let thumb = match &colour {
+                ColourSource::Owned(f) => thumbnail_source(f, opts)?,
+                ColourSource::Borrowed(_) => None,
+            };
             let mut gprops = vec![(
                 Property::Colr(nclx_for_icc(&opts.colr, opts.icc_profile.is_some())),
                 false,
@@ -2993,11 +3386,9 @@ fn encode_still_planes(
             }
             gprops.extend(item_transform_props(opts));
             let master = match opts.tile_carrier {
-                TileCarrier::Tiled => {
-                    encode_tiled_item(w, &colour, tile, cols, rows, opts, gprops)?
-                }
+                TileCarrier::Tiled => encode_tiled_item(w, view, tile, cols, rows, opts, gprops)?,
                 _ => {
-                    let tiles = encode_grid_tiles(w, &colour, tile, cols, rows, opts)?;
+                    let tiles = encode_grid_tiles(w, view, tile, cols, rows, opts)?;
                     let desc = GridDescriptor {
                         rows: rows as u16,
                         columns: cols as u16,
@@ -3010,7 +3401,20 @@ fn encode_still_planes(
             drop(colour);
             (master, thumb)
         }
-        _ => {
+        None => {
+            // A single item moves its picture into the codec.
+            let colour = match colour {
+                ColourSource::Owned(f) => f,
+                ColourSource::Borrowed(v) => {
+                    let planes = cfmt.plane_count().min(v.planes.len());
+                    HeifFrame {
+                        width: v.width,
+                        height: v.height,
+                        format: cfmt,
+                        planes: v.planes[..planes].to_vec(),
+                    }
+                }
+            };
             let thumb = thumbnail_source(&colour, opts)?;
             (add_picture_item(w, colour, opts, Vec::new())?, thumb)
         }

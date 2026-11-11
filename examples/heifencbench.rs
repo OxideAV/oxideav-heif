@@ -7,8 +7,18 @@
 //!              [--synth WxH] [--codec hevc|av1] [--mode intra|pcm]
 //!              [--qp N] [--quality N] [--grid T] [--threads N|auto]
 //!              [--rd N] [--framework] [--out FILE] [--label TEXT]
+//!              [--alpha] [--tiling grid|tili] [--frames N]
 //!              [--option KEY=VALUE ...]
 //! ```
+//!
+//! * `--alpha`: the picture gains an alpha plane (a diagonal ramp with
+//!   a transparent disc), so the alpha auxiliary is coded too (packed
+//!   RGBA on the framework path).
+//! * `--tiling tili`: the tiles ride one `tili` tiled item instead of
+//!   a `grid`.
+//! * `--frames N`: an image sequence of `N` pictures (the picture
+//!   rolled down by 8 rows per frame) through the contract's
+//!   `encode_all` — one track sample each.
 //!
 //! * `--raw`: a packed picture dumped by a black-box tool (for example
 //!   `ffmpeg -i in.png -f rawvideo -pix_fmt rgb24 in.rgb`); `--synth`
@@ -127,6 +137,8 @@ fn main() {
     let mut out: Option<String> = None;
     let mut label = String::new();
     let mut extra: Vec<(String, String)> = Vec::new();
+    let mut alpha = false;
+    let mut frames = 0usize;
     let mut i = 0;
     let next = |i: &mut usize| -> String {
         *i += 1;
@@ -160,6 +172,14 @@ fn main() {
                 }
             }
             "--framework" => framework = true,
+            "--alpha" => alpha = true,
+            "--frames" => frames = next(&mut i).parse().expect("frames"),
+            "--tiling" => {
+                opts.tile_carrier = match next(&mut i).as_str() {
+                    "tili" => oxideav_heif::encode::TileCarrier::Tiled,
+                    _ => oxideav_heif::encode::TileCarrier::Grid,
+                }
+            }
             "--out" => out = Some(next(&mut i)),
             "--label" => label = next(&mut i),
             "--option" => {
@@ -196,6 +216,44 @@ fn main() {
             std::process::exit(2);
         }
     };
+    // The alpha plane of `--alpha`: a diagonal ramp with a transparent
+    // disc (structure for the coder, not a constant).
+    let alpha_plane: Option<Vec<u8>> = (alpha && channels == 3 && !wide).then(|| {
+        let (cx, cy, r) = (w as f64 * 0.3, h as f64 * 0.35, w.min(h) as f64 * 0.2);
+        let mut a = Vec::with_capacity(w as usize * h as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let (dx, dy) = (x as f64 - cx, y as f64 - cy);
+                a.push(if dx * dx + dy * dy < r * r {
+                    0
+                } else {
+                    (64 + (x + y) * 191 / (w + h)) as u8
+                });
+            }
+        }
+        a
+    });
+    if alpha && alpha_plane.is_none() {
+        eprintln!("--alpha takes an 8-bit RGB source");
+        std::process::exit(2);
+    }
+    let packed = match (&alpha_plane, framework || frames > 0) {
+        // Packed RGBA for the framework / contract paths.
+        (Some(a), true) => {
+            let mut v = Vec::with_capacity(a.len() * 4);
+            for (i, a) in a.iter().enumerate() {
+                v.extend_from_slice(&packed[3 * i..3 * i + 3]);
+                v.push(*a);
+            }
+            v
+        }
+        _ => packed,
+    };
+    let channels = if alpha_plane.is_some() && (framework || frames > 0) {
+        4
+    } else {
+        channels
+    };
     let (cpu0, rss0) = usage::read();
     let t0 = Instant::now();
     let mut stages: Vec<Stage> = Vec::new();
@@ -210,9 +268,48 @@ fn main() {
         *last = (Instant::now(), cpu);
     };
     let mut last = (Instant::now(), cpu0);
-    let bytes: Vec<u8> = if framework {
+    let bytes: Vec<u8> = if frames > 0 {
+        // An image sequence through the contract: `frames` pictures,
+        // each the source rolled down by 8 rows more than the last.
+        let (format, bpp) = match (channels, wide) {
+            (4, false) => (oxideav_heif::PixelFormat::Rgba, 4),
+            (3, false) => (oxideav_heif::PixelFormat::Rgb24, 3),
+            _ => {
+                eprintln!("--frames takes an 8-bit RGB(A) source");
+                std::process::exit(2);
+            }
+        };
+        let row = w as usize * bpp;
+        let pictures: Vec<oxideav_heif::Frame> = (0..frames)
+            .map(|i| {
+                let shift = (i * 8) % h as usize * row;
+                let mut data = Vec::with_capacity(packed.len());
+                data.extend_from_slice(&packed[shift..]);
+                data.extend_from_slice(&packed[..shift]);
+                let image = oxideav_heif::HeifImage::new(
+                    w,
+                    h,
+                    format,
+                    vec![oxideav_heif::Plane { stride: row, data }],
+                )
+                .expect("image");
+                oxideav_heif::Frame::new(
+                    image,
+                    Some(std::time::Duration::from_millis(40)),
+                    None,
+                    None,
+                )
+            })
+            .collect();
+        drop(packed);
+        mark("input", &mut stages, &mut last);
+        let bytes = oxideav_heif::encode_all(&pictures, &opts).expect("encode_all");
+        mark("encode_all", &mut stages, &mut last);
+        bytes
+    } else if framework {
         use oxideav_core::{CodecId, CodecOptions, CodecParameters, Frame};
         let pf = match (channels, wide) {
+            (4, false) => oxideav_core::PixelFormat::Rgba,
             (3, false) => oxideav_core::PixelFormat::Rgb24,
             (3, true) => oxideav_core::PixelFormat::Rgb48Le,
             _ => oxideav_core::PixelFormat::Gray8,
@@ -240,6 +337,9 @@ fn main() {
         }
         if let Some(rd) = opts.hevc_rd {
             o = o.set("rd", rd.to_string());
+        }
+        if opts.tile_carrier == oxideav_heif::encode::TileCarrier::Tiled {
+            o = o.set("tiling", "tili");
         }
         for (k, v) in &extra {
             o = o.set(k.as_str(), v.as_str());
@@ -293,8 +393,24 @@ fn main() {
                     data: packed,
                 }],
             };
-            oxideav_heif::encode::packed_to_planar_for(&vf, w, h, pfmt, &opts.colr, pf)
-                .expect("convert")
+            let planar =
+                oxideav_heif::encode::packed_to_planar_for(&vf, w, h, pfmt, &opts.colr, pf)
+                    .expect("convert");
+            match alpha_plane {
+                Some(a) => {
+                    let af = HeifFrame {
+                        width: w,
+                        height: h,
+                        format: HeifPixelFormat::new(Chroma::Mono, 8, false).expect("format"),
+                        planes: vec![oxideav_heif::Plane {
+                            stride: w as usize,
+                            data: a,
+                        }],
+                    };
+                    planar.with_alpha_plane(&af).expect("alpha")
+                }
+                None => planar,
+            }
         };
         mark("convert", &mut stages, &mut last);
         let bytes = encode_still(&frame, &opts).expect("encode");

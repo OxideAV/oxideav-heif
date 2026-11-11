@@ -383,6 +383,27 @@ fn cases() -> Vec<(&'static str, &'static str, EncodeOptions, bool, bool)> {
             true,
         ),
         ("hevc_alpha", "heic", pcm(), false, true),
+        // A tiled picture with alpha: the alpha auxiliary is a grid of
+        // its own (r487).
+        (
+            "hevc_grid_alpha",
+            "heic",
+            EncodeOptions::default()
+                .with_hevc_mode("intra".into())
+                .with_qp(22)
+                .with_grid_tile(Some(64)),
+            false,
+            true,
+        ),
+        (
+            "av1_grid_alpha",
+            "avif",
+            EncodeOptions::default()
+                .with_codec(StillCodec::Av1)
+                .with_grid_tile(Some(64)),
+            false,
+            true,
+        ),
         (
             "av1_alpha",
             "avif",
@@ -396,7 +417,7 @@ fn cases() -> Vec<(&'static str, &'static str, EncodeOptions, bool, bool)> {
 fn dims(name: &str) -> (u32, u32) {
     match name {
         "hevc_odd_63x61" | "av1_odd" | "av1_q30_odd" => (63, 61),
-        "hevc_grid" | "av1_grid" => (200, 150),
+        "hevc_grid" | "av1_grid" | "hevc_grid_alpha" | "av1_grid_alpha" => (200, 150),
         "hevc_thumb" => (160, 120),
         _ => (96, 80),
     }
@@ -702,16 +723,27 @@ fn apple_imageio_renders_the_alpha_plane_exactly() {
     }
     use oxideav_heif::decode::{ItemDecoder, decode_primary};
     let dir = scratch_dir("apple-alpha");
-    for (name, opts) in [
-        ("pcm", pcm()),
+    for (name, opts, (w, h)) in [
+        ("pcm", pcm(), (96, 80)),
         (
             "intra",
             EncodeOptions::default()
                 .with_hevc_mode("intra".into())
                 .with_qp(20),
+            (96, 80),
+        ),
+        // The alpha auxiliary as a grid of tiles (a tiled master).
+        ("grid-pcm", pcm().with_grid_tile(Some(64)), (200, 150)),
+        (
+            "grid-intra",
+            EncodeOptions::default()
+                .with_hevc_mode("intra".into())
+                .with_qp(20)
+                .with_grid_tile(Some(64)),
+            (200, 150),
         ),
     ] {
-        let src = picture(96, 80, false, true);
+        let src = picture(w, h, false, true);
         let bytes = encode_still(&src, &opts).unwrap();
         let heic = dir.join(format!("{name}.heic"));
         std::fs::write(&heic, &bytes).unwrap();
