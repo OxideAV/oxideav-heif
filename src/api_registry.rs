@@ -28,7 +28,7 @@ use crate::decode::{
 use crate::derived::build_graph;
 use crate::encode::{
     EncodeOptions, SequenceInput, StillCodec, coded_depth, encode_sequence, encode_still_into,
-    encode_still_owned, packed_bytes_to_planar,
+    encode_still_owned, packed_bytes_to_planar, packed_bytes_to_planar_threads,
 };
 use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
@@ -785,7 +785,7 @@ pub(crate) fn encode_packed_bytes(
     let colr = effective_colr(color, format, opts);
     let opts = effective_options(metadata, colr.clone(), opts);
     let (colr, opts, target) = packed_coding(colr, opts, format == PixelFormat::Rgba)?;
-    let frame = packed_bytes_to_planar(
+    let frame = packed_bytes_to_planar_threads(
         data,
         stride,
         width,
@@ -796,6 +796,7 @@ pub(crate) fn encode_packed_bytes(
         false,
         &colr,
         target,
+        opts.workers(),
     )?;
     encode_still_owned(frame, &opts)
 }

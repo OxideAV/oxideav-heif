@@ -3683,6 +3683,20 @@ pub fn packed_to_planar_for(
     colr: &Colr,
     target: HeifPixelFormat,
 ) -> Result<HeifFrame> {
+    packed_to_planar_threads(vf, width, height, pf, colr, target, 1)
+}
+
+/// [`packed_to_planar_for`] on up to `threads` workers (bands of rows;
+/// the planes are those of the serial conversion for every count).
+pub fn packed_to_planar_threads(
+    vf: &oxideav_core::VideoFrame,
+    width: u32,
+    height: u32,
+    pf: oxideav_core::PixelFormat,
+    colr: &Colr,
+    target: HeifPixelFormat,
+    threads: usize,
+) -> Result<HeifFrame> {
     let (bpp, order, wide, src_alpha, grey) = packed_layout(pf)?;
     if target.has_alpha && !src_alpha {
         return Err(HeifError::invalid(format!(
@@ -3693,8 +3707,8 @@ pub fn packed_to_planar_for(
     let src = planes
         .first()
         .ok_or_else(|| HeifError::invalid("packed frame without a plane"))?;
-    packed_bytes_to_planar(
-        &src.data, src.stride, width, height, bpp, order, wide, grey, colr, target,
+    packed_bytes_to_planar_threads(
+        &src.data, src.stride, width, height, bpp, order, wide, grey, colr, target, threads,
     )
 }
 
@@ -3703,6 +3717,7 @@ pub fn packed_to_planar_for(
 /// `order[0]` and A at `order[3]` for `grey`), `wide` for 16-bit
 /// little-endian samples. Shared with the contract's
 /// [`encode_rgb8`](crate::encode_rgb8) / [`encode_rgba8`](crate::encode_rgba8).
+/// Serial: see [`packed_bytes_to_planar_threads`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn packed_bytes_to_planar(
     data: &[u8],
@@ -3716,6 +3731,174 @@ pub(crate) fn packed_bytes_to_planar(
     colr: &Colr,
     target: HeifPixelFormat,
 ) -> Result<HeifFrame> {
+    packed_bytes_to_planar_threads(
+        data, src_stride, width, height, bpp, order, wide, grey, colr, target, 1,
+    )
+}
+
+/// What every band of [`packed_bytes_to_planar_threads`] shares.
+struct PackedKernel<'a> {
+    data: &'a [u8],
+    stride: usize,
+    row_bytes: usize,
+    bpp: usize,
+    order: [usize; 4],
+    wide: bool,
+    grey: bool,
+    colr: &'a Colr,
+    /// Target depth, its maximum sample value and bytes per sample.
+    depth: u8,
+    max: u32,
+    bps: usize,
+    /// Chroma shifts of the target and its chroma plane width
+    /// (0 for a monochrome target).
+    shift: (u32, u32),
+    chroma_width: usize,
+}
+
+/// The rows of one band in every output plane: luma rows `y0..y1` and
+/// the chroma rows they complete (a band starts on a chroma row
+/// group), each slice starting at the band's first row.
+struct PackedBand<'a> {
+    y0: u32,
+    y1: u32,
+    luma: PlaneRows<'a>,
+    chroma: Option<(PlaneRows<'a>, &'a mut [u8])>,
+    alpha: Option<PlaneRows<'a>>,
+}
+
+/// The rows of one plane (and their stride).
+type PlaneRows<'a> = (&'a mut [u8], usize);
+
+impl PackedKernel<'_> {
+    fn read(&self, px: &[u8], ch: usize) -> u16 {
+        if self.wide {
+            u16::from_le_bytes([px[2 * ch], px[2 * ch + 1]])
+        } else {
+            px[ch] as u16
+        }
+    }
+
+    fn put(&self, row: &mut [u8], x: usize, v: u16) {
+        if self.bps == 1 {
+            row[x] = v as u8;
+        } else {
+            row[2 * x..2 * x + 2].copy_from_slice(&v.to_le_bytes());
+        }
+    }
+
+    /// Convert the band's rows: the H.273 conversion per pixel, the
+    /// subsampled chroma as the rounded box average of the
+    /// full-resolution samples of each chroma position, the alpha
+    /// rounded to the target depth.
+    fn run(&self, band: PackedBand<'_>) {
+        let PackedBand {
+            y0,
+            y1,
+            luma: (luma, luma_stride),
+            mut chroma,
+            mut alpha,
+        } = band;
+        let src_depth: u8 = if self.wide { 16 } else { 8 };
+        let (depth, max) = (self.depth, self.max);
+        // 16-bit scale for the H.273 conversion.
+        let to16 = |v: u16| -> u16 {
+            if self.wide {
+                v
+            } else {
+                (v as u32 * 257) as u16
+            }
+        };
+        // Alpha to the target depth (round to nearest; replicate upwards).
+        let alpha_to = |v: u16| -> u16 {
+            let v = v as u32;
+            if src_depth == depth {
+                v as u16
+            } else if src_depth > depth {
+                let s = src_depth - depth;
+                ((v + (1 << (s - 1))) >> s).min(max) as u16
+            } else {
+                let s = depth - src_depth;
+                ((v << s) | (v >> (src_depth - s))).min(max) as u16
+            }
+        };
+        let (sx, sy) = self.shift;
+        // One row of full-resolution Cb / Cr, accumulated per chroma
+        // row group (two luma rows at 4:2:0).
+        let mut cb_acc: Vec<u32> = vec![0; self.chroma_width];
+        let mut cr_acc: Vec<u32> = vec![0; self.chroma_width];
+        let mut cnt: Vec<u32> = vec![0; self.chroma_width];
+        for y in y0..y1 {
+            let at = y as usize * self.stride;
+            let row = &self.data[at..at + self.row_bytes];
+            let local = (y - y0) as usize;
+            let luma_row = &mut luma[local * luma_stride..(local + 1) * luma_stride];
+            let mut alpha_row = alpha
+                .as_mut()
+                .map(|(a, stride)| &mut a[local * *stride..(local + 1) * *stride]);
+            for (x, px) in row.chunks_exact(self.bpp).enumerate() {
+                let rgb = if self.grey {
+                    let g = to16(self.read(px, self.order[0]));
+                    [g, g, g]
+                } else {
+                    [
+                        to16(self.read(px, self.order[0])),
+                        to16(self.read(px, self.order[1])),
+                        to16(self.read(px, self.order[2])),
+                    ]
+                };
+                let ycc = crate::compose::fill_to_ycbcr(rgb, depth, Some(self.colr));
+                self.put(luma_row, x, ycc[0]);
+                if chroma.is_some() {
+                    let cx = x >> sx;
+                    cb_acc[cx] += ycc[1] as u32;
+                    cr_acc[cx] += ycc[2] as u32;
+                    cnt[cx] += 1;
+                }
+                if let Some(a) = alpha_row.as_mut() {
+                    self.put(a, x, alpha_to(self.read(px, self.order[3])));
+                }
+            }
+            // The chroma row completes with the last luma row it covers.
+            let cy = y >> sy;
+            if let Some(((cb, stride), cr)) = chroma.as_mut()
+                && (y + 1 == y1 || ((y + 1) >> sy) != cy)
+            {
+                let local = (cy - (y0 >> sy)) as usize;
+                let cb_row = &mut cb[local * *stride..(local + 1) * *stride];
+                let cr_row = &mut cr[local * *stride..(local + 1) * *stride];
+                for cx in 0..self.chroma_width {
+                    let n = cnt[cx].max(1);
+                    self.put(cb_row, cx, ((cb_acc[cx] + n / 2) / n) as u16);
+                    self.put(cr_row, cx, ((cr_acc[cx] + n / 2) / n) as u16);
+                    cb_acc[cx] = 0;
+                    cr_acc[cx] = 0;
+                    cnt[cx] = 0;
+                }
+            }
+        }
+    }
+}
+
+/// [`packed_bytes_to_planar`] on up to `threads` workers: the picture
+/// is cut into bands of whole chroma row groups, one per worker, each
+/// converting its own rows of every output plane. A sample depends on
+/// its own chroma group only, so the planes are those of the serial
+/// conversion for every thread count.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn packed_bytes_to_planar_threads(
+    data: &[u8],
+    src_stride: usize,
+    width: u32,
+    height: u32,
+    bpp: usize,
+    order: [usize; 4],
+    wide: bool,
+    grey: bool,
+    colr: &Colr,
+    target: HeifPixelFormat,
+    threads: usize,
+) -> Result<HeifFrame> {
     let row_bytes = width as usize * bpp;
     if width == 0 || height == 0 {
         return Err(HeifError::invalid("zero-sized packed frame"));
@@ -3725,116 +3908,106 @@ pub(crate) fn packed_bytes_to_planar(
             "packed frame too small for {width}x{height}x{bpp}"
         )));
     }
-    let src = PackedRows {
+    let mut out = HeifFrame::zeroed(width, height, target)?;
+    let has_chroma = target.chroma != Chroma::Mono;
+    let (sx, sy) = target.chroma.shift();
+    let chroma_width = if has_chroma {
+        out.plane_dims(1).0 as usize
+    } else {
+        0
+    };
+    let kernel = PackedKernel {
         data,
         stride: src_stride,
+        row_bytes,
+        bpp,
+        order,
+        wide,
+        grey,
+        colr,
+        depth: target.bit_depth,
+        max: target.max_value() as u32,
+        bps: target.bytes_per_sample(),
+        shift: (sx, sy),
+        chroma_width,
     };
-    let depth = target.bit_depth;
-    let max = target.max_value() as u32;
-    let src_depth: u8 = if wide { 16 } else { 8 };
-    let mut out = HeifFrame::zeroed(width, height, target)?;
-    let alpha_plane = target.alpha_plane();
-    let read = |px: &[u8], ch: usize| -> u16 {
-        if wide {
-            u16::from_le_bytes([px[2 * ch], px[2 * ch + 1]])
+    // Bands of whole chroma row groups; small pictures stay serial.
+    let group = 1u32 << sy;
+    let workers = if (width as u64 * height as u64) < PACKED_PARALLEL_MIN_PIXELS {
+        1
+    } else {
+        threads.clamp(1, height.div_ceil(group) as usize)
+    };
+    let band_rows = height.div_ceil(workers as u32).div_ceil(group) * group;
+    // Split every plane at the band boundaries.
+    let alpha_index = target.alpha_plane();
+    let mut luma = None;
+    let mut cb = None;
+    let mut cr = None;
+    let mut alpha = None;
+    for (i, p) in out.planes.iter_mut().enumerate() {
+        let stride = p.stride;
+        let slot = if i == 0 {
+            &mut luma
+        } else if Some(i) == alpha_index {
+            &mut alpha
+        } else if i == 1 {
+            &mut cb
         } else {
-            px[ch] as u16
-        }
-    };
-    // 16-bit scale for the H.273 conversion.
-    let to16 = |v: u16| -> u16 { if wide { v } else { (v as u32 * 257) as u16 } };
-    // Alpha to the target depth (round to nearest; replicate upwards).
-    let alpha_to = |v: u16| -> u16 {
-        let v = v as u32;
-        if src_depth == depth {
-            v as u16
-        } else if src_depth > depth {
-            let s = src_depth - depth;
-            ((v + (1 << (s - 1))) >> s).min(max) as u16
-        } else {
-            let s = depth - src_depth;
-            ((v << s) | (v >> (src_depth - s))).min(max) as u16
-        }
-    };
-    let (sx, sy) = target.chroma.shift();
-    let chroma = target.chroma != Chroma::Mono;
-    let (cw, chh) = out.plane_dims(if chroma { 1 } else { 0 });
-    let bps = target.bytes_per_sample();
-    // One row of full-resolution Cb / Cr, accumulated per chroma row
-    // group (two luma rows at 4:2:0).
-    let mut cb_acc: Vec<u32> = vec![0; if chroma { cw as usize } else { 0 }];
-    let mut cr_acc: Vec<u32> = vec![0; cb_acc.len()];
-    let mut cnt: Vec<u32> = vec![0; cb_acc.len()];
-    let flush_chroma =
-        |out: &mut HeifFrame, cy: u32, cb_acc: &mut [u32], cr_acc: &mut [u32], cnt: &mut [u32]| {
-            for (cx, ((cb, cr), n)) in cb_acc
-                .iter_mut()
-                .zip(cr_acc.iter_mut())
-                .zip(cnt.iter_mut())
-                .enumerate()
-            {
-                let n0 = (*n).max(1);
-                out.set_sample(1, cx as u32, cy, ((*cb + n0 / 2) / n0) as u16);
-                out.set_sample(2, cx as u32, cy, ((*cr + n0 / 2) / n0) as u16);
-                *cb = 0;
-                *cr = 0;
-                *n = 0;
-            }
+            &mut cr
         };
-    let luma_stride = out.planes[0].stride;
-    for y in 0..height {
-        let row = &src.data[y as usize * src.stride..y as usize * src.stride + row_bytes];
-        let cy = y >> sy;
-        for (x, px) in row.chunks_exact(bpp).enumerate() {
-            let ycc = if grey {
-                let g = to16(read(px, order[0]));
-                crate::compose::fill_to_ycbcr([g, g, g], depth, Some(colr))
-            } else {
-                crate::compose::fill_to_ycbcr(
-                    [
-                        to16(read(px, order[0])),
-                        to16(read(px, order[1])),
-                        to16(read(px, order[2])),
-                    ],
-                    depth,
-                    Some(colr),
-                )
-            };
-            let off = y as usize * luma_stride + x * bps;
-            if bps == 1 {
-                out.planes[0].data[off] = ycc[0] as u8;
-            } else {
-                out.planes[0].data[off..off + 2].copy_from_slice(&ycc[0].to_le_bytes());
-            }
-            if chroma {
-                let cx = x >> sx;
-                cb_acc[cx] += ycc[1] as u32;
-                cr_acc[cx] += ycc[2] as u32;
-                cnt[cx] += 1;
-            }
-            if let Some(ap) = alpha_plane {
-                let a = alpha_to(read(px, order[3]));
-                let aoff = y as usize * out.planes[ap].stride + x * bps;
-                if bps == 1 {
-                    out.planes[ap].data[aoff] = a as u8;
-                } else {
-                    out.planes[ap].data[aoff..aoff + 2].copy_from_slice(&a.to_le_bytes());
-                }
-            }
+        *slot = Some((p.data.as_mut_slice(), stride));
+    }
+    let (mut luma, luma_stride) = luma.ok_or_else(|| HeifError::invalid("no luma plane"))?;
+    let mut bands = Vec::with_capacity(workers);
+    let mut y0 = 0u32;
+    while y0 < height {
+        let y1 = (y0 + band_rows).min(height);
+        /// The first `rows` rows of `plane`, which keeps the rest.
+        fn take<'p>(
+            plane: &mut Option<(&'p mut [u8], usize)>,
+            rows: u32,
+        ) -> Option<(&'p mut [u8], usize)> {
+            let (data, stride) = plane.take()?;
+            let (head, tail) = data.split_at_mut(rows as usize * stride);
+            *plane = Some((tail, stride));
+            Some((head, stride))
         }
-        // The chroma row completes with the last luma row it covers.
-        if chroma && (y + 1 == height || ((y + 1) >> sy) != cy) && cy < chh {
-            flush_chroma(&mut out, cy, &mut cb_acc, &mut cr_acc, &mut cnt);
+        let (head, tail) = luma.split_at_mut((y1 - y0) as usize * luma_stride);
+        luma = tail;
+        // Chroma rows this band completes.
+        let chroma_rows = y1.div_ceil(group) - y0 / group;
+        let chroma = match (take(&mut cb, chroma_rows), take(&mut cr, chroma_rows)) {
+            (Some(cb), Some((cr, _))) => Some((cb, cr)),
+            _ => None,
+        };
+        bands.push(PackedBand {
+            y0,
+            y1,
+            luma: (head, luma_stride),
+            chroma,
+            alpha: take(&mut alpha, y1 - y0),
+        });
+        y0 = y1;
+    }
+    if bands.len() <= 1 {
+        for band in bands {
+            kernel.run(band);
         }
+    } else {
+        std::thread::scope(|s| {
+            let kernel = &kernel;
+            for band in bands {
+                s.spawn(move || kernel.run(band));
+            }
+        });
     }
     Ok(out)
 }
 
-/// Borrowed packed rows for [`packed_bytes_to_planar`].
-struct PackedRows<'a> {
-    data: &'a [u8],
-    stride: usize,
-}
+/// Below this many pixels a packed conversion stays on the calling
+/// thread (a thread costs more than it converts).
+const PACKED_PARALLEL_MIN_PIXELS: u64 = 1 << 18;
 
 /// Typed options of the `"heif"` framework encoder (declared schema:
 /// `oxideav info heif` lists them; unknown keys are refused). The
@@ -4543,7 +4716,7 @@ impl Encoder for HeifEncoder {
                     )?;
                     (colr, with_metadata, target)
                 };
-                let hf = packed_to_planar_for(vf, w, h, pf, &colr, target)?;
+                let hf = packed_to_planar_threads(vf, w, h, pf, &colr, target, opts.workers())?;
                 encode_still_owned(hf, &opts)?
             }
         };
