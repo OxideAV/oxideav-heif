@@ -1834,6 +1834,30 @@ fn encode_picture_for(
     }
 }
 
+/// The size a sequence picture of `format` is padded to before it is
+/// handed to the codec, per axis `(width multiple, height multiple)`.
+///
+/// ISO/IEC 14496-12 §8.5.2 / ISO/IEC 14496-15 §4.5: the sample entry
+/// documents the *cropped* frame size — a codec that works in blocks
+/// "is expected to use codec-specific cropping structures, that are
+/// not exposed at the ISOBMFF level" — and a reader scales the decoded
+/// picture by `tkhd` size / sample-entry size when no `clap` is
+/// present (§8.3.2). So the block padding belongs to the codec (its
+/// conformance window), not to the track: HEVC and VVC pictures are
+/// only brought to the chroma grid their window is expressed in (an
+/// odd edge of a subsampled layout is the one thing left to `clap`),
+/// AV1 codes any extent as it is, and AVC — whose encoder writes no
+/// frame cropping — keeps the macroblock padding with a `clap`.
+fn sequence_alignment(format: HeifPixelFormat, opts: &EncodeOptions) -> (u32, u32) {
+    let (sx, sy) = format.chroma.shift();
+    match opts.codec {
+        StillCodec::Hevc => (1 << sx, 1 << sy),
+        StillCodec::Av1 => (1, 1),
+        StillCodec::Vvc => (VVC_ALIGNMENT, VVC_ALIGNMENT),
+        StillCodec::Avc => (16, 16),
+    }
+}
+
 fn alignment(opts: &EncodeOptions) -> u32 {
     match opts.codec {
         StillCodec::Hevc | StillCodec::Avc => 16,
@@ -2218,9 +2242,14 @@ pub const HEVC_FILTERS_DEFAULT: bool = true;
 /// Pad `frame` to the codec's block alignment, moving it when it is
 /// already aligned and tightly packed (no copy).
 fn pad_owned(frame: HeifFrame, a: u32) -> Result<HeifFrame> {
+    pad_owned_to(frame, (a, a))
+}
+
+/// [`pad_owned`] with its own multiple per axis.
+fn pad_owned_to(frame: HeifFrame, (aw, ah): (u32, u32)) -> Result<HeifFrame> {
     let (pw, ph) = (
-        align_up(frame.width, a).max(a),
-        align_up(frame.height, a).max(a),
+        align_up(frame.width, aw).max(aw),
+        align_up(frame.height, ah).max(ah),
     );
     let bps = frame.format.bytes_per_sample();
     let tight = frame
@@ -2430,7 +2459,8 @@ pub(crate) fn encode_sequence(
         let native_av1 = native_av1(&frame, &opts);
         let (colour, alpha) = coding_picture_owned(frame, &opts)?;
         let depth = colour.format.bit_depth;
-        let padded = pad_owned(colour, alignment(&opts))?;
+        let colour_format = colour.format;
+        let padded = pad_owned_to(colour, sequence_alignment(colour_format, &opts))?;
         let (pic, sync) = match avc_colour.as_mut() {
             Some(s) => s.encode(padded, &opts)?,
             None => (encode_picture_for(padded, &opts, &opts.colr, &[])?, true),
@@ -2483,7 +2513,8 @@ pub(crate) fn encode_sequence(
             } else {
                 &[]
             };
-            let padded = pad_owned(a_src, alignment(&opts))?;
+            let a_format = a_src.format;
+            let padded = pad_owned_to(a_src, sequence_alignment(a_format, &opts))?;
             let alpha_colr = Colr::Nclx {
                 primaries: 2,
                 transfer: 2,

@@ -2213,11 +2213,13 @@ pub struct SequenceWriter {
     pub entry_type: FourCc,
     /// Decoder configuration property (`HvcC` / `Av1C`) for the entry.
     pub config: Property,
-    /// Coded picture size (the sample entry's `width`; the `tkhd`
-    /// carries the presentation size, narrowed by an entry `clap` /
-    /// scaled by an entry `pasp`).
+    /// The sample entry's `width`: the *cropped* frame width of the
+    /// samples (ISO/IEC 14496-15 §4.5 — the size after the codec's own
+    /// conformance window, not a block-padded one). The `tkhd` carries
+    /// the presentation size: this size narrowed by an entry `clap` /
+    /// scaled by an entry `pasp`.
     pub width: u16,
-    /// Coded picture size (the sample entry's `height`).
+    /// The sample entry's `height` (see [`SequenceWriter::width`]).
     pub height: u16,
     /// Extra sample-entry children (`colr`, `clap`, `pasp`, …).
     pub entry_properties: Vec<Property>,
