@@ -724,9 +724,9 @@ fn packed_colour_format_enhancement_round_trips() {
                     &planes[p]
                 }
             };
-            for p in 0..fmt.plane_count() {
+            for (p, plane) in t.planes.iter().enumerate().take(fmt.plane_count()) {
                 assert_eq!(
-                    t.planes[p].data,
+                    plane.data,
                     source_of_plane(p).tight().planes[0].data,
                     "{}: plane {p} ({threads} threads)",
                     c.label
