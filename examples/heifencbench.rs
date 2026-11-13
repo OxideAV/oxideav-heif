@@ -3,11 +3,12 @@
 //! the README.
 //!
 //! ```text
-//! heifencbench [--raw FILE --size WxH --fmt rgb24|rgb48le|gray8]
+//! heifencbench [--raw FILE --size WxH --fmt rgb24|rgb48le|gray8|yuv420p]
 //!              [--synth WxH] [--codec hevc|av1] [--mode intra|pcm]
 //!              [--qp N] [--quality N] [--grid T] [--threads N|auto]
 //!              [--rd N] [--framework] [--out FILE] [--label TEXT]
 //!              [--alpha] [--tiling grid|tili] [--frames N]
+//!              [--in-flight PIXELS]
 //!              [--option KEY=VALUE ...]
 //! ```
 //!
@@ -18,7 +19,9 @@
 //!   a `grid`.
 //! * `--frames N`: an image sequence of `N` pictures (the picture
 //!   rolled down by 8 rows per frame) through the contract's
-//!   `encode_all` — one track sample each.
+//!   `encode_all` — one track sample each. `--in-flight PIXELS`
+//!   sets `EncodeOptions::sequence_pixels_in_flight` (the pictures the
+//!   workers hold at once, in pixels).
 //!
 //! * `--raw`: a packed picture dumped by a black-box tool (for example
 //!   `ffmpeg -i in.png -f rawvideo -pix_fmt rgb24 in.rgb`); `--synth`
@@ -180,6 +183,9 @@ fn main() {
                     _ => oxideav_heif::encode::TileCarrier::Grid,
                 }
             }
+            "--in-flight" => {
+                opts.sequence_pixels_in_flight = Some(next(&mut i).parse().expect("pixels"));
+            }
             "--out" => out = Some(next(&mut i)),
             "--label" => label = next(&mut i),
             "--option" => {
@@ -204,9 +210,17 @@ fn main() {
                 "rgb24" => (3, false),
                 "rgb48le" => (3, true),
                 "gray8" => (1, false),
+                // Planar 4:2:0 (the framework path only): 0 channels
+                // stands for "three planes".
+                "yuv420p" => (0, false),
                 other => panic!("fmt {other}"),
             };
-            let need = size.0 as usize * size.1 as usize * ch * if wide { 2 } else { 1 };
+            let need = if ch == 0 {
+                let (w, h) = (size.0 as usize, size.1 as usize);
+                w * h + 2 * w.div_ceil(2) * h.div_ceil(2)
+            } else {
+                size.0 as usize * size.1 as usize * ch * if wide { 2 } else { 1 }
+            };
             assert_eq!(bytes.len(), need, "raw size does not match --size / --fmt");
             (size.0, size.1, bytes, ch, wide)
         }
@@ -312,6 +326,7 @@ fn main() {
             (4, false) => oxideav_core::PixelFormat::Rgba,
             (3, false) => oxideav_core::PixelFormat::Rgb24,
             (3, true) => oxideav_core::PixelFormat::Rgb48Le,
+            (0, _) => oxideav_core::PixelFormat::Yuv420P,
             _ => oxideav_core::PixelFormat::Gray8,
         };
         let mut params = CodecParameters::video(CodecId::new("heif"));
@@ -347,12 +362,36 @@ fn main() {
         params.options = o;
         let mut enc = oxideav_heif::encode::make_encoder(&params).expect("encoder");
         let stride = w as usize * channels * if wide { 2 } else { 1 };
-        let frame = oxideav_core::VideoFrame {
-            pts: Some(0),
-            planes: vec![oxideav_core::VideoPlane {
+        let planes = if channels == 0 {
+            // Y, Cb, Cr as the three planes of the frame.
+            let (luma, cw) = (w as usize * h as usize, (w as usize).div_ceil(2));
+            let chroma = cw * (h as usize).div_ceil(2);
+            let mut rest = packed;
+            let mut cb = rest.split_off(luma);
+            let cr = cb.split_off(chroma);
+            vec![
+                oxideav_core::VideoPlane {
+                    stride: w as usize,
+                    data: rest,
+                },
+                oxideav_core::VideoPlane {
+                    stride: cw,
+                    data: cb,
+                },
+                oxideav_core::VideoPlane {
+                    stride: cw,
+                    data: cr,
+                },
+            ]
+        } else {
+            vec![oxideav_core::VideoPlane {
                 stride,
                 data: packed,
-            }],
+            }]
+        };
+        let frame = oxideav_core::VideoFrame {
+            pts: Some(0),
+            planes,
         };
         mark("input", &mut stages, &mut last);
         enc.send_frame(&Frame::Video(frame)).expect("send_frame");
@@ -361,6 +400,10 @@ fn main() {
         mark("send_frame", &mut stages, &mut last);
         pkt.data.to_vec()
     } else {
+        if channels == 0 {
+            eprintln!("--fmt yuv420p takes --framework");
+            std::process::exit(2);
+        }
         // Library path: packed → 4:2:0 (or grey) planar at the source
         // depth, the layout `encode_still` codes directly.
         let depth: u8 = if wide { 16 } else { 8 };

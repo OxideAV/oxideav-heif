@@ -1599,6 +1599,91 @@ cheaply clonable byte buffer — reference-counted bytes with a range —
 or a `Demuxer` hook returning borrowed payloads), after which the
 demuxer hands out its own buffer.
 
+## Memory on the decode side, the registry path and sequences (r488)
+
+Apple M4 Max, release build against the published codec crates, other
+builds running on the machine; times are medians (15 decodes, single
+encodes), peak RSS is a fresh process per row. The output digest /
+file bytes of every row are the same before and after, and the same
+at every thread budget.
+
+**A rotated grid is composed once.** The rotations and mirrors that
+lead a `grid` item's transformative chain belong to the canvas now
+(`GridCanvas::with_reorientation`): every tile is written straight to
+the place the chain gives it, so the unrotated picture never exists.
+The chain reduces to one of the eight orientations; it is folded
+whenever the composed picture goes through it without a change of
+layout (4:4:4 and monochrome always, 4:2:0 at even sizes) and applied
+one operation at a time otherwise — the same bytes either way, pinned
+for 157 chains × 8 layouts / tile sizes / trims in
+`compose::tests::oriented_grid_is_the_grid_then_the_chain`. Under a
+thread budget the workers turn their own tiles, so the collecting
+thread still only copies rows. An `irot` of angle 0 no longer copies
+the picture.
+
+| decode (`heifbench --no-encode --framework`) | before | after |
+|---|---|---|
+| 12 MP device still (3024×4032, 48-tile grid + `irot`), contract, 1 worker | 0.51 s / 49 MiB | 0.51 s / 32 MiB |
+| same, 8 workers | 0.095 s / 69 MiB | 0.090 s / 50 MiB |
+| same, registry `"heif"` decoder, 1 / 8 workers | 52 / 71 MiB | 34 / 53 MiB |
+| 8.5 MP device still (2566×3313, odd height → 4:4:4, `irot` 0), contract, 1 worker | 0.306 s / 60 MiB | 0.295 s / 35 MiB |
+| same, 8 workers | 0.054 s / 77 MiB | 0.051 s / 55 MiB |
+| same, registry decoder, 1 / 8 workers | 60 / 78 MiB | 35 / 54 MiB |
+
+Of the 32 MiB that remain for the 12 MP still, 18 are the picture
+itself and 2 the file; the rest is the tile in flight and its codec.
+
+**The registry path's own copies** (within the released core API):
+
+* the `"heif"` decoder kept the decoded image for
+  `HeifCodec::last_image` *and* copied its planes into the frame it
+  returned. The registry factory — whose callers hold a `dyn Decoder`
+  and cannot ask for that image — now builds the decoder with
+  `with_last_image(false)`: the planes move into the frame (the rows
+  above; before the grid change the copy hid under the rotation peak);
+* the `"heif"` encoder copied every frame it was sent: a packed RGB
+  frame once (to learn its layout — the conversion then read the
+  frame's own rows anyway), a planar frame once more than the contract
+  path. Packed frames are converted from the frame's rows alone, and a
+  planar YCbCr frame already in its coding layout is cut into tiles
+  where it lies (`PlanesRef::from_parts` over the frame's planes).
+
+| 12 MP still through the registry encoder (`heifencbench --framework`) | before | after |
+|---|---|---|
+| packed RGB, 1 / 8 workers | 4.47 s / 109 MiB, 0.74 s / 157 MiB | 4.65 s / 74 MiB, 0.77 s / 122 MiB |
+| planar 4:2:0 (`--fmt yuv420p`), 1 / 8 workers | 4.56 s / 85 MiB, 0.71 s / 123 MiB | 4.67 s / 50 MiB, 0.69 s / 96 MiB |
+
+What is left on that path is the still packet on the decode side —
+`Packet::data` is an owned `Vec<u8>`, so a still packet is a copy of
+the file, *n* copies for a burst of *n* items — which needs a shared
+packet payload in oxideav-core (the r487 ask stands).
+
+**Sequences: the pictures in flight are bounded by pixels, not by the
+budget.** Each worker of `encode_all` holds one picture of codec
+state — about 50 MiB for a 1080p HEVC picture, the codec's — so the
+resident set rose with the worker count (the r487 table: 195 → 514
+MiB). `EncodeOptions::sequence_pixels_in_flight`
+(`with_sequence_pixels_in_flight`) bounds the pixels the workers hold
+at once; the default, `SEQUENCE_PIXELS_IN_FLIGHT`, went from 2²⁴ to
+2²² — two 1080p pictures, four 720p ones, one picture above 4 MP — so
+a sequence encode stays near its serial resident set whatever the
+budget, and a caller with memory to spend asks for more. The file is
+the same for every bound (`tests/encode_budget.rs`).
+
+| 16 × 1920×1080 HEVC (`heifencbench --frames 16`; the 16 source frames are 95 MiB of every row) | before | after (default) | after, `--in-flight` 2²³ / 2²⁴ |
+|---|---|---|---|
+| 1 worker | 9.9 s / 177 MiB | 11.2 s / 181 MiB | — |
+| 2 workers | 6.19 s / 232 MiB | 6.20 s / 228 MiB | — |
+| 4 workers | 3.10 s / 331 MiB | 6.08 s / 222 MiB | — |
+| 8 workers | 1.90 s / 503 MiB | 6.55 s / 229 MiB | 3.60 s / 330 MiB, 2.15 s / 521 MiB |
+| 8 × 1280×720 HEVC + alpha track, 8 workers | 0.70 s / 236 MiB | 1.24 s / 156 MiB | 0.69 s / 247 MiB (2²⁴) |
+
+The bound trades wall time for memory one for one, because the HEVC
+coder these pictures take neither shrinks its per-picture state nor
+spends the idle part of the budget inside a picture (it ignores its
+`ExecutionContext`): both are asks on oxideav-h265, and the default
+moves back up when either lands.
+
 ## Container scaling and the 12 MP transform pass (r486)
 
 `examples/heifscale` (`cargo run --release --example heifscale --

@@ -11,6 +11,10 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **A rotated grid is composed once** (round 488): the `irot` / `imir` entries that lead a `grid` item's transformative chain are folded into the canvas (`compose::GridCanvas::with_reorientation`, `Reorient`, `TileTurner`, `CanvasTile`, `GridCanvas::place_tile` / `finish_threads`, all `#[doc(hidden)]`) — tiles go straight to their oriented places, turned by the decode workers under a budget; 4:4:4 / monochrome always, 4:2:0 at even sizes, the chain applied step by step otherwise. An `irot` of angle 0 no longer copies the picture. Same bytes; 12 MP device still 49 → 32 MiB (1 worker), 69 → 50 MiB (8), the 8.5 MP one 60 → 35 MiB.
+- **The registry path stops copying pictures** (round 488): the factory-made `"heif"` decoder moves the decoded planes into its frame (`HeifCodec::with_last_image(false)`; a decoder built by hand keeps `last_image` as before) — 52 → 34 MiB for the 12 MP still; the `"heif"` encoder converts a packed frame from the frame's own rows without copying it first and cuts a planar frame already in its coding layout into tiles in place — 109 → 74 MiB (packed RGB) and 85 → 50 MiB (planar 4:2:0) for a 12 MP still at 1 worker, same bytes.
+- **Sequence pictures in flight are bounded by `EncodeOptions::sequence_pixels_in_flight`** (round 488; `with_sequence_pixels_in_flight`), default `SEQUENCE_PIXELS_IN_FLIGHT` 2²⁴ → 2²² (two 1080p pictures): 16 × 1080p HEVC on 8 workers 503 → 229 MiB (serial: 181) at 1.90 → 6.55 s; `Some(1 << 24)` gives the former trade back. The bytes do not depend on the bound.
+- `heifencbench --fmt yuv420p` (a planar frame through the registry encoder) and `--in-flight PIXELS`.
 - **oxideav-h265 floor 0.0.18.** Its VPS reader takes a VPS whose RBSP ends before `vps_extension_flag`: the base item of `iff_hevc_tile_multiple_items_tbas` decodes. Decode matrix: 152 files = 137 whole + 13 with keys + 2 in part, none refused (r486: 136 / 13 / 2 / 1).
 
 ## [0.0.15](https://github.com/OxideAV/oxideav-heif/compare/v0.0.14...v0.0.15) - 2026-11-11

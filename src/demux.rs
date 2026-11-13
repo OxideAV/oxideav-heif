@@ -1416,6 +1416,21 @@ impl oxideav_core::CodecOptionsStruct for HeifDecoderOptions {
     }
 }
 
+/// The picture of `f`, leaving an empty frame of the same layout
+/// behind.
+fn take_planes(f: &mut crate::HeifFrame) -> crate::HeifFrame {
+    let format = f.format;
+    std::mem::replace(
+        f,
+        crate::HeifFrame {
+            width: 0,
+            height: 0,
+            format,
+            planes: Vec::new(),
+        },
+    )
+}
+
 /// The `"heif"` still-image decoder: one packet = one file, one frame
 /// = the primary item's output image.
 pub struct HeifCodec {
@@ -1432,6 +1447,10 @@ pub struct HeifCodec {
     /// The contract options (limits, strictness, tone mapping) this
     /// decoder runs with.
     opts: crate::api::DecodeOptions,
+    /// Keep the decoded image for [`HeifCodec::last_image`]. Without
+    /// it the decoded planes are handed to the frame as they are — no
+    /// second copy of the picture is held.
+    keep_last: bool,
 }
 
 impl HeifCodec {
@@ -1445,7 +1464,19 @@ impl HeifCodec {
             last: None,
             exec: oxideav_core::ExecutionContext::serial(),
             opts: crate::api::DecodeOptions::default(),
+            keep_last: true,
         }
+    }
+
+    /// Whether the decoded image stays available through
+    /// [`HeifCodec::last_image`] (the default). Turned off — as the
+    /// registry factory does, whose callers hold a `dyn Decoder` and
+    /// cannot ask for it — the decoded planes move into the frame
+    /// instead of being copied for it, so the decoder never holds two
+    /// copies of a picture.
+    pub fn with_last_image(mut self, keep: bool) -> Self {
+        self.keep_last = keep;
+        self
     }
 
     /// Run with these contract options (limits, strictness, item,
@@ -1483,7 +1514,14 @@ impl Decoder for HeifCodec {
         // The contract path: one implementation (limits, strictness and
         // the thread budget through DecodeOptions).
         let opts = self.decode_options();
-        let img = crate::api_registry::decode_file_item(&file, &opts)?;
+        let mut img = crate::api_registry::decode_file_item(&file, &opts)?;
+        // The picture a frame is made of: a copy while the decoded
+        // image is kept for `last_image`, the planes themselves
+        // otherwise.
+        let keep = self.keep_last;
+        let planes_of = move |f: &mut crate::HeifFrame| {
+            if keep { f.clone() } else { take_planes(f) }
+        };
         // The colour information rides on the frame (H.273 code points +
         // range; identity-matrix items as planar RGB), the way
         // HeifImage::into_video_frame labels it.
@@ -1504,9 +1542,9 @@ impl Decoder for HeifCodec {
         // `Frame::StreamParams` event (files / items of different shapes
         // decoded in turn, layers of different sizes).
         let signal_frame =
-            |f: &crate::HeifFrame, nclx: &crate::props::Colr, metadata: crate::api::Metadata| {
+            |f: crate::HeifFrame, nclx: &crate::props::Colr, metadata: crate::api::Metadata| {
                 let image = crate::api::HeifImage::from_frame(
-                    f.clone(),
+                    f,
                     crate::api::ColorInfo::from_colr(nclx),
                     metadata,
                 );
@@ -1526,8 +1564,10 @@ impl Decoder for HeifCodec {
         let mut out = Vec::new();
         if !img.layers.is_empty() {
             // A layered item without lsel: every output layer, tagged.
-            for l in &img.layers {
-                let (vf, shape) = signal_frame(&l.frame, &img.nclx, metadata_of(&img))?;
+            let metadata = metadata_of(&img);
+            for l in &mut img.layers {
+                let (vf, shape) =
+                    signal_frame(planes_of(&mut l.frame), &img.nclx, metadata.clone())?;
                 let vf = vf.with_layer(oxideav_core::LayerIdentity::new(l.layer_id as u16));
                 out.push((vf, shape));
             }
@@ -1535,28 +1575,40 @@ impl Decoder for HeifCodec {
             // HEIF §6.8.5 'ster': the primary is one view of a stereo
             // pair — both views out, tagged view 0 (left) / 1 (right).
             let other = if img.item_id == left { right } else { left };
-            let partner = crate::api_registry::decode_file_item(
+            let mut partner = crate::api_registry::decode_file_item(
                 &file,
                 &opts.clone().with_item_id(Some(other)),
             )?;
             let (first, second) = if img.item_id == left {
-                (&img, &partner)
+                (&mut img, &mut partner)
             } else {
-                (&partner, &img)
+                (&mut partner, &mut img)
             };
             for (view, image) in [(0u16, first), (1u16, second)] {
                 let layer = view_layer_id(&file, image.item_id).unwrap_or(view);
-                let (vf, shape) = signal_frame(&image.frame, &image.nclx, metadata_of(image))?;
+                let metadata = metadata_of(image);
+                // The partner view is this call's own: its planes move.
+                let planes = if image.item_id == other {
+                    take_planes(&mut image.frame)
+                } else {
+                    planes_of(&mut image.frame)
+                };
+                let (vf, shape) = signal_frame(planes, &image.nclx, metadata)?;
                 let vf = vf.with_layer(oxideav_core::LayerIdentity::new(layer).with_view_id(view));
                 out.push((vf, shape));
             }
         } else {
-            out.push(signal_frame(&img.frame, &img.nclx, metadata_of(&img))?);
+            let metadata = metadata_of(&img);
+            out.push(signal_frame(
+                planes_of(&mut img.frame),
+                &img.nclx,
+                metadata,
+            )?);
         }
         for (vf, shape) in out {
             self.queue.push(vf, shape);
         }
-        self.last = Some(img);
+        self.last = keep.then_some(img);
         Ok(())
     }
 
@@ -1620,7 +1672,9 @@ impl Decoder for HeifCodec {
 pub fn make_decoder(params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
     let typed = oxideav_core::parse_options::<HeifDecoderOptions>(&params.options)?;
     Ok(Box::new(
-        HeifCodec::new(params.codec_id.clone()).with_decode_options(typed.to_decode_options()),
+        HeifCodec::new(params.codec_id.clone())
+            .with_decode_options(typed.to_decode_options())
+            .with_last_image(false),
     ))
 }
 

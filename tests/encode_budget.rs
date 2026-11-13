@@ -745,9 +745,10 @@ fn tiles_cut_from_borrowed_planes_give_the_same_file() {
 }
 
 /// An image sequence is coded picture by picture on the thread budget
-/// (round 487): the file is the serial one for every budget — HEVC and
-/// AV1, with an alpha track, packed and planar sources — and frames of
-/// another geometry are still refused.
+/// (round 487): the file is the serial one for every budget and every
+/// bound on the pictures in flight — HEVC and AV1, with an alpha
+/// track, packed and planar sources — and frames of another geometry
+/// are still refused.
 #[test]
 fn sequence_frames_in_parallel_are_byte_identical_to_serial() {
     use std::time::Duration;
@@ -788,6 +789,19 @@ fn sequence_frames_in_parallel_are_byte_identical_to_serial() {
                 oxideav_heif::encode_all(&seq, &opts(threads)).unwrap(),
                 serial,
                 "{codec:?} {mode} alpha {alpha}: {threads} threads"
+            );
+        }
+        // The bound on the pictures in flight (one, three, every
+        // worker's) changes how many are coded at once, not a byte.
+        for bound in [1u64, 3 * 100 * 72, u64::MAX] {
+            assert_eq!(
+                oxideav_heif::encode_all(
+                    &seq,
+                    &opts(8).with_sequence_pixels_in_flight(Some(bound))
+                )
+                .unwrap(),
+                serial,
+                "{codec:?} {mode} alpha {alpha}: {bound} pixels in flight"
             );
         }
         // The samples come back in order with their own durations.

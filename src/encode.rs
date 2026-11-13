@@ -213,6 +213,15 @@ pub struct EncodeOptions {
     /// layout is a function of the picture size alone — see
     /// [`AV1_TILE_LAYOUT_THREADS`]).
     pub threads: Option<usize>,
+    /// The pixels an image sequence keeps in flight across its workers
+    /// (`encode_all`): each worker holds one picture of codec state —
+    /// some tens of bytes per pixel — so this bounds how far the
+    /// resident set of a sequence encode grows with the thread budget.
+    /// `None` = [`SEQUENCE_PIXELS_IN_FLIGHT`] (two 1080p pictures: the
+    /// resident set stays near the serial one); a larger value trades
+    /// memory for wall time, up to one picture per worker. One picture
+    /// is always in flight. The bytes do not depend on it.
+    pub sequence_pixels_in_flight: Option<u64>,
     /// HEVC coded bit depth (8 / 10 / 12). `None` follows the source
     /// ([`coded_depth`]): 8-bit sources code at 8 bits (the historical
     /// coder, or the quadtree coder when `rd` / `tiles` / `ctb` ask
@@ -322,6 +331,7 @@ impl EncodeOptions {
             depth_map,
             transform_carrier,
             tile_carrier: TileCarrier::Grid,
+            sequence_pixels_in_flight: None,
         }
     }
 
@@ -459,6 +469,12 @@ impl EncodeOptions {
     /// Set `threads`.
     pub fn with_threads(mut self, threads: Option<usize>) -> Self {
         self.threads = threads;
+        self
+    }
+
+    /// Set `sequence_pixels_in_flight`.
+    pub fn with_sequence_pixels_in_flight(mut self, pixels: Option<u64>) -> Self {
+        self.sequence_pixels_in_flight = pixels;
         self
     }
 
@@ -621,6 +637,7 @@ impl Default for EncodeOptions {
             hevc_ctb: None,
             gain_map: None,
             threads: None,
+            sequence_pixels_in_flight: None,
             hevc_depth: None,
             hevc_filters: None,
             hevc_options: Vec::new(),
@@ -2484,13 +2501,15 @@ pub(crate) struct SequenceInput {
     pub(crate) duration_ms: u32,
 }
 
-/// The pixels [`encode_sequence`] keeps in flight across its workers
-/// (2²⁴: eight 1080p pictures, two 4K ones, one 12 MP one): each
-/// worker holds one picture of codec state, some tens of bytes per
-/// pixel, so the bound keeps the resident set of a parallel sequence
-/// encode within a few hundred MiB whatever the thread budget. The
-/// bytes do not depend on it.
-pub const SEQUENCE_PIXELS_IN_FLIGHT: u64 = 1 << 24;
+/// The pixels an image sequence keeps in flight across its workers
+/// unless [`EncodeOptions::sequence_pixels_in_flight`] says otherwise
+/// (2²²: two 1080p pictures, four 720p ones, one picture above 4 MP).
+/// Each worker holds one picture of codec state, some tens of bytes
+/// per pixel (about 50 MiB for a 1080p HEVC picture), so the bound —
+/// not the thread budget — decides how far the resident set of a
+/// parallel sequence encode rises above the serial one. The bytes do
+/// not depend on it.
+pub const SEQUENCE_PIXELS_IN_FLIGHT: u64 = 1 << 22;
 
 /// One coded sample of [`encode_sequence`] with its time-parallel
 /// alpha sample: what a frame job hands back to the writer.
@@ -2802,7 +2821,13 @@ pub(crate) fn encode_sequence(
         // of large pictures does not multiply the codec's whole-picture
         // working set by the worker count.
         let pixels = (first_input.frame.width as u64 * first_input.frame.height as u64).max(1);
-        let by_memory = (SEQUENCE_PIXELS_IN_FLIGHT / pixels).max(1) as usize;
+        let in_flight = first_input
+            .opts
+            .sequence_pixels_in_flight
+            .unwrap_or(SEQUENCE_PIXELS_IN_FLIGHT);
+        let by_memory = usize::try_from(in_flight / pixels)
+            .unwrap_or(usize::MAX)
+            .max(1);
         let workers = oxideav_core::ExecutionContext::with_threads(threads.min(by_memory))
             .effective_workers(count);
         let inner = (threads / workers.max(1)).max(1);
@@ -2874,7 +2899,9 @@ pub struct PlanesRef<'a> {
     width: u32,
     height: u32,
     format: HeifPixelFormat,
-    planes: &'a [crate::image::Plane],
+    /// `(stride, bytes)` of each plane the layout has (a planar
+    /// layout holds at most four: three colour planes and alpha).
+    planes: [Option<(usize, &'a [u8])>; 4],
 }
 
 impl<'a> PlanesRef<'a> {
@@ -2886,12 +2913,52 @@ impl<'a> PlanesRef<'a> {
         format: HeifPixelFormat,
         planes: &'a [crate::image::Plane],
     ) -> Self {
+        Self::from_parts(
+            width,
+            height,
+            format,
+            planes.iter().map(|p| (p.stride, p.data.as_slice())),
+        )
+    }
+
+    /// A view over planes given as `(stride, bytes)` pairs — a
+    /// framework frame's, whose plane type is not this crate's.
+    pub fn from_parts(
+        width: u32,
+        height: u32,
+        format: HeifPixelFormat,
+        parts: impl IntoIterator<Item = (usize, &'a [u8])>,
+    ) -> Self {
+        let mut planes = [None; 4];
+        for (slot, part) in planes.iter_mut().zip(parts) {
+            *slot = Some(part);
+        }
         Self {
             width,
             height,
             format,
             planes,
         }
+    }
+
+    /// Plane `p` as `(stride, bytes)`.
+    fn plane(&self, p: usize) -> Option<(usize, &'a [u8])> {
+        self.planes.get(p).copied().flatten()
+    }
+
+    /// Whether every plane of the layout is there and holds what the
+    /// geometry says.
+    pub fn is_whole(&self) -> bool {
+        let bps = self.format.bytes_per_sample();
+        self.width > 0
+            && self.height > 0
+            && (0..self.format.plane_count()).all(|p| {
+                let (pw, ph) = self.format.plane_dims(p, self.width, self.height);
+                let row = pw as usize * bps;
+                self.plane(p).is_some_and(|(stride, data)| {
+                    stride >= row && data.len() >= (ph as usize - 1) * stride + row
+                })
+            })
     }
 
     /// The planes of `frame`.
@@ -2915,7 +2982,13 @@ impl<'a> PlanesRef<'a> {
                 bit_depth: self.format.bit_depth,
                 has_alpha: false,
             },
-            planes: vec![self.planes.get(i)?.clone()],
+            planes: vec![{
+                let (stride, data) = self.plane(i)?;
+                crate::image::Plane {
+                    stride,
+                    data: data.to_vec(),
+                }
+            }],
         })
     }
 }
@@ -2939,15 +3012,14 @@ fn tile_from(f: PlanesRef<'_>, x: u32, y: u32, tile: u32) -> Result<HeifFrame> {
         let (pw, ph) = out.plane_dims(p);
         let (x0, y0) = (x >> sx, y >> sy);
         let run = (spw.saturating_sub(x0)).min(pw) as usize;
-        let src = f
-            .planes
-            .get(p)
+        let (src_stride, src) = f
+            .plane(p)
             .ok_or_else(|| HeifError::invalid("picture with fewer planes than its layout"))?;
         let dst_stride = out.planes[p].stride;
         let dst = &mut out.planes[p].data;
         for row in 0..ph {
             let sy_ = (y0 + row).min(sph - 1) as usize;
-            let s = &src.data[sy_ * src.stride + x0 as usize * bps..];
+            let s = &src[sy_ * src_stride + x0 as usize * bps..];
             let d = &mut dst[row as usize * dst_stride..(row as usize + 1) * dst_stride];
             if run > 0 {
                 d[..run * bps].copy_from_slice(&s[..run * bps]);
@@ -3405,15 +3477,18 @@ fn encode_still_planes(
             // A single item moves its picture into the codec.
             let colour = match colour {
                 ColourSource::Owned(f) => f,
-                ColourSource::Borrowed(v) => {
-                    let planes = cfmt.plane_count().min(v.planes.len());
-                    HeifFrame {
-                        width: v.width,
-                        height: v.height,
-                        format: cfmt,
-                        planes: v.planes[..planes].to_vec(),
-                    }
-                }
+                ColourSource::Borrowed(v) => HeifFrame {
+                    width: v.width,
+                    height: v.height,
+                    format: cfmt,
+                    planes: (0..cfmt.plane_count())
+                        .filter_map(|p| v.plane(p))
+                        .map(|(stride, data)| crate::image::Plane {
+                            stride,
+                            data: data.to_vec(),
+                        })
+                        .collect(),
+                },
             };
             let thumb = thumbnail_source(&colour, opts)?;
             (add_picture_item(w, colour, opts, Vec::new())?, thumb)
@@ -5074,17 +5149,47 @@ impl Encoder for HeifEncoder {
         let bytes = match crate::api::PixelFormat::try_from(pf) {
             // Planar YCbCr / grey / GBR and packed RGB(A): the contract
             // path, one implementation.
-            Ok(_) => {
-                let image = crate::api::HeifImage::from_video_frame_parts(vf, w, h, pf)?
-                    .with_color(color)
-                    .with_metadata(metadata.clone());
-                if image.format.is_packed() {
+            Ok(format) => {
+                let planes = vf.image_planes();
+                let need = format.plane_count();
+                if planes.len() < need {
+                    return Err(CoreError::invalid(format!(
+                        "heif: framework frame has {} planes, {pf:?} needs {need}",
+                        planes.len()
+                    )));
+                }
+                // A planar YCbCr / grey frame already in its coding
+                // layout that is coded as tiles: the tiles are cut
+                // from the frame's own planes.
+                let in_place = match crate::image::HeifPixelFormat::try_from(format) {
+                    Ok(layout) if !format.is_packed() && !format.is_planar_rgb() => {
+                        let view = PlanesRef::from_parts(
+                            w,
+                            h,
+                            layout,
+                            planes.iter().map(|p| (p.stride, p.data.as_slice())),
+                        );
+                        if view.is_whole() {
+                            let colr =
+                                crate::api_registry::effective_colr(&color, format, &self.opts);
+                            let opts =
+                                crate::api_registry::effective_options(&metadata, colr, &self.opts);
+                            encode_still_in_place(view, &opts)?
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(bytes) = in_place {
+                    bytes
+                } else if format.is_packed() {
                     // Borrowed rows straight into the coding layout.
-                    let plane = &vf.image_planes()[0];
+                    let plane = &planes[0];
                     crate::api_registry::encode_packed_bytes(
                         w,
                         h,
-                        image.format,
+                        format,
                         plane.stride,
                         &plane.data,
                         &color,
@@ -5092,6 +5197,9 @@ impl Encoder for HeifEncoder {
                         &self.opts,
                     )?
                 } else {
+                    let image = crate::api::HeifImage::from_video_frame_parts(vf, w, h, pf)?
+                        .with_color(color)
+                        .with_metadata(metadata.clone());
                     crate::api_registry::encode_owned(image, &self.opts)?
                 }
             }
