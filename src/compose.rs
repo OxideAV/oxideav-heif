@@ -406,6 +406,8 @@ pub fn apply_transforms_owned_threads<'a>(
         }
         cur = match &e.property {
             Property::Clap(c) => apply_clap(&cur, c)?,
+            // No turn: the picture as it is, not a copy of it.
+            Property::Irot(r) if r.angle & 3 == 0 => continue,
             Property::Irot(r) => apply_irot_threads(&cur, r, threads)?,
             Property::Imir(m) => apply_imir(&cur, m)?,
             Property::Iscl(s) => apply_iscl(&cur, s)?,
@@ -584,6 +586,252 @@ pub fn attach_alpha(master: &HeifFrame, alpha: &HeifFrame) -> Result<HeifFrame> 
     master.with_alpha_plane(&depth)
 }
 
+/// One rotation or mirror of a transformative chain (`irot` / `imir`),
+/// as [`GridCanvas::with_reorientation`] takes the leading ones of a
+/// grid item's chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum Reorient {
+    /// `irot`: `angle × 90°` anti-clockwise (§6.5.10).
+    Rotate(u8),
+    /// `imir`: axis 0 exchanges top and bottom, axis 1 left and right
+    /// (§6.5.12).
+    Mirror(u8),
+}
+
+impl Reorient {
+    /// The operation of a transformative property, when it is a
+    /// rotation or a mirror.
+    pub fn of(property: &Property) -> Option<Self> {
+        match property {
+            Property::Irot(r) => Some(Self::Rotate(r.angle & 3)),
+            Property::Imir(m) => Some(Self::Mirror(m.axis & 1)),
+            _ => None,
+        }
+    }
+}
+
+/// A chain of quarter turns and mirrors as one sample permutation:
+/// `turns` anti-clockwise quarter turns, then (when `mirror`) an
+/// exchange of left and right. Every chain of `irot` / `imir` reduces
+/// to one of these eight.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Orientation {
+    turns: u8,
+    mirror: bool,
+}
+
+impl Orientation {
+    fn of(ops: &[Reorient]) -> Self {
+        ops.iter().fold(Self::default(), |o, op| o.then(*op))
+    }
+
+    /// This orientation followed by `op`. With `R` a quarter turn and
+    /// `M` the left-right mirror: a turn after `M` is `M` after the
+    /// opposite turn, and the top-bottom mirror is `M` after a half
+    /// turn.
+    fn then(self, op: Reorient) -> Self {
+        match op {
+            Reorient::Rotate(a) => Self {
+                turns: if self.mirror {
+                    (self.turns + 4 - (a & 3)) & 3
+                } else {
+                    (self.turns + a) & 3
+                },
+                mirror: self.mirror,
+            },
+            Reorient::Mirror(axis) if axis & 1 == 1 => Self {
+                turns: self.turns,
+                mirror: !self.mirror,
+            },
+            Reorient::Mirror(_) => Self {
+                turns: (self.turns + 2) & 3,
+                mirror: !self.mirror,
+            },
+        }
+    }
+
+    fn is_identity(self) -> bool {
+        self.turns == 0 && !self.mirror
+    }
+
+    fn swaps_axes(self) -> bool {
+        self.turns & 1 == 1
+    }
+
+    /// Where sample `(x, y)` of a `pw × ph` plane lands (§6.5.10's
+    /// mapping for the turns, then the mirror).
+    fn map(self, (pw, ph): (usize, usize), (x, y): (usize, usize)) -> (usize, usize) {
+        let (nx, ny, rw) = match self.turns {
+            0 => (x, y, pw),
+            1 => (y, pw - 1 - x, ph),
+            2 => (pw - 1 - x, ph - 1 - y, pw),
+            _ => (ph - 1 - y, x, ph),
+        };
+        (if self.mirror { rw - 1 - nx } else { nx }, ny)
+    }
+
+    /// Whether a picture of this layout and size goes through the
+    /// chain without the implicit 4:4:4 promotion a rotation of a
+    /// subsampled picture with an odd extent (or of a layout
+    /// subsampled on one axis) brings: only then is the oriented
+    /// picture a permutation of each plane on its own.
+    fn keeps_layout(chroma: Chroma, width: u32, height: u32) -> bool {
+        match chroma.shift() {
+            (0, 0) => true,
+            (1, 1) => width.is_multiple_of(2) && height.is_multiple_of(2),
+            _ => false,
+        }
+    }
+
+    /// Write the `w × h` samples of `src` (rows of `sstride` bytes)
+    /// that sit at `(cx0, cy0)` of a `pw × ph` plane to their places
+    /// in that plane's oriented counterpart `dst` (rows of `dstride`
+    /// bytes).
+    #[allow(clippy::too_many_arguments)]
+    fn blit(
+        self,
+        dst: &mut [u8],
+        dstride: usize,
+        (pw, ph): (usize, usize),
+        (cx0, cy0): (usize, usize),
+        src: &[u8],
+        sstride: usize,
+        (w, h): (usize, usize),
+        bps: usize,
+    ) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        // The region's oriented rectangle starts at the smaller of its
+        // two mapped corners.
+        let a = self.map((pw, ph), (cx0, cy0));
+        let b = self.map((pw, ph), (cx0 + w - 1, cy0 + h - 1));
+        let (dx0, dy0) = (a.0.min(b.0), a.1.min(b.1));
+        if !self.swaps_axes() {
+            // Source rows stay rows: in order or bottom-up, each
+            // forwards or reversed.
+            let rows_down = a.1 <= b.1;
+            let forwards = a.0 <= b.0;
+            for j in 0..h {
+                let srow = &src[j * sstride..][..w * bps];
+                let ny = if rows_down { dy0 + j } else { dy0 + h - 1 - j };
+                let drow = &mut dst[ny * dstride + dx0 * bps..][..w * bps];
+                if forwards {
+                    drow.copy_from_slice(srow);
+                } else if bps == 1 {
+                    drow.copy_from_slice(srow);
+                    drow.reverse();
+                } else {
+                    for (d, s) in drow.chunks_exact_mut(bps).zip(srow.chunks_exact(bps).rev()) {
+                        d.copy_from_slice(s);
+                    }
+                }
+            }
+            return;
+        }
+        // Source rows become columns: source column `i` is the output
+        // row `dy0 + i` (or the mirror of it), read top to bottom or
+        // bottom to top. A band of adjacent source columns is written
+        // per pass, so each source row is read in memory order and the
+        // writes go to as many row streams.
+        let cols_down = a.1 <= b.1;
+        let rows_right = a.0 <= b.0;
+        for i0 in (0..w).step_by(ROTATE_BAND_ROWS) {
+            let n = ROTATE_BAND_ROWS.min(w - i0);
+            for t in 0..h {
+                let j = if rows_right { t } else { h - 1 - t };
+                let srow = &src[j * sstride + i0 * bps..][..n * bps];
+                for (k, sample) in srow.chunks_exact(bps).enumerate() {
+                    let i = i0 + k;
+                    let ny = if cols_down { dy0 + i } else { dy0 + w - 1 - i };
+                    let at = ny * dstride + (dx0 + t) * bps;
+                    dst[at..at + bps].copy_from_slice(sample);
+                }
+            }
+        }
+    }
+}
+
+/// A grid tile turned to the orientation of its canvas ahead of its
+/// placement ([`TileTurner::turn`]): every plane of the tile permuted
+/// as the canvas is, so that placing it is a copy of rows.
+#[derive(Debug)]
+#[doc(hidden)]
+pub struct TurnedTile {
+    /// Size and layout of the tile as decoded.
+    width: u32,
+    height: u32,
+    format: HeifPixelFormat,
+    /// The oriented planes, tight.
+    planes: Vec<Vec<u8>>,
+}
+
+/// A decoded tile on its way into a [`GridCanvas`].
+#[derive(Debug)]
+#[doc(hidden)]
+pub enum CanvasTile {
+    /// As decoded.
+    Plain(HeifFrame),
+    /// Turned to the canvas orientation.
+    Turned(TurnedTile),
+}
+
+/// Turns tiles for an oriented [`GridCanvas`] away from the thread
+/// that owns the canvas ([`GridCanvas::turner`]).
+#[derive(Clone, Copy, Debug)]
+#[doc(hidden)]
+pub struct TileTurner {
+    desc: GridDescriptor,
+    orientation: Orientation,
+}
+
+impl TileTurner {
+    /// The tile turned to the canvas orientation when the canvas takes
+    /// its tiles that way (see [`GridCanvas::with_reorientation`]), the
+    /// tile itself otherwise.
+    pub fn turn(&self, tile: HeifFrame) -> CanvasTile {
+        if !GridCanvas::orients(&self.desc, self.orientation, &tile) {
+            return CanvasTile::Plain(tile);
+        }
+        let bps = tile.format.bytes_per_sample();
+        let mut planes = Vec::with_capacity(tile.planes.len());
+        for (p, plane) in tile.planes.iter().enumerate() {
+            let (pw, ph) = tile.plane_dims(p);
+            let (pw, ph) = (pw as usize, ph as usize);
+            if plane.stride < pw * bps
+                || plane.data.len() < (ph.max(1) - 1) * plane.stride + pw * bps
+            {
+                // Not what its geometry says: placed (and refused) as it is.
+                return CanvasTile::Plain(tile);
+            }
+            let ow = if self.orientation.swaps_axes() {
+                ph
+            } else {
+                pw
+            };
+            let mut out = vec![0u8; pw * ph * bps];
+            self.orientation.blit(
+                &mut out,
+                ow * bps,
+                (pw, ph),
+                (0, 0),
+                &plane.data,
+                plane.stride,
+                (pw, ph),
+                bps,
+            );
+            planes.push(out);
+        }
+        CanvasTile::Turned(TurnedTile {
+            width: tile.width,
+            height: tile.height,
+            format: tile.format,
+            planes,
+        })
+    }
+}
+
 /// §6.6.2.3 grid composition. Every tile must share one layout and one
 /// size; tiles carrying alpha planes produce an output alpha plane
 /// (tiles without one count as opaque).
@@ -620,21 +868,83 @@ pub struct GridCanvas {
     tile: Option<(u32, u32, HeifPixelFormat, bool)>,
     canvas: Option<HeifFrame>,
     placed: Vec<bool>,
+    /// The rotations and mirrors the composed image goes through, in
+    /// order, and the one permutation they amount to.
+    ops: Vec<Reorient>,
+    orientation: Orientation,
+    /// The canvas is the oriented image: tiles are written to their
+    /// oriented places and `finish` has nothing left to do.
+    oriented: bool,
 }
 
 impl GridCanvas {
     /// An empty canvas for `desc`.
     pub fn new(desc: &GridDescriptor) -> Self {
+        Self::with_reorientation(desc, &[])
+    }
+
+    /// An empty canvas for `desc` whose finished image has gone
+    /// through `ops` — the rotations and mirrors that lead the grid
+    /// item's transformative chain — in order. When the composed
+    /// picture goes through them without a change of layout (4:4:4 and
+    /// monochrome always, 4:2:0 at even sizes) every tile is written
+    /// straight to its oriented place, so the unoriented picture never
+    /// exists; otherwise the canvas is composed as usual and
+    /// [`GridCanvas::finish`] applies the operations one by one. The
+    /// image is the same bytes either way.
+    #[doc(hidden)]
+    pub fn with_reorientation(desc: &GridDescriptor, ops: &[Reorient]) -> Self {
         Self {
             desc: *desc,
             tile: None,
             canvas: None,
             placed: vec![false; desc.tile_count()],
+            ops: ops.to_vec(),
+            orientation: Orientation::of(ops),
+            oriented: false,
         }
     }
 
-    /// Place tile `index` (row-major).
-    pub fn place(&mut self, index: usize, t: &HeifFrame) -> Result<()> {
+    /// What turns tiles for this canvas on another thread.
+    #[doc(hidden)]
+    pub fn turner(&self) -> TileTurner {
+        TileTurner {
+            desc: self.desc,
+            orientation: self.orientation,
+        }
+    }
+
+    /// Odd tile sizes in a subsampled layout put tile origins on odd
+    /// chroma positions, as an odd canvas size does its edge: the
+    /// tiles are promoted to 4:4:4.
+    fn promotes(desc: &GridDescriptor, chroma: Chroma, tw: u32, th: u32) -> bool {
+        needs_444(chroma, tw % 2 == 1, th % 2 == 1)
+            || needs_444(
+                chroma,
+                desc.output_width % 2 == 1,
+                desc.output_height % 2 == 1,
+            )
+    }
+
+    /// Whether a canvas of `desc` whose tiles are like `tile` is
+    /// composed oriented, with the tiles turned as they are decoded
+    /// (tiles that need the 4:4:4 promotion are turned at placement).
+    fn orients(desc: &GridDescriptor, orientation: Orientation, tile: &HeifFrame) -> bool {
+        !orientation.is_identity()
+            && !Self::promotes(desc, tile.format.chroma, tile.width, tile.height)
+            && Orientation::keeps_layout(tile.format.chroma, desc.output_width, desc.output_height)
+    }
+
+    /// Check tile `index` of this size and layout against the grid and
+    /// the tiles before it, allocating the canvas at the first tile
+    /// and its alpha plane at the first tile that has one. Returns the
+    /// tile size and whether tiles are promoted to 4:4:4.
+    fn admit(
+        &mut self,
+        index: usize,
+        (width, height): (u32, u32),
+        format: HeifPixelFormat,
+    ) -> Result<(u32, u32, bool)> {
         if index >= self.placed.len() {
             return Err(HeifError::invalid(format!(
                 "grid: tile {index} outside the {}x{} layout",
@@ -644,7 +954,7 @@ impl GridCanvas {
         let (tw, th, first_fmt, promote) = match self.tile {
             Some(v) => v,
             None => {
-                let (tw, th) = (t.width, t.height);
+                let (tw, th) = (width, height);
                 let cols = self.desc.columns as u64;
                 let rows = self.desc.rows as u64;
                 if tw as u64 * cols < self.desc.output_width as u64
@@ -655,29 +965,20 @@ impl GridCanvas {
                         self.desc.output_width, self.desc.output_height
                     )));
                 }
-                // Odd tile sizes in a subsampled layout put tile origins
-                // on odd chroma positions: promote.
-                let promote = needs_444(t.format.chroma, tw % 2 == 1, th % 2 == 1)
-                    || needs_444(
-                        t.format.chroma,
-                        self.desc.output_width % 2 == 1,
-                        self.desc.output_height % 2 == 1,
-                    );
-                let v = (tw, th, t.format, promote);
+                let promote = Self::promotes(&self.desc, format.chroma, tw, th);
+                let v = (tw, th, format, promote);
                 self.tile = Some(v);
                 v
             }
         };
-        if t.width != tw || t.height != th {
+        if width != tw || height != th {
             return Err(HeifError::invalid(format!(
-                "grid: tile {index} is {}x{}, the first tile is {tw}x{th}",
-                t.width, t.height
+                "grid: tile {index} is {width}x{height}, the first tile is {tw}x{th}"
             )));
         }
-        if t.format.chroma != first_fmt.chroma || t.format.bit_depth != first_fmt.bit_depth {
+        if format.chroma != first_fmt.chroma || format.bit_depth != first_fmt.bit_depth {
             return Err(HeifError::unsupported(format!(
-                "grid: tile {index} layout {:?} differs from the first tile's {:?}",
-                t.format, first_fmt
+                "grid: tile {index} layout {format:?} differs from the first tile's {first_fmt:?}"
             )));
         }
         if self.canvas.is_none() {
@@ -687,15 +988,18 @@ impl GridCanvas {
                 first_fmt.chroma
             };
             let fmt = HeifPixelFormat::new(chroma, first_fmt.bit_depth, false)?;
-            self.canvas = Some(HeifFrame::filled(
-                self.desc.output_width,
-                self.desc.output_height,
-                fmt,
-                0,
-            )?);
+            let (w, h) = (self.desc.output_width, self.desc.output_height);
+            self.oriented =
+                !self.orientation.is_identity() && Orientation::keeps_layout(chroma, w, h);
+            let (cw, ch) = if self.oriented && self.orientation.swaps_axes() {
+                (h, w)
+            } else {
+                (w, h)
+            };
+            self.canvas = Some(HeifFrame::filled(cw, ch, fmt, 0)?);
         }
         let canvas = self.canvas.as_mut().expect("canvas allocated above");
-        if t.format.has_alpha && !canvas.format.has_alpha {
+        if format.has_alpha && !canvas.format.has_alpha {
             // Tiles without alpha count as opaque.
             let fmt = canvas.format.with_alpha();
             let mut alpha = HeifFrame::filled(
@@ -707,14 +1011,146 @@ impl GridCanvas {
             canvas.format = fmt;
             canvas.planes.push(alpha.planes.remove(0));
         }
+        Ok((tw, th, promote))
+    }
+
+    /// For plane `p` of the canvas and tile `index`: the size of the
+    /// unoriented canvas plane, the tile's origin in it and the part
+    /// of a `tpw × tph` tile plane that lies inside (`None` when the
+    /// tile is past the canvas edge on this plane).
+    #[allow(clippy::type_complexity)]
+    fn plane_region(
+        &self,
+        p: usize,
+        index: usize,
+        (tw, th): (u32, u32),
+        (tpw, tph): (u32, u32),
+    ) -> Option<((usize, usize), (usize, usize), (usize, usize))> {
+        let fmt = self.canvas.as_ref()?.format;
+        let (shx, shy) = if p == 0 || Some(p) == fmt.alpha_plane() {
+            (0, 0)
+        } else {
+            fmt.chroma.shift()
+        };
         let cols = self.desc.columns as usize;
         let (r, c) = ((index / cols) as u32, (index % cols) as u32);
+        let (pcw, pch) = fmt.plane_dims(p, self.desc.output_width, self.desc.output_height);
+        let (ox, oy) = ((c * tw) >> shx, (r * th) >> shy);
+        let w = tpw.min(pcw.saturating_sub(ox));
+        let h = tph.min(pch.saturating_sub(oy));
+        (w > 0 && h > 0).then_some((
+            (pcw as usize, pch as usize),
+            (ox as usize, oy as usize),
+            (w as usize, h as usize),
+        ))
+    }
+
+    /// Place tile `index` (row-major).
+    pub fn place(&mut self, index: usize, t: &HeifFrame) -> Result<()> {
+        let (tw, th, promote) = self.admit(index, (t.width, t.height), t.format)?;
         let src = if promote {
             std::borrow::Cow::Owned(t.promote_to_444()?)
         } else {
             std::borrow::Cow::Borrowed(t)
         };
-        blit(canvas, (c * tw, r * th), &src, (0, 0), (tw, th));
+        if self.oriented {
+            let bps = src.format.bytes_per_sample();
+            let planes = self
+                .canvas
+                .as_ref()
+                .map_or(0, |c| c.format.plane_count())
+                .min(src.format.plane_count());
+            for p in 0..planes {
+                let (tpw, tph) = src.plane_dims(p);
+                let from = &src.planes[p];
+                if from.stride < tpw as usize * bps
+                    || from.data.len()
+                        < (tph.max(1) as usize - 1) * from.stride + tpw as usize * bps
+                {
+                    return Err(HeifError::invalid(format!(
+                        "grid: tile {index} plane {p} holds {} bytes at stride {}, {tpw}x{tph} samples need more",
+                        from.data.len(),
+                        from.stride
+                    )));
+                }
+                let Some((plane, origin, size)) = self.plane_region(p, index, (tw, th), (tpw, tph))
+                else {
+                    continue;
+                };
+                let orientation = self.orientation;
+                let to = &mut self.canvas.as_mut().expect("admitted").planes[p];
+                orientation.blit(
+                    &mut to.data,
+                    to.stride,
+                    plane,
+                    origin,
+                    &from.data,
+                    from.stride,
+                    size,
+                    bps,
+                );
+            }
+        } else {
+            let cols = self.desc.columns as usize;
+            let (r, c) = ((index / cols) as u32, (index % cols) as u32);
+            let canvas = self.canvas.as_mut().expect("admitted");
+            blit(canvas, (c * tw, r * th), &src, (0, 0), (tw, th));
+        }
+        self.placed[index] = true;
+        Ok(())
+    }
+
+    /// Place a tile that came through this canvas's
+    /// [`GridCanvas::turner`].
+    #[doc(hidden)]
+    pub fn place_tile(&mut self, index: usize, tile: &CanvasTile) -> Result<()> {
+        let t = match tile {
+            CanvasTile::Plain(f) => return self.place(index, f),
+            CanvasTile::Turned(t) => t,
+        };
+        let (tw, th, promote) = self.admit(index, (t.width, t.height), t.format)?;
+        if !self.oriented || promote {
+            return Err(HeifError::invalid(format!(
+                "grid: tile {index} was turned for a canvas that is not composed oriented"
+            )));
+        }
+        let o = self.orientation;
+        let bps = t.format.bytes_per_sample();
+        let planes = self
+            .canvas
+            .as_ref()
+            .map_or(0, |c| c.format.plane_count())
+            .min(t.planes.len());
+        for p in 0..planes {
+            let (tpw, tph) = t.format.plane_dims(p, t.width, t.height);
+            let Some((plane, (ox, oy), (w, h))) = self.plane_region(p, index, (tw, th), (tpw, tph))
+            else {
+                continue;
+            };
+            // The part of the tile inside the canvas, in the turned
+            // tile and in the oriented canvas: both rectangles start
+            // at the smaller of their mapped corners.
+            let tile_dims = (tpw as usize, tph as usize);
+            let (a, b) = (o.map(tile_dims, (0, 0)), o.map(tile_dims, (w - 1, h - 1)));
+            let (sx0, sy0) = (a.0.min(b.0), a.1.min(b.1));
+            let (a, b) = (
+                o.map(plane, (ox, oy)),
+                o.map(plane, (ox + w - 1, oy + h - 1)),
+            );
+            let (dx0, dy0) = (a.0.min(b.0), a.1.min(b.1));
+            let (rw, rh) = if o.swaps_axes() { (h, w) } else { (w, h) };
+            let sstride = if o.swaps_axes() {
+                tile_dims.1
+            } else {
+                tile_dims.0
+            } * bps;
+            let from = &t.planes[p];
+            let to = &mut self.canvas.as_mut().expect("admitted").planes[p];
+            for y in 0..rh {
+                let srow = &from[(sy0 + y) * sstride + sx0 * bps..][..rw * bps];
+                to.data[(dy0 + y) * to.stride + dx0 * bps..][..rw * bps].copy_from_slice(srow);
+            }
+        }
         self.placed[index] = true;
         Ok(())
     }
@@ -744,16 +1180,35 @@ impl GridCanvas {
 
     /// The composed image; every tile must have been placed.
     pub fn finish(self) -> Result<HeifFrame> {
+        self.finish_threads(1)
+    }
+
+    /// [`GridCanvas::finish`] under a thread budget, which the
+    /// rotations of a canvas that was not composed oriented take (the
+    /// same bytes for every budget).
+    #[doc(hidden)]
+    pub fn finish_threads(self, threads: usize) -> Result<HeifFrame> {
         if let Some(missing) = self.placed.iter().position(|p| !p) {
             return Err(HeifError::invalid(format!(
                 "grid: tile {missing} of the {}x{} layout was never placed",
                 self.desc.rows, self.desc.columns
             )));
         }
-        let canvas = self
+        let mut canvas = self
             .canvas
             .ok_or_else(|| HeifError::invalid("grid: no tiles"))?;
         canvas.validate()?;
+        if !self.oriented {
+            for op in &self.ops {
+                canvas = match *op {
+                    Reorient::Rotate(0) => continue,
+                    Reorient::Rotate(angle) => {
+                        apply_irot_threads(&canvas, &Irot::new(angle), threads)?
+                    }
+                    Reorient::Mirror(axis) => apply_imir(&canvas, &Imir::new(axis))?,
+                };
+            }
+        }
         Ok(canvas)
     }
 }
@@ -1848,6 +2303,118 @@ mod tests {
         s.validate().unwrap();
         assert_eq!(s.plane_dims(1), (1, 3));
         assert_eq!(s.sample(1, 0, 2), 700);
+    }
+
+    /// A grid canvas given the rotations and mirrors that follow it
+    /// is, for every chain, layout, tile size and trim, the canvas
+    /// composed and then taken through the chain one operation at a
+    /// time — whether the tiles are placed as decoded or turned by
+    /// the canvas's turner first, in any order.
+    #[test]
+    fn oriented_grid_is_the_grid_then_the_chain() {
+        // A tile whose every sample names its tile, plane and position.
+        let tile = |i: u32, w: u32, h: u32, chroma: Chroma, depth: u8, alpha: bool| {
+            let mut f = HeifFrame::zeroed(w, h, fmt(chroma, depth, alpha)).unwrap();
+            let max = u32::from(f.format.max_value());
+            for p in 0..f.format.plane_count() {
+                let (pw, ph) = f.plane_dims(p);
+                for y in 0..ph {
+                    for x in 0..pw {
+                        let v = (i * 59 + p as u32 * 31 + y * 7 + x * 3 + 1) % (max + 1);
+                        f.set_sample(p, x, y, v as u16);
+                    }
+                }
+            }
+            f
+        };
+        let single = [
+            Reorient::Rotate(0),
+            Reorient::Rotate(1),
+            Reorient::Rotate(2),
+            Reorient::Rotate(3),
+            Reorient::Mirror(0),
+            Reorient::Mirror(1),
+        ];
+        let mut chains: Vec<Vec<Reorient>> = vec![Vec::new()];
+        for a in single {
+            chains.push(vec![a]);
+            for b in single {
+                chains.push(vec![a, b]);
+                chains.push(vec![a, b, Reorient::Rotate(1)]);
+                chains.push(vec![a, b, Reorient::Mirror(0)]);
+            }
+        }
+        // (chroma, depth, tile size, columns x rows, canvas, tiles with alpha)
+        #[allow(clippy::type_complexity)]
+        let cases: [(Chroma, u8, (u32, u32), (u16, u16), (u32, u32), &[usize]); 8] = [
+            (Chroma::Yuv420, 8, (8, 6), (3, 2), (24, 12), &[]),
+            (Chroma::Yuv420, 8, (8, 6), (3, 2), (22, 10), &[]),
+            (Chroma::Yuv420, 10, (8, 6), (2, 3), (14, 16), &[1, 4]),
+            (Chroma::Yuv420, 8, (8, 6), (3, 2), (21, 11), &[]),
+            (Chroma::Yuv420, 8, (7, 5), (2, 2), (12, 9), &[0]),
+            (Chroma::Yuv444, 8, (5, 3), (3, 3), (13, 8), &[]),
+            (Chroma::Mono, 12, (40, 36), (2, 2), (71, 70), &[3]),
+            (Chroma::Yuv422, 8, (8, 6), (2, 2), (16, 12), &[]),
+        ];
+        for (chroma, depth, (tw, th), (cols, rows), (ow, oh), with_alpha) in cases {
+            let d = GridDescriptor {
+                rows,
+                columns: cols,
+                output_width: ow,
+                output_height: oh,
+            };
+            let n = d.tile_count();
+            let tiles: Vec<HeifFrame> = (0..n)
+                .map(|i| tile(i as u32, tw, th, chroma, depth, with_alpha.contains(&i)))
+                .collect();
+            let plain = composite_grid(&d, &tiles).unwrap();
+            for chain in &chains {
+                let mut want = plain.clone();
+                for op in chain {
+                    want = match *op {
+                        Reorient::Rotate(a) => apply_irot(&want, &Irot::new(a)).unwrap(),
+                        Reorient::Mirror(a) => apply_imir(&want, &Imir::new(a)).unwrap(),
+                    };
+                }
+                let want = want.tight();
+                let tag = format!("{chroma:?} {tw}x{th} tiles, {ow}x{oh} canvas, {chain:?}");
+                // Placed as decoded, last tile first.
+                let mut canvas = GridCanvas::with_reorientation(&d, chain);
+                for i in (0..n).rev() {
+                    canvas.place(i, &tiles[i]).unwrap();
+                }
+                let got = canvas.finish().unwrap();
+                assert_eq!((got.width, got.height), (want.width, want.height), "{tag}");
+                assert_eq!(got.format, want.format, "{tag}");
+                assert_eq!(got.tight().planes, want.planes, "{tag}: placed");
+                // Through the turner, odd tiles first.
+                let mut canvas = GridCanvas::with_reorientation(&d, chain);
+                let turner = canvas.turner();
+                for i in (0..n).filter(|i| i % 2 == 1).chain((0..n).step_by(2)) {
+                    let t = turner.turn(tiles[i].clone());
+                    canvas.place_tile(i, &t).unwrap();
+                }
+                let got = canvas.finish_threads(3).unwrap();
+                assert_eq!(got.format, want.format, "{tag}");
+                assert_eq!(got.tight().planes, want.planes, "{tag}: turned");
+            }
+        }
+        // The eight orientations are closed under the operations and
+        // the chain's reduction agrees with the sample mapping.
+        let o = Orientation::of(&[
+            Reorient::Rotate(1),
+            Reorient::Mirror(1),
+            Reorient::Rotate(1),
+        ]);
+        assert_eq!(o, Orientation::of(&[Reorient::Mirror(1)]));
+        assert!(
+            Orientation::of(&[
+                Reorient::Mirror(0),
+                Reorient::Mirror(1),
+                Reorient::Rotate(2)
+            ])
+            .is_identity()
+        );
     }
 
     #[test]

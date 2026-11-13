@@ -1784,18 +1784,7 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
     fn reconstruct(&mut self, node: &ImageNode) -> Result<HeifFrame> {
         match &node.kind {
             ImageKind::Coded(_) => self.coded(node),
-            ImageKind::Grid(g) => {
-                let mut canvas = GridCanvas::new(g);
-                if self.decoder.threads > 1 && self.parallel_tiles(node) {
-                    self.decode_tiles_parallel(&node.inputs, &mut canvas)?;
-                } else {
-                    for (i, t) in node.inputs.iter().enumerate() {
-                        let tile = self.output(t)?;
-                        canvas.place(i, &tile)?;
-                    }
-                }
-                canvas.finish()
-            }
+            ImageKind::Grid(g) => self.reconstruct_grid(node, g, &[]),
             ImageKind::Tiled(t) => self.reconstruct_tiled(node, t),
             ImageKind::PixelTransform(t) => {
                 let mut frames = Vec::with_capacity(node.inputs.len());
@@ -1882,6 +1871,30 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
                 )
             }
         }
+    }
+
+    /// §6.6.2.3: the reconstructed image of a `grid` item, taken
+    /// through `ops` — the rotations and mirrors that lead the item's
+    /// transformative chain. The canvas places every tile where the
+    /// operations put it (see [`GridCanvas::with_reorientation`]), so
+    /// a rotated grid is composed once, in its final orientation,
+    /// instead of composed and then copied turned.
+    fn reconstruct_grid(
+        &mut self,
+        node: &ImageNode,
+        g: &crate::derived::GridDescriptor,
+        ops: &[crate::compose::Reorient],
+    ) -> Result<HeifFrame> {
+        let mut canvas = GridCanvas::with_reorientation(g, ops);
+        if self.decoder.threads > 1 && self.parallel_tiles(node) {
+            self.decode_tiles_parallel(&node.inputs, &mut canvas)?;
+        } else {
+            for (i, t) in node.inputs.iter().enumerate() {
+                let tile = self.output(t)?;
+                canvas.place(i, &tile)?;
+            }
+        }
+        canvas.finish_threads(self.decoder.threads)
     }
 
     /// `true` when every tile of a grid is a plain coded item — no
@@ -2230,7 +2243,8 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         let queue = Mutex::new(jobs.into_iter());
         let abort = AtomicBool::new(false);
         let decoder = self.decoder;
-        let (tx, rx) = mpsc::sync_channel::<(usize, Result<HeifFrame>)>(workers);
+        let turner = canvas.turner();
+        let (tx, rx) = mpsc::sync_channel::<(usize, Result<crate::compose::CanvasTile>)>(workers);
         std::thread::scope(|scope| -> Result<()> {
             for _ in 0..workers {
                 let tx = tx.clone();
@@ -2244,9 +2258,12 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
                         let Some((i, job)) = next else {
                             break;
                         };
+                        // The worker turns its tile to the canvas
+                        // orientation, so the placement on the
+                        // collecting thread stays a copy of rows.
                         let r = job
                             .execute(&decoder, false)
-                            .map(|mut f| f.swap_remove(0).frame);
+                            .map(|mut f| turner.turn(f.swap_remove(0).frame));
                         if tx.send((i, r)).is_err() {
                             break;
                         }
@@ -2259,7 +2276,7 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
                 if result.is_err() {
                     continue;
                 }
-                match r.and_then(|f| canvas.place(i, &f)) {
+                match r.and_then(|f| canvas.place_tile(i, &f)) {
                     Ok(()) => {}
                     Err(e) => {
                         abort.store(true, Ordering::Relaxed);
@@ -2287,10 +2304,23 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
                     .join(", ")
             )));
         }
-        let rec = self.reconstruct(node)?;
+        // The rotations and mirrors that lead a grid's chain are the
+        // canvas's: the tiles go straight to their oriented places.
+        let ops: Vec<crate::compose::Reorient> = match &node.kind {
+            ImageKind::Grid(_) => node
+                .properties
+                .transformative()
+                .map_while(|e| crate::compose::Reorient::of(&e.property))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let rec = match &node.kind {
+            ImageKind::Grid(g) if !ops.is_empty() => self.reconstruct_grid(node, g, &ops)?,
+            _ => self.reconstruct(node)?,
+        };
         let mut out = crate::compose::apply_transforms_owned_threads(
             rec,
-            node.properties.transformative(),
+            node.properties.transformative().skip(ops.len()),
             false,
             self.decoder.threads,
         )?;
