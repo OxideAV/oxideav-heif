@@ -229,6 +229,16 @@ and the one that left the list:
 | `iff_hevc_tile_multiple_items_tbas` | the 3840×2160 base item — four IDR slices gathered through construction method 2 — decodes since oxideav-h265 0.0.18 (its `hvcC` VPS ends right after `vps_timing_info_present_flag`, without `vps_extension_flag` or RBSP trailing bits, which that release reads); the four `hvt1` tile items carry no `rloc`, the property B.2.5 makes mandatory ("shall be associated with … one RelativeLocationProperty") and the only place the texts put a tile item's position | `decode_all_partial`: the base item (1 frame), the 4 tile items skipped with a typed error; the same on the framework path | the file. Nothing in the staged HEIF / ISOBMFF texts places a tile item without `rloc`; its slice segments do say where they sit in the picture, which this crate could read only through an HEVC-crate API that does not exist (a sibling ask: the luma rectangle a set of slice segment NAL units covers under given parameter sets) |
 | multilayer002 (**decodes whole since r488**) | 3 `lhv1` items hold non-IRAP layer-1 pictures, which H.265 F.8.1.6 withholds from output (the layer is not initialised) while HEIF B.2.2.1.1 makes every HEVC image item independently coded and B.2.2.1.3 one access unit | the enhancement pictures decode from their own access unit (oxideav-h265 0.0.18's `output_uninitialized_layers`) and equal the elementary stream's layer-1 pictures byte for byte; both grids decode: 10 frames on both paths | none; `irap_layers_only` (below) restores the refusal of B.2.2.1.3 NOTE 1's reading |
 
+**Item sweep** (`tests/item_sweep.rs`, r488): every image item of the
+same files decoded on its own with `decode_item` — each grid tile,
+thumbnail, auxiliary and hidden item as the image item it is, not only
+what a viewer shows. **402 image items in 152 files: 384 decode, 18 are
+typed refusals** — the 13 protected items (no cipher given; they
+decode under their keys, above), the 4 `hvt1` items without `rloc`,
+and the thumbnail of MIAF007, a 128×72 item associated with its
+1280×720 master's `clap` (640×360: a clean aperture larger than the
+picture). The test fails on a refusal outside the known gates.
+
 `decode_all_partial(bytes, &opts)` (r486) is `decode_all_with` for a
 viewer that shows what it can: an entry that does not decode — a
 displayable item none of whose `altr` alternatives decodes, a track
@@ -1270,7 +1280,14 @@ a refusal is a row, never a panic.
 | 4 workers | 9.75 s | 21.06 s | 13.26 s | 66 MiB | 20 |
 | 8 workers | 9.76 s | 17.73 s | 8.85 s | 76 MiB | 20 |
 
-The 20 refusals are the documented ones: the 13 `cenc` / `cbcs` /
+r488, the same run at 1 worker (`heifsoak --threads 1`, HEVC and
+≤ 4 MP AV1 re-encodes): decode of all 81 files 7.16 s, peak RSS max
+70 MiB (C041, a 50 KiB sequence whose every decoded frame `decode_all`
+returns; 36 MiB for the largest still), **13 refused** — the encrypted
+files, which the soak gives no cipher. The table below is the r478
+run.
+
+The 20 refusals of that run are the documented ones: the 13 `cenc` / `cbcs` /
 `cens` / `cbc1` encrypted files (r478: `ienc` was an unrecognised essential
 property; since r485 they decrypt through a caller cipher), C044 (a `pred` item
 whose base is inter-coded), `iff_hevc_single_item` /
