@@ -204,9 +204,10 @@ typed refusals.
 registry decoders against `decode_all` / `info` over every HEIF-family
 file the checkout sees — 57 vendored fixtures, the 14 staged corpus
 bundles, the 2 device samples, the 66 MPEG / Nokia conformance files
-and the 13 encrypted ones: **152 files — 136 decode whole on both
+and the 13 encrypted ones: **152 files — 137 decode whole on both
 paths, the 13 encrypted ones decode on both paths under their test
-keys, 2 decode in part, 1 is refused on both** (r486; r485: 136 / 16),
+keys, 2 decode in part, none is refused** (r488, on oxideav-h265
+0.0.18; r486: 136 / 13 / 2 / 1 refused),
 0 disagreements on any leg — every contract image item is a packet of a still
 stream with byte-identical pixels, label, colour signal and metadata
 (r476: the frame's ICC / Exif / XMP blobs refined over the stream's
@@ -217,15 +218,16 @@ composed or raw track stream with the same pixels, metadata and
 `duration × time_base` = the contract delay; `info()` describes the first still stream; the
 framework decoders run under an 8-worker execution context against
 the serial contract path (r476: the AV1 items decode tile- /
-band-parallel under it, byte-identical). The 16
-files `decode_all` refuses at the default options, one by one (r486):
+band-parallel under it, byte-identical). The 15
+files `decode_all` refuses at the default options, one by one (r488),
+and the one that left the list:
 
 | Files | `decode_all` | Further leg | Gate |
 |---|---|---|---|
 | the 13 `cenc/image_*` (`cenc` / `cens` / `cbc1` / `cbcs`) | typed `encrypted_item` refusal — no cipher | with the `drm_cfg` test keys behind a black-box AES-128 (`DecodeOptions::with_decryptor`, the framework decoder as `HeifCodec::with_decode_options`; `CencReading::compat()`): 1 frame each on both paths, byte-identical | the crate ships no cipher: FIPS-197 is not among the staged documents |
 | C046 (`brst` over a track) | the track's first sample is a P picture whose reference (POC 0) is in no sample — the black-box decoder outputs no frame of it either | `decode_all_partial`: the still (1 frame), the track listed as skipped; the framework still stream delivers the same frame | the file |
-| multilayer002 | 3 `lhv1` items hold non-IRAP layer-1 pictures (HEIF B.2.2.1.3 NOTE 1; H.265 F.8.1.6) and the `lhv1` grid is built over them | `decode_all_partial`: 6 frames (the base grid, the 4 `hvc1` items, the IDR `lhv1` item), 4 entries skipped; the same 6 per packet on the framework path; the refused items' base layer under `base_layer_fallback` | the file |
-| `iff_hevc_tile_multiple_items_tbas` | r486 reads its out-of-order `ipma` (below); the `hvcC` VPS then ends right after `vps_timing_info_present_flag` — no `vps_extension_flag`, no RBSP trailing bits (H.265 §7.3.2.1) — and the HEVC decoder refuses the record | with that one byte supplied (`vps_extension_flag` = 0 + the trailing bits; an experiment, not shipped) the 3840×2160 base item — four IDR slices gathered through construction method 2 — decodes | oxideav-h265 (a VPS whose RBSP ends before `vps_extension_flag`); the four `hvt1` tile items also lack the `rloc` B.2.5 / §6.5.7 make mandatory, so their position is not declared (tile items that carry one decode since r486 — `tests/tile_items.rs`) |
+| `iff_hevc_tile_multiple_items_tbas` | the 3840×2160 base item — four IDR slices gathered through construction method 2 — decodes since oxideav-h265 0.0.18 (its `hvcC` VPS ends right after `vps_timing_info_present_flag`, without `vps_extension_flag` or RBSP trailing bits, which that release reads); the four `hvt1` tile items carry no `rloc`, the property B.2.5 makes mandatory ("shall be associated with … one RelativeLocationProperty") and the only place the texts put a tile item's position | `decode_all_partial`: the base item (1 frame), the 4 tile items skipped with a typed error; the same on the framework path | the file. Nothing in the staged HEIF / ISOBMFF texts places a tile item without `rloc`; its slice segments do say where they sit in the picture, which this crate could read only through an HEVC-crate API that does not exist (a sibling ask: the luma rectangle a set of slice segment NAL units covers under given parameter sets) |
+| multilayer002 (**decodes whole since r488**) | 3 `lhv1` items hold non-IRAP layer-1 pictures, which H.265 F.8.1.6 withholds from output (the layer is not initialised) while HEIF B.2.2.1.1 makes every HEVC image item independently coded and B.2.2.1.3 one access unit | the enhancement pictures decode from their own access unit (oxideav-h265 0.0.18's `output_uninitialized_layers`) and equal the elementary stream's layer-1 pictures byte for byte; both grids decode: 10 frames on both paths | none; `irap_layers_only` (below) restores the refusal of B.2.2.1.3 NOTE 1's reading |
 
 `decode_all_partial(bytes, &opts)` (r486) is `decode_all_with` for a
 viewer that shows what it can: an entry that does not decode — a
@@ -336,7 +338,7 @@ block-aligned (the automatic grid tiles pictures above 4 MP at 512 px);
 an `altr`-less file without a patchable `pitm` carries the primary
 alone. `HeifDecoderOptions` (`max_width` / `max_height` / `max_pixels`
 / `max_bytes` / `strict` / `tone_mapped` / `item_id` /
-`base_layer_fallback` / `reference_white`) bound a decode before any
+`base_layer_fallback` / `reference_white` / `irap_layers_only`) bound a decode before any
 allocation; `0` keeps the contract default.
 
 ## Supported layouts
@@ -402,7 +404,11 @@ allocation (`HeifError::LimitExceeded`);
 `strict` (a HEIF-family brand is required and a `miaf`-branded file
 must pass `miaf::check`; off, any ISOBMFF file with a `pict` item tree
 decodes); `item_id` (decode that item instead of `pitm`),
-`tone_mapped`, `base_layer_fallback` (layered `lhv1` items), `threads`
+`tone_mapped`, `base_layer_fallback` (layered `lhv1` items),
+`irap_layers_only` (refuse an `lhv1` item whose enhancement picture is
+not an IRAP picture instead of decoding it from its access unit —
+`ItemDecoder::with_irap_layers_only`, the `"heif"` decoder's
+`irap_layers_only` option), `threads`
 (grid tiles decode in parallel; output identical for every budget),
 `reference_white_nits`.
 
@@ -764,7 +770,7 @@ against their producer's elementary streams (`nokia/bitstreams/`):
 | File | Shape | Result |
 |---|---|---|
 | multilayer001 | `hvc1` base + SHVC SNR `lhv1` (`tols` 1) over one access unit, `altr` | base **byte-exact** vs the black-box decoder (B020 base layer); enhancement layer = B020 layer 1 through the HEVC sequence decoder, 43.7 dB over the base |
-| multilayer002 | two 2x2 grids: 4 `hvc1` items (1 IDR + 3 `TRAIL_R`) and 4 `lhv1` items over the same data | 4 base items **byte-exact** (B021 pictures 0–3), base grid exact; IDR `lhv1` item = B021 layer 1 (44.7 dB); the 3 `TRAIL_R` `lhv1` items refuse typed (HEIF B.2.2.1.3 NOTE 1: an `lhv1` item is an initial IRAP access unit; H.265 F.8.1.6 outputs no picture of an uninitialised layer), base layer under `base_layer_fallback` |
+| multilayer002 | two 2x2 grids: 4 `hvc1` items (1 IDR + 3 `TRAIL_R`) and 4 `lhv1` items over the same data | 4 base items **byte-exact** (B021 pictures 0–3), base grid exact; the 4 `lhv1` items = B021 layer 1 pictures 0–3 **byte-exact** against the HEVC sequence decoder over the stream (44.7 / 43.6 / 43.2 / 43.2 dB over the base) — the 3 `TRAIL_R` ones since r488, decoded from their own access unit (an image item is independently coded, HEIF B.2.2.1.1; the HEVC decoder outputs the picture of the layer F.8.1.6 would withhold); enhanced grid exact; under `irap_layers_only` they refuse typed (B.2.2.1.3 NOTE 1) and `base_layer_fallback` gives their base layer |
 | multilayer003 | `ster` pair of single-layer `hvc1` items | both **byte-exact** (B022) |
 | multilayer004 | `avc1` base + SHVC `lhv1` with `exbl` (VPS without an internal base layer) | AVC base **byte-exact** (B024); enhancement decoded against the AVC item's picture (H.265 F.8.1.8) = B023 layer 1 over the black-box B024 picture, 40.5 dB over the base |
 | multilayer005 | MV-HEVC: `hvc1` view + `lhv1` `lsel` 1, `ster` | both views **byte-exact** vs `ffmpeg -view_ids` (layer 0 carries ViewId 1) |
@@ -780,6 +786,29 @@ to the official SHVC conformance MD5s). `import_item` carries every
 item of the five files with its `lhvC` / `oinf` / `tols` / `lsel` byte
 for byte and its `exbl` base along (the `lhvC` writer now sets the
 `'11'b` reserved bits of 14496-15 §9.5 it dropped).
+
+**Auxiliary layers** (`tests/aux_layers.rs`, r488): an HEVC access
+unit that carries an alpha layer next to its picture
+(`tests/fixtures/layered/hevc_alpha_128x96.mov`, a black-box
+producer's two independent layers) in the shape B.2.2.1.2 / B.2.4 give
+it — an `hvc1` master, whose readers ignore the NAL units above the
+base layer, and an `lhv1` auxiliary item (`auxC`
+`urn:mpeg:hevc:2015:auxid:1`, `lsel` 1) over the same bytes. The
+master is the black-box decoder's picture **byte-exact**, its alpha
+plane the source ramp within 1 code (mean 0.49). An `lhv1` item
+without `lsel` yields the output layers its `oinf` lists for its
+`tols` set; when the codec's own derivation of that output layer set
+gives other layers — a VPS that outputs only its highest layer, with
+an auxiliary layer on top of the primary one — the layer set is
+decoded in full (oxideav-h265 0.0.18's layer-set target, `layerset`)
+and the listed layers are taken from it, on the registry path and
+against an `exbl` base alike (pinned with a scripted codec: no staged
+bitstream under this crate's documents has that VPS; the fixture's
+layer set 1 holds the alpha layer alone, so there the typed refusal
+stays). Which `oinf` `dimension_identifier` marks a layer auxiliary is
+not in the staged HEIF / 14496-15 texts (they defer to the VPS
+extension of ISO/IEC 23008-2), so no layer is treated as alpha or
+depth unless an `auxC` on an item says so.
 
 **Encrypted items** (`tests/encrypted_items.rs`, ISO/IEC 23001-7
 Amd 1 §8.3 / §8.4, r485): `ipro` / `sinf` / `schm` schemes, the `ienc`
@@ -1249,8 +1278,8 @@ whose base is inter-coded), `iff_hevc_single_item` /
 `max_bytes_per_pic_denom` — a sibling ask), `iff_hevc_tile_multiple_items_tbas`
 (`hvt1` tile items), `multilayer001` / `002` / `005` (L-HEVC
 enhancement layers and a PPS the base decoder never activates; all
-three decode since r485 — multilayer002 refuses only its non-IRAP
-`lhv1` items). C034
+three decode since r485; multilayer002's non-IRAP `lhv1` items and the
+`tbas` base item since r488). C034
 was the 21st before this round: its `Exif` item has no `exif_tiff_header_offset`
 word (the item is exactly the staged Exif blob, TIFF header first), and
 the magic read as an offset refused the whole decode; `exif_payload`

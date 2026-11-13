@@ -68,6 +68,11 @@ enum Script {
     /// half the size (both tagged); a single-layer item otherwise
     /// gets [`Script::Surrounded`].
     Layered,
+    /// A codec whose output layer set selects only its highest layer:
+    /// under the `ols` option layer 1 alone comes out; under
+    /// `layerset` (and no `ols`) every layer of the set does — layer
+    /// 0, then layer 1 — each at the announced size.
+    HighestOnly,
 }
 
 struct Stub {
@@ -92,7 +97,20 @@ impl Decoder for Stub {
         let full = shape(&self.id, w, h, pf);
         let layered =
             matches!(self.script, Script::Layered) && self.params.options.get("ols").is_some();
-        if layered {
+        if matches!(self.script, Script::HighestOnly) {
+            let whole_set = self.params.options.get("ols").is_none()
+                && self.params.options.get("layerset").is_some();
+            for layer in [0u16, 1] {
+                if layer == 1 || whole_set {
+                    self.queue.push_back(Frame::Video(picture(
+                        w,
+                        h,
+                        pf,
+                        LayerIdentity::new(layer).with_access_unit(0),
+                    )));
+                }
+            }
+        } else if layered {
             let half = shape(&self.id, w / 2, h / 2, pf);
             self.queue.push_back(Frame::Video(picture(
                 w,
@@ -167,6 +185,23 @@ fn make_surrounded(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
 
 fn make_layered(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
     make(params, Script::Layered)
+}
+
+fn make_highest_only(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
+    make(params, Script::HighestOnly)
+}
+
+/// A registry with the stub under `"h265"`, scripted as a codec whose
+/// output layer set outputs only its highest layer while its layer set
+/// holds two (the `layerset` option yields both).
+pub fn registry_highest_only() -> CodecRegistry {
+    let mut reg = CodecRegistry::new();
+    reg.register(
+        CodecInfo::new(CodecId::new("h265"))
+            .capabilities(CodecCapabilities::video("stream_params_stub").with_decode())
+            .decoder(make_highest_only),
+    );
+    reg
 }
 
 /// A registry with the stub under `"h265"`, `"av1"` and `"h264"`;

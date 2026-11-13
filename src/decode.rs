@@ -80,6 +80,9 @@ pub struct ItemDecoder<'r> {
     tone_map: ToneMapOutput,
     reference_white_nits: Option<f64>,
     base_layer_fallback: bool,
+    /// `true`: an `lhv1` item whose enhancement picture is not an IRAP
+    /// picture is refused instead of decoded from its access unit.
+    irap_layers_only: bool,
     threads: usize,
     tile_resolver: Option<&'r dyn crate::tiled::ExternalTileResolver>,
     decryptor: Option<&'r dyn crate::cenc::BlockCipher>,
@@ -94,6 +97,7 @@ impl<'r> ItemDecoder<'r> {
             tone_map: ToneMapOutput::Base,
             reference_white_nits: None,
             base_layer_fallback: false,
+            irap_layers_only: false,
             threads: 1,
             tile_resolver: None,
             decryptor: None,
@@ -108,6 +112,7 @@ impl<'r> ItemDecoder<'r> {
             tone_map: ToneMapOutput::Base,
             reference_white_nits: None,
             base_layer_fallback: false,
+            irap_layers_only: false,
             threads: 1,
             tile_resolver: None,
             decryptor: None,
@@ -228,6 +233,29 @@ impl<'r> ItemDecoder<'r> {
         self
     }
 
+    /// How an `lhv1` item whose enhancement picture is not an IRAP
+    /// picture is treated. Such a layer starts uninitialised (H.265
+    /// F.8.1.3) and a conforming decoder withholds its picture from
+    /// output (F.8.1.6) — but an HEVC image item is independently
+    /// coded (HEIF B.2.2.1.1) and holds exactly one access unit
+    /// (B.2.2.1.3), so the picture can only be predicted from the
+    /// pictures of that access unit. By default (`false`) the item
+    /// therefore decodes: the HEVC decoder is asked to output the
+    /// pictures of layers that are not initialised
+    /// (`output_uninitialized_layers`). `true` keeps the reading of
+    /// B.2.2.1.3 NOTE 1 ("an initial IRAP access unit") and refuses
+    /// the item typed — or, with
+    /// [`ItemDecoder::base_layer_fallback`], decodes its base layer.
+    pub fn with_irap_layers_only(mut self, irap_layers_only: bool) -> Self {
+        self.irap_layers_only = irap_layers_only;
+        self
+    }
+
+    /// The setting of [`ItemDecoder::with_irap_layers_only`].
+    pub fn irap_layers_only(&self) -> bool {
+        self.irap_layers_only
+    }
+
     /// The HDR reference white (cd/m²) a PQ-coded tone-mapped
     /// reconstruction is anchored to (default
     /// [`crate::gainmap::DEFAULT_HDR_REFERENCE_WHITE_NITS`]).
@@ -273,7 +301,7 @@ impl<'r> ItemDecoder<'r> {
                     Some(x) => {
                         options = match plan.layer {
                             Some(l) => options.set("layer", l.to_string()),
-                            None => options.set("ols", plan.tols.to_string()),
+                            None => options.set(OPTION_OLS, plan.tols.to_string()),
                         };
                         (CODEC_ID_HEVC, x.clone(), plan.layout)
                     }
@@ -283,7 +311,7 @@ impl<'r> ItemDecoder<'r> {
                     None => {
                         options = match plan.layer {
                             Some(l) => options.set("layer", l.to_string()),
-                            None => options.set("ols", plan.tols.to_string()),
+                            None => options.set(OPTION_OLS, plan.tols.to_string()),
                         };
                         (CODEC_ID_HEVC, Vec::new(), plan.layout)
                     }
@@ -525,7 +553,16 @@ impl<'r> ItemDecoder<'r> {
                     Some(l) => vec![l.min(63) as u8],
                     None => plan.output_layers.clone(),
                 };
-                let uninitialised = first_non_irap_layer(&payload, cfg.length_size, &wanted);
+                let non_irap = first_non_irap_layer(&payload, cfg.length_size, &wanted);
+                // HEIF B.2.2.1.1: the item is independently coded, so
+                // a non-IRAP enhancement picture is predicted from the
+                // pictures of its own access unit alone; the decoder
+                // outputs it when asked to (the picture F.8.1.6 would
+                // withhold). `irap_layers_only` keeps the refusal.
+                let uninitialised = non_irap.filter(|_| self.irap_layers_only);
+                if non_irap.is_some() && uninitialised.is_none() {
+                    params.options = params.options.set(OPTION_UNINITIALIZED_LAYERS, "true");
+                }
                 // HEIF B.2.2.1.3 + §6.5.11: the tols output layer set
                 // decodes in full; an lsel picks one reconstructed
                 // image, otherwise every output layer comes back (base
@@ -618,6 +655,29 @@ impl LayerFrame {
     pub fn new(layer_id: u8, frame: HeifFrame) -> Self {
         Self { layer_id, frame }
     }
+}
+
+/// The HEVC decoder option that outputs the pictures of layers that
+/// are not initialised (oxideav-h265 0.0.18).
+const OPTION_UNINITIALIZED_LAYERS: &str = "output_uninitialized_layers";
+
+/// The HEVC decoder options that pick an output layer set / decode a
+/// whole layer set (oxideav-h265 0.0.18 for the latter).
+const OPTION_OLS: &str = "ols";
+const OPTION_LAYER_SET: &str = "layerset";
+
+/// Pictures read from a layer-set decode of one access unit (a layer
+/// set holds at most 64 layers, one picture each).
+const MAX_LAYER_SET_PICTURES: usize = 64;
+
+/// `true` when `frames` are, in order, pictures of the layers
+/// `expected` (a picture the codec does not tag counts as layer 0).
+fn tagged_as(frames: &[(oxideav_core::VideoFrame, StreamShape)], expected: &[u8]) -> bool {
+    frames.len() >= expected.len()
+        && frames
+            .iter()
+            .zip(expected)
+            .all(|((vf, _), want)| vf.layer().map_or(0, |l| l.layer_id) == u16::from(*want))
 }
 
 /// How an `lhv1` item decodes (HEIF B.2.2.1.3 / §6.5.11 / §6.5.29).
@@ -714,12 +774,35 @@ impl CodedJob {
         if self.predicted.is_some() {
             return self.run_predicted();
         }
-        let dec = if budgeted {
-            decoder.make_budgeted(&self.params)?
-        } else {
-            decoder.make(&self.params)?
+        let make = |params: &CodecParameters| {
+            if budgeted {
+                decoder.make_budgeted(params)
+            } else {
+                decoder.make(params)
+            }
         };
-        self.run_all(dec)
+        let dec = make(&self.params)?;
+        self.run_all(dec, &make)
+    }
+
+    /// The parameters that decode this job's access unit through the
+    /// codec's layer-set target instead of its output-layer-set one:
+    /// every layer of the layer set comes out, whatever the VPS's
+    /// output layer sets select. `None` unless the job is a layered
+    /// item decoded to the output layers of its `tols` set.
+    fn layer_set_params(&self) -> Option<CodecParameters> {
+        let (tols, _) = self.expect_layers.as_ref()?;
+        self.layers.as_ref()?;
+        self.params.options.get(OPTION_OLS)?;
+        let mut params = self.params.clone();
+        let mut options = oxideav_core::CodecOptions::new();
+        for (k, v) in self.params.options.iter() {
+            if k != OPTION_OLS {
+                options.insert(k, v);
+            }
+        }
+        params.options = options.set(OPTION_LAYER_SET, tols.to_string());
+        Some(params)
     }
 
     /// HEIF §6.4.9: the bitstream formed by the `pred` references'
@@ -774,18 +857,41 @@ impl CodedJob {
             (_, Some(o)) => LayerTarget::Ols(o as usize),
             _ => LayerTarget::HighestOls,
         };
-        let mut seq = SequenceDecoder::new();
-        seq.set_layer_target(target);
-        seq.set_external_base_layer(move |_| Some(ExternalBasePicture::new(picture.clone())));
+        let uninitialized = self.params.options.get(OPTION_UNINITIALIZED_LAYERS) == Some("true");
         let fail = |e: oxideav_h265::sequence::SequenceError| {
             HeifError::invalid(format!(
                 "item {id}: decode against the external base layer failed: {e}"
             ))
         };
-        seq.push_annexb(&self.data).map_err(fail)?;
-        let mut decoded = seq.finish().map_err(fail)?;
-        decoded.retain(|f| f.output);
-        decoded.sort_by_key(|f| f.layer_id);
+        let run = |target: LayerTarget| {
+            let picture = picture.clone();
+            let mut seq = SequenceDecoder::new();
+            seq.set_layer_target(target);
+            seq.set_output_uninitialized_layers(uninitialized);
+            seq.set_external_base_layer(move |_| Some(ExternalBasePicture::new(picture.clone())));
+            seq.push_annexb(&self.data).map_err(fail)?;
+            let mut decoded = seq.finish().map_err(fail)?;
+            decoded.retain(|f| f.output);
+            decoded.sort_by_key(|f| f.layer_id);
+            Ok::<_, HeifError>(decoded)
+        };
+        let mut decoded = run(target)?;
+        // As in `run_all`: when the VPS's output layer set yields other
+        // layers than the item's `oinf` names, the layer set is decoded
+        // in full and those layers are taken from it.
+        if let (LayerTarget::Ols(o), Some(_), Some((_, expected))) =
+            (target, &self.layers, &self.expect_layers)
+            && !decoded
+                .iter()
+                .map(|f| f.layer_id)
+                .eq(expected.iter().copied())
+            && let Ok(mut all) = run(LayerTarget::LayerSet(o))
+        {
+            all.retain(|f| expected.contains(&f.layer_id));
+            if all.iter().map(|f| f.layer_id).eq(expected.iter().copied()) {
+                decoded = all;
+            }
+        }
         if decoded.is_empty() {
             return Err(HeifError::invalid(format!(
                 "item {id}: decoder produced no picture"
@@ -822,38 +928,75 @@ impl CodedJob {
             .collect()
     }
 
-    fn run_all(self, mut dec: Box<dyn Decoder>) -> Result<Vec<LayerFrame>> {
+    fn run_all(
+        self,
+        dec: Box<dyn Decoder>,
+        make: &dyn Fn(&CodecParameters) -> Result<Box<dyn Decoder>>,
+    ) -> Result<Vec<LayerFrame>> {
         let id = self.item_id;
+        let layer_set = self.layer_set_params();
         let pkt = Packet::new(0, TimeBase::new(1, 1), self.data)
             .with_pts(0)
             .with_keyframe(true);
-        dec.send_packet(&pkt).map_err(|e| {
-            HeifError::invalid(format!("item {id}: decoder rejected the payload: {e}"))
-        })?;
-        dec.flush()
-            .map_err(|e| HeifError::invalid(format!("item {id}: flush: {e}")))?;
         let want = self.layers.as_ref().map(Vec::len).unwrap_or(1);
         // Each picture with the shape it is read at: the item's own
         // (layout, ispe) until the codec announces a mid-stream change
         // with a `Frame::StreamParams` event (oxideav-core 0.1.43; a
         // later output layer of a different size or layout), the
         // announced one from then on. Never a picture itself.
-        let mut shape = (self.layout, self.ispe);
-        let mut frames: Vec<(oxideav_core::VideoFrame, StreamShape)> = Vec::with_capacity(want);
-        loop {
-            match dec.receive_frame() {
-                Ok(Frame::Video(v)) => {
-                    if frames.len() < want {
-                        frames.push((v, shape));
+        let start = (self.layout, self.ispe);
+        let pump = |mut dec: Box<dyn Decoder>,
+                    limit: usize|
+         -> Result<Vec<(oxideav_core::VideoFrame, StreamShape)>> {
+            dec.send_packet(&pkt).map_err(|e| {
+                HeifError::invalid(format!("item {id}: decoder rejected the payload: {e}"))
+            })?;
+            dec.flush()
+                .map_err(|e| HeifError::invalid(format!("item {id}: flush: {e}")))?;
+            let mut shape = start;
+            let mut frames = Vec::with_capacity(limit.min(4));
+            loop {
+                match dec.receive_frame() {
+                    Ok(Frame::Video(v)) => {
+                        if frames.len() < limit {
+                            frames.push((v, shape));
+                        }
+                    }
+                    Ok(Frame::StreamParams(p)) => adopt_stream_params(&p, &mut shape),
+                    Ok(_) => {}
+                    Err(CoreError::NeedMore) | Err(CoreError::Eof) => break,
+                    Err(e) => {
+                        return Err(HeifError::invalid(format!("item {id}: decode failed: {e}")));
                     }
                 }
-                Ok(Frame::StreamParams(p)) => adopt_stream_params(&p, &mut shape),
-                Ok(_) => {}
-                Err(CoreError::NeedMore) | Err(CoreError::Eof) => break,
-                Err(e) => return Err(HeifError::invalid(format!("item {id}: decode failed: {e}"))),
+            }
+            Ok(frames)
+        };
+        let mut frames = pump(dec, want)?;
+        // The item's `oinf` names the output layers of its `tols` set;
+        // the codec derives them from the VPS, whose default output
+        // layer rule may select fewer (a primary picture next to an
+        // auxiliary alpha / depth layer when only the highest layer is
+        // an output layer). The layer set is then decoded in full and
+        // the layers the `oinf` names are taken from it.
+        if let (Some(params), Some((_, expected))) = (layer_set, &self.expect_layers)
+            && !tagged_as(&frames, expected)
+            && let Ok(dec) = make(&params)
+            && let Ok(all) = pump(dec, MAX_LAYER_SET_PICTURES)
+        {
+            let mut picked = Vec::with_capacity(expected.len());
+            for want in expected {
+                if let Some(f) = all
+                    .iter()
+                    .find(|(vf, _)| vf.layer().map(|l| l.layer_id) == Some(u16::from(*want)))
+                {
+                    picked.push(f.clone());
+                }
+            }
+            if picked.len() == expected.len() {
+                frames = picked;
             }
         }
-        drop(dec);
         if frames.is_empty() {
             return Err(HeifError::invalid(format!(
                 "item {id}: decoder produced no picture"

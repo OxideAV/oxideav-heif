@@ -1178,6 +1178,13 @@ pub struct DecodeOptions {
     /// its `tols` output layer set (`ItemDecoder::base_layer_fallback`
     /// with the `registry` feature).
     pub base_layer_fallback: bool,
+    /// Refuse a layered (`lhv1`) item whose enhancement picture is not
+    /// an IRAP picture (HEIF B.2.2.1.3 NOTE 1; H.265 F.8.1.6 outputs no
+    /// picture of a layer that is not initialised) instead of decoding
+    /// it from its one access unit (`ItemDecoder::with_irap_layers_only`
+    /// with the `registry` feature). Off by default: an image item is
+    /// independently coded (B.2.2.1.1), so the picture decodes.
+    pub irap_layers_only: bool,
     /// Thread budget for independent coded items (grid tiles);
     /// `None` / `Some(1)` = serial. Output is identical for every budget.
     pub threads: Option<usize>,
@@ -1209,6 +1216,7 @@ impl Default for DecodeOptions {
             item_id: None,
             tone_mapped: false,
             base_layer_fallback: false,
+            irap_layers_only: false,
             threads: None,
             reference_white_nits: None,
             tile_resolver: None,
@@ -1242,6 +1250,7 @@ impl DecodeOptions {
             item_id,
             tone_mapped,
             base_layer_fallback,
+            irap_layers_only: false,
             threads,
             reference_white_nits,
             tile_resolver: None,
@@ -1295,6 +1304,12 @@ impl DecodeOptions {
     /// Set [`DecodeOptions::base_layer_fallback`].
     pub fn with_base_layer_fallback(mut self, base_layer_fallback: bool) -> Self {
         self.base_layer_fallback = base_layer_fallback;
+        self
+    }
+
+    /// Set [`DecodeOptions::irap_layers_only`].
+    pub fn with_irap_layers_only(mut self, irap_layers_only: bool) -> Self {
+        self.irap_layers_only = irap_layers_only;
         self
     }
 

@@ -31,8 +31,11 @@ oxideav-core = { version = "0.1.43", optional = true }
 # A 0.0.x caret requirement is exact; the range keeps heif on the latest
 # h265 0.0 line (0.0.17: multi-layer decode — SHVC spatial / SNR /
 # hybrid base through `SequenceDecoder::set_external_base_layer`,
-# MV-HEVC — which `lhv1` items and `exbl` external base layers use).
-oxideav-h265 = { version = ">=0.0.17, <0.1", optional = true }
+# MV-HEVC — which `lhv1` items and `exbl` external base layers use;
+# 0.0.18: a VPS whose RBSP ends before its extension flag, the
+# `output_uninitialized_layers` option for an `lhv1` item whose
+# enhancement picture is not an IRAP picture, the layer-set target).
+oxideav-h265 = { version = ">=0.0.18, <0.1", optional = true }
 # 0.1.9: the registry encoder rotates idr_pic_id itself, takes every
 # High-family layout, `format=avcc`, and ships the avcC record module.
 oxideav-h264 = { version = "0.1.9", optional = true }

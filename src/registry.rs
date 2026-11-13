@@ -164,7 +164,8 @@ mod tests {
                 "tone_mapped",
                 "item_id",
                 "base_layer_fallback",
-                "reference_white"
+                "reference_white",
+                "irap_layers_only"
             ]
         );
         assert_eq!(

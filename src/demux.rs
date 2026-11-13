@@ -1198,6 +1198,10 @@ pub struct HeifDecoderOptions {
     /// `reference_white`: the SDR reference white in nits of a
     /// tone-mapped decode (0 = the contract default).
     pub reference_white: f32,
+    /// `irap_layers_only`: refuse a layered item whose enhancement
+    /// picture is not an IRAP picture instead of decoding it from its
+    /// access unit.
+    pub irap_layers_only: bool,
 }
 
 impl HeifDecoderOptions {
@@ -1226,6 +1230,7 @@ impl HeifDecoderOptions {
             item_id,
             base_layer_fallback,
             reference_white,
+            irap_layers_only: false,
         }
     }
 
@@ -1283,6 +1288,12 @@ impl HeifDecoderOptions {
         self
     }
 
+    /// Set `irap_layers_only`.
+    pub fn with_irap_layers_only(mut self, v: bool) -> Self {
+        self.irap_layers_only = v;
+        self
+    }
+
     /// The contract [`DecodeOptions`](crate::api::DecodeOptions) these
     /// settings describe (the thread budget is the execution
     /// context's, set by the decoder).
@@ -1309,6 +1320,7 @@ impl HeifDecoderOptions {
         o.with_strict(self.strict)
             .with_tone_mapped(self.tone_mapped)
             .with_base_layer_fallback(self.base_layer_fallback)
+            .with_irap_layers_only(self.irap_layers_only)
     }
 }
 
@@ -1374,6 +1386,12 @@ impl oxideav_core::CodecOptionsStruct for HeifDecoderOptions {
             default: oxideav_core::OptionValue::F32(0.0),
             help: "SDR reference white in nits for a tone-mapped decode (0 = the contract default)",
         },
+        oxideav_core::OptionField {
+            name: "irap_layers_only",
+            kind: oxideav_core::OptionKind::Bool,
+            default: oxideav_core::OptionValue::Bool(false),
+            help: "Refuse a layered item whose enhancement picture is not an IRAP picture instead of decoding it from its access unit",
+        },
     ];
 
     fn apply(&mut self, key: &str, value: &oxideav_core::OptionValue) -> CoreResult<()> {
@@ -1387,6 +1405,7 @@ impl oxideav_core::CodecOptionsStruct for HeifDecoderOptions {
             "item_id" => self.item_id = value.as_u32()?,
             "base_layer_fallback" => self.base_layer_fallback = value.as_bool()?,
             "reference_white" => self.reference_white = value.as_f32()?,
+            "irap_layers_only" => self.irap_layers_only = value.as_bool()?,
             other => {
                 return Err(CoreError::invalid(format!(
                     "heif: unknown decoder option '{other}'"

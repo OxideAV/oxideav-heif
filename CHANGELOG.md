@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`lhv1` items whose enhancement picture is not an IRAP picture decode** (round 488; oxideav-h265 0.0.18): H.265 F.8.1.6 withholds the picture of a layer that is not initialised, and such an item was a typed refusal. An HEVC image item is independently coded (HEIF B.2.2.1.1) and holds one access unit (B.2.2.1.3), so the picture is predicted from that access unit alone: the decoder is asked for it (`output_uninitialized_layers`). The three `TRAIL_R` `lhv1` items of multilayer002 equal the elementary stream's layer-1 pictures byte for byte and the file decodes whole. `ItemDecoder::with_irap_layers_only(true)`, `DecodeOptions::with_irap_layers_only`, the `"heif"` decoder's `irap_layers_only` option (`HeifDecoderOptions::with_irap_layers_only`) keep the refusal (and `base_layer_fallback` the base layer under it).
+- **Layer-set decode for the output layers an `oinf` names** (round 488): an `lhv1` item without `lsel` whose codec-derived output layer set yields other layers than its `oinf` lists (a VPS that outputs only its highest layer, an auxiliary layer above the primary one) is decoded through the HEVC decoder's layer-set target and the listed layers are taken from it — registry path and `exbl` path. `tests/aux_layers.rs`: an alpha layer carried as an `lhv1` auxiliary item (`auxC` `urn:mpeg:hevc:2015:auxid:1`, `lsel`) over the access unit of its `hvc1` master — master byte-exact against the black-box decoder, alpha within 1 code of the source ramp.
+
+### Changed
+
+- **oxideav-h265 floor 0.0.18.** Its VPS reader takes a VPS whose RBSP ends before `vps_extension_flag`: the base item of `iff_hevc_tile_multiple_items_tbas` decodes. Decode matrix: 152 files = 137 whole + 13 with keys + 2 in part, none refused (r486: 136 / 13 / 2 / 1).
+
 ## [0.0.15](https://github.com/OxideAV/oxideav-heif/compare/v0.0.14...v0.0.15) - 2026-11-11
 
 ### Other

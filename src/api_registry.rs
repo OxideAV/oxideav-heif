@@ -125,6 +125,7 @@ pub fn item_decoder(opts: &DecodeOptions) -> ItemDecoder<'static> {
     if opts.base_layer_fallback {
         d = d.base_layer_fallback();
     }
+    d = d.with_irap_layers_only(opts.irap_layers_only);
     if let Some(n) = opts.reference_white_nits {
         d = d.with_reference_white(n);
     }

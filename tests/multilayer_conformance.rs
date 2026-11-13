@@ -293,13 +293,34 @@ fn multilayer002_grids_of_base_and_enhanced_items() {
         "multilayer002: item 20014 layer 1 over layer 0 PSNR {:.2} dB",
         psnr(&bases[0], &enh)
     );
-    // The TRAIL_R lhv1 items: the enhancement picture of an
-    // uninitialised layer is never output (F.8.1.6) — typed refusal;
-    // the base layer under the fallback is the hvc1 item's picture.
+    // The TRAIL_R lhv1 items: an image item is independently coded
+    // (HEIF B.2.2.1.1), so the enhancement picture of the item's one
+    // access unit decodes from that access unit — the picture the
+    // elementary stream's decode gives for it. Under
+    // `irap_layers_only` the layer that is not initialised is never
+    // output (F.8.1.6) — typed refusal; the base layer under the
+    // fallback is the hvc1 item's picture.
+    let strict = ItemDecoder::direct().with_irap_layers_only(true);
+    let mut enhanced = vec![enh];
     for (k, id) in (20015..=20017).enumerate() {
-        let e = decode(&file, id).unwrap_err();
+        let f = planar(&decode(&file, id).unwrap());
+        eprintln!(
+            "multilayer002: item {id} layer 1 over layer 0 PSNR {:.2} dB, vs the stream's \
+             layer-1 picture {} PSNR {:.2} dB",
+            psnr(&bases[k + 1], &f),
+            k + 1,
+            psnr(&seq[k + 1], &f)
+        );
+        assert_eq!(
+            f,
+            seq[k + 1],
+            "lhv1 item {id} vs B021 layer 1 picture {}",
+            k + 1
+        );
+        enhanced.push(f);
+        let e = decode_item(&file, id, strict).unwrap_err();
         assert!(e.to_string().contains("not an IRAP picture"), "{id}: {e}");
-        let f = decode_item(&file, id, ItemDecoder::direct().base_layer_fallback()).unwrap();
+        let f = decode_item(&file, id, strict.base_layer_fallback()).unwrap();
         assert_eq!(planar(&f.frame), bases[k + 1], "item {id} base fallback");
     }
     // Grid 20018 tiles the four base pictures (2x2 of 512x256).
@@ -313,8 +334,23 @@ fn multilayer002_grids_of_base_and_enhanced_items() {
             assert_eq!(row, &tile[y * w..][..w], "grid tile {k} luma row {y}");
         }
     }
-    // Grid 20019 of the enhanced items refuses with its TRAIL_R tiles.
-    assert!(decode(&file, 20019).is_err());
+    // Grid 20019 tiles the four enhanced pictures; under
+    // `irap_layers_only` it refuses with its TRAIL_R tiles.
+    let grid = decode(&file, 20019).unwrap();
+    assert_eq!((grid.width, grid.height), (1024, 512));
+    let g = grid.tight();
+    for (k, tile) in enhanced.iter().enumerate() {
+        let (x0, y0) = ((k % 2) * w, (k / 2) * h);
+        for y in 0..h {
+            let row = &g.planes[0].data[(y0 + y) * 1024 + x0..][..w];
+            assert_eq!(
+                row,
+                &tile[y * w..][..w],
+                "enhanced grid tile {k} luma row {y}"
+            );
+        }
+    }
+    assert!(decode_item(&file, 20019, strict).is_err());
 }
 
 /// multilayer003: a `ster` pair of two single-layer `hvc1` views
