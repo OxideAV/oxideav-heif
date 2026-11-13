@@ -746,3 +746,60 @@ fn lossless_rgb_round_trips_exactly_as_identity_matrix_items() {
     assert_eq!(img.color.matrix, 6);
     assert_eq!(oxideav_heif::info(&lossy).unwrap().format, img.format);
 }
+
+/// The registry factory's decoder hands its frame the decoded planes
+/// themselves (round 488) where a decoder built by hand keeps the
+/// decoded image for `last_image` and copies them: the frames are the
+/// same, picture for picture, on every vendored bundle.
+#[test]
+fn factory_decoder_frames_equal_the_keeping_decoder_s() {
+    use oxideav_heif::demux::HeifCodec;
+    let root = common::vendored_root();
+    let frames = |dec: &mut dyn Decoder, bytes: &[u8]| -> Vec<oxideav_core::VideoFrame> {
+        let pkt = oxideav_core::Packet::new(0, TimeBase::new(1, 1), bytes.to_vec()).with_pts(0);
+        let mut out = Vec::new();
+        if dec.send_packet(&pkt).is_err() {
+            return out;
+        }
+        dec.flush().unwrap();
+        while let Ok(f) = dec.receive_frame() {
+            if let Frame::Video(v) = f {
+                out.push(v);
+            }
+        }
+        out
+    };
+    let mut seen = 0;
+    for bundle in [
+        "still-image-grid-2x2",
+        "still-image-with-alpha",
+        "still-image-overlay",
+        "still-10bit-main10",
+        "still-yuv444",
+        "single-image-1x1",
+    ] {
+        let bytes = fixture_bytes(&root, bundle);
+        let id = oxideav_core::CodecId::new("heif");
+        let mut keeping = HeifCodec::new(id.clone());
+        let kept = frames(&mut keeping, &bytes);
+        assert!(keeping.last_image().is_some(), "{bundle}");
+        let mut moving = HeifCodec::new(id.clone()).with_last_image(false);
+        let moved = frames(&mut moving, &bytes);
+        assert!(moving.last_image().is_none(), "{bundle}");
+        let params = oxideav_core::CodecParameters::video(id);
+        let mut made = oxideav_heif::make_decoder(&params).unwrap();
+        let factory = frames(&mut *made, &bytes);
+        assert_eq!(kept.len(), 1, "{bundle}");
+        for other in [&moved, &factory] {
+            assert_eq!(other.len(), kept.len(), "{bundle}");
+            for (a, b) in kept.iter().zip(other.iter()) {
+                assert_eq!(a.planes.len(), b.planes.len(), "{bundle}");
+                for (pa, pb) in a.planes.iter().zip(&b.planes) {
+                    assert_eq!((pa.stride, &pa.data), (pb.stride, &pb.data), "{bundle}");
+                }
+            }
+        }
+        seen += 1;
+    }
+    assert_eq!(seen, 6);
+}

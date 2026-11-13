@@ -1785,7 +1785,7 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         match &node.kind {
             ImageKind::Coded(_) => self.coded(node),
             ImageKind::Grid(g) => self.reconstruct_grid(node, g, &[]),
-            ImageKind::Tiled(t) => self.reconstruct_tiled(node, t),
+            ImageKind::Tiled(t) => self.reconstruct_tiled(node, t, &[]),
             ImageKind::PixelTransform(t) => {
                 let mut frames = Vec::with_capacity(node.inputs.len());
                 for i in &node.inputs {
@@ -1944,6 +1944,7 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         &mut self,
         node: &ImageNode,
         t: &crate::derived::TiledItem,
+        ops: &[crate::compose::Reorient],
     ) -> Result<HeifFrame> {
         let id = node.item.id;
         let cfg = &t.config;
@@ -2001,7 +2002,14 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
                 )));
             }
             let handler = meta.handler.as_ref().map(|h| h.handler_type);
-            return self.reconstruct_external_tiles(node, cfg, ext, &desc, num_tiles, handler);
+            return self.reconstruct_external_tiles(
+                node,
+                cfg,
+                ext,
+                (&desc, ops),
+                num_tiles,
+                handler,
+            );
         }
         // §6.11.3.2: in-file tiles carry tile_item_type + tipa.
         let Some((tile_type, _)) = &cfg.in_file_tiles else {
@@ -2011,7 +2019,7 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         };
         let data = self.file.item_data(id)?;
         let spans = deti.tile_spans(&data, num_tiles)?;
-        let mut canvas = GridCanvas::new(&desc);
+        let mut canvas = GridCanvas::with_reorientation(&desc, ops);
         // Every tile is "a coded image item of tile_item_type" with the
         // tilC-associated properties.
         let tile_node = ImageNode {
@@ -2056,7 +2064,7 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         for i in empty {
             canvas.place_blank(i)?;
         }
-        canvas.finish()
+        canvas.finish_threads(self.decoder.threads)
     }
 
     /// The external tiles of a `tili` item (Amd 2:2026 §6.11.2): each
@@ -2078,7 +2086,7 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         node: &ImageNode,
         cfg: &crate::props::TilC,
         ext: &crate::tiled::ExternalTiles,
-        desc: &crate::derived::GridDescriptor,
+        (desc, ops): (&crate::derived::GridDescriptor, &[crate::compose::Reorient]),
         num_tiles: u64,
         handler: Option<crate::boxes::FourCc>,
     ) -> Result<HeifFrame> {
@@ -2093,7 +2101,7 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
             tile_resolver: None,
             ..self.decoder
         };
-        let mut canvas = GridCanvas::new(desc);
+        let mut canvas = GridCanvas::with_reorientation(desc, ops);
         let mut jobs = Vec::new();
         let mut coding: Option<crate::boxes::FourCc> = None;
         for i in 0..num_tiles {
@@ -2143,7 +2151,7 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         if !jobs.is_empty() {
             self.run_tile_jobs(jobs, &mut canvas)?;
         }
-        canvas.finish()
+        canvas.finish_threads(self.decoder.threads)
     }
 
     /// A coded item with a `cexg` property (HEIF Amd 1:2025 §6.5.41): every
@@ -2304,10 +2312,11 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
                     .join(", ")
             )));
         }
-        // The rotations and mirrors that lead a grid's chain are the
-        // canvas's: the tiles go straight to their oriented places.
+        // The rotations and mirrors that lead the chain of a grid or a
+        // tiled item are the canvas's: the tiles go straight to their
+        // oriented places.
         let ops: Vec<crate::compose::Reorient> = match &node.kind {
-            ImageKind::Grid(_) => node
+            ImageKind::Grid(_) | ImageKind::Tiled(_) => node
                 .properties
                 .transformative()
                 .map_while(|e| crate::compose::Reorient::of(&e.property))
@@ -2316,6 +2325,7 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         };
         let rec = match &node.kind {
             ImageKind::Grid(g) if !ops.is_empty() => self.reconstruct_grid(node, g, &ops)?,
+            ImageKind::Tiled(t) if !ops.is_empty() => self.reconstruct_tiled(node, t, &ops)?,
             _ => self.reconstruct(node)?,
         };
         let mut out = crate::compose::apply_transforms_owned_threads(

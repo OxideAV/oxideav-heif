@@ -10,7 +10,7 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_heif::compose::{
     apply_clap, apply_imir, apply_irot, attach_alpha, composite_grid, composite_overlay, crop,
-    OverlayInput,
+    GridCanvas, OverlayInput, Reorient,
 };
 use oxideav_heif::derived::{GridDescriptor, OverlayDescriptor};
 use oxideav_heif::image::{Chroma, HeifFrame, HeifPixelFormat};
@@ -77,6 +77,7 @@ fuzz_target!(|data: &[u8]| {
         }
         if let Ok(out) = composite_grid(&g, &tiles) {
             let _ = out.validate();
+            oriented(&g, &tiles, &out, body);
             transforms(&out, body);
         }
     } else {
@@ -114,6 +115,58 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 });
+
+/// A grid canvas given a chain of rotations and mirrors (from the
+/// input) is the composed grid taken through that chain one operation
+/// at a time — with every other tile turned by the canvas's turner
+/// first, the tiles placed last to first.
+fn oriented(g: &GridDescriptor, tiles: &[HeifFrame], plain: &HeifFrame, steer: &[u8]) {
+    let s = |i: usize| steer.get(i).copied().unwrap_or(0);
+    let chain: Vec<Reorient> = (0..(s(12) % 4) as usize)
+        .map(|k| {
+            let b = s(13 + k);
+            if b & 4 == 0 {
+                Reorient::Rotate(b & 3)
+            } else {
+                Reorient::Mirror(b & 1)
+            }
+        })
+        .collect();
+    let mut want = plain.clone();
+    for op in &chain {
+        let next = match *op {
+            Reorient::Rotate(a) => apply_irot(&want, &Irot::new(a)),
+            Reorient::Mirror(a) => apply_imir(&want, &Imir::new(a)),
+        };
+        let Ok(next) = next else {
+            return;
+        };
+        want = next;
+    }
+    let mut canvas = GridCanvas::with_reorientation(g, &chain);
+    let turner = canvas.turner();
+    for (i, t) in tiles.iter().enumerate().rev() {
+        let placed = if i % 2 == 0 {
+            canvas.place_tile(i, &turner.turn(t.clone()))
+        } else {
+            canvas.place(i, t)
+        };
+        placed.expect("the tiles composed as a plain grid");
+    }
+    let got = canvas
+        .finish_threads(1 + (s(16) % 3) as usize)
+        .expect("every tile was placed");
+    assert_eq!(
+        (got.width, got.height, got.format),
+        (want.width, want.height, want.format),
+        "oriented grid geometry, chain {chain:?}"
+    );
+    assert_eq!(
+        got.tight().planes,
+        want.tight().planes,
+        "oriented grid samples, chain {chain:?}"
+    );
+}
 
 fn transforms(f: &HeifFrame, steer: &[u8]) {
     let s = |i: usize| steer.get(i).copied().unwrap_or(0);
