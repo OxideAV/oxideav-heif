@@ -1569,7 +1569,7 @@ What was in this crate:
   item's alpha render the grid's, the OS reader sample-exact.
 * **Sequences**: the samples were coded one after the other. They are
   parallel jobs now (prepare + code, one picture in flight per
-  worker, at most 2²⁴ pixels in flight (2²² by default since r488, a
+  worker, at most 2²⁴ pixels in flight by default (a
   caller's choice — next section) — the resident set grows by a
   picture of codec state per worker, which is the 514 MiB); an AVC
   sequence is one bitstream and stays serial.
@@ -1686,13 +1686,15 @@ state — about 50 MiB for a 1080p HEVC picture, the codec's — so the
 resident set rose with the worker count (the r487 table: 195 → 514
 MiB). `EncodeOptions::sequence_pixels_in_flight`
 (`with_sequence_pixels_in_flight`) bounds the pixels the workers hold
-at once; the default, `SEQUENCE_PIXELS_IN_FLIGHT`, went from 2²⁴ to
-2²² — two 1080p pictures, four 720p ones, one picture above 4 MP — so
-a sequence encode stays near its serial resident set whatever the
-budget, and a caller with memory to spend asks for more. The file is
+at once. The default, `SEQUENCE_PIXELS_IN_FLIGHT`, stays 2²⁴ (eight
+1080p pictures): a caller who grants workers gets their wall time. A
+memory-constrained caller passes 2²² — two 1080p pictures, four 720p
+ones, one picture above 4 MP — and the sequence encode stays near its
+serial resident set whatever the budget, at about three times the
+wall time on eight workers (the "2²²" column below). The file is
 the same for every bound (`tests/encode_budget.rs`).
 
-| 16 × 1920×1080 HEVC (`heifencbench --frames 16`; the 16 source frames are 95 MiB of every row) | before | after (default) | after, `--in-flight` 2²³ / 2²⁴ |
+| 16 × 1920×1080 HEVC (`heifencbench --frames 16`; the 16 source frames are 95 MiB of every row) | before | `--in-flight` 2²² | `--in-flight` 2²³ / 2²⁴ (the default) |
 |---|---|---|---|
 | 1 worker | 9.9 s / 177 MiB | 11.2 s / 181 MiB | — |
 | 2 workers | 6.19 s / 232 MiB | 6.20 s / 228 MiB | — |

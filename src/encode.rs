@@ -217,10 +217,10 @@ pub struct EncodeOptions {
     /// (`encode_all`): each worker holds one picture of codec state —
     /// some tens of bytes per pixel — so this bounds how far the
     /// resident set of a sequence encode grows with the thread budget.
-    /// `None` = [`SEQUENCE_PIXELS_IN_FLIGHT`] (two 1080p pictures: the
-    /// resident set stays near the serial one); a larger value trades
-    /// memory for wall time, up to one picture per worker. One picture
-    /// is always in flight. The bytes do not depend on it.
+    /// `None` = [`SEQUENCE_PIXELS_IN_FLIGHT`] (eight 1080p pictures);
+    /// a smaller value trades wall time for memory (`1 << 22` keeps a
+    /// 1080p sequence near its serial resident set). One picture is
+    /// always in flight. The bytes do not depend on it.
     pub sequence_pixels_in_flight: Option<u64>,
     /// HEVC coded bit depth (8 / 10 / 12). `None` follows the source
     /// ([`coded_depth`]): 8-bit sources code at 8 bits (the historical
@@ -2503,13 +2503,14 @@ pub(crate) struct SequenceInput {
 
 /// The pixels an image sequence keeps in flight across its workers
 /// unless [`EncodeOptions::sequence_pixels_in_flight`] says otherwise
-/// (2²²: two 1080p pictures, four 720p ones, one picture above 4 MP).
-/// Each worker holds one picture of codec state, some tens of bytes
-/// per pixel (about 50 MiB for a 1080p HEVC picture), so the bound —
-/// not the thread budget — decides how far the resident set of a
-/// parallel sequence encode rises above the serial one. The bytes do
-/// not depend on it.
-pub const SEQUENCE_PIXELS_IN_FLIGHT: u64 = 1 << 22;
+/// (2²⁴: eight 1080p pictures, one 16 MP picture). Each worker holds
+/// one picture of codec state, some tens of bytes per pixel (about
+/// 50 MiB for a 1080p HEVC picture), so a caller who grants workers
+/// gets their wall time and pays that memory; a memory-constrained
+/// caller lowers the bound (2²² keeps a 1080p sequence near its
+/// serial resident set, at about three times the wall time on eight
+/// workers). The bytes do not depend on it.
+pub const SEQUENCE_PIXELS_IN_FLIGHT: u64 = 1 << 24;
 
 /// One coded sample of [`encode_sequence`] with its time-parallel
 /// alpha sample: what a frame job hands back to the writer.
