@@ -7,6 +7,8 @@
 //!   metadata items and `altr` alternates — into a new file, which must
 //!   re-parse and decode to the same picture, colour and metadata as the
 //!   source whenever the source decodes (the re-mux oracle);
+//!   the whole collection (`HeifWriter::from_collection`) re-muxes to
+//!   a file that re-muxes to itself byte for byte;
 //! * anything else: the bytes drive the high-level encoder — picture
 //!   geometry and layout, codec (HEVC `pcm` / AV1 lossless), transforms
 //!   (`clap` / `irot` / `imir` on the items or on an `iden`), grid tile,
@@ -117,8 +119,28 @@ fn is_external_tile_reference(
         && loc.extents[0].length == 0
 }
 
+/// The whole collection of `bytes` (`from_collection`: every
+/// displayable item, shared inputs once) re-muxed: the written file
+/// holds the writer's invariants and is a fixed point — its own
+/// collection writes the same bytes.
+fn collection_oracle(bytes: &[u8]) {
+    let Ok(w) = HeifWriter::from_collection(bytes) else {
+        return;
+    };
+    let Ok(once) = w.write_to_vec() else {
+        return;
+    };
+    written_invariants(&once);
+    let twice = HeifWriter::from_collection(&once)
+        .expect("the collection of a written file")
+        .write_to_vec()
+        .expect("the written collection writes again");
+    assert!(once == twice, "collection re-mux is not a fixed point");
+}
+
 /// Re-mux `bytes` and compare the primaries when the source decodes.
 fn remux_oracle(bytes: &[u8]) {
+    collection_oracle(bytes);
     let Ok(w) = HeifWriter::from_files(&[bytes]) else {
         return;
     };

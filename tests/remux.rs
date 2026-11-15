@@ -138,3 +138,132 @@ fn every_corpus_primary_remuxes_to_the_same_image() {
     assert!(refused.is_empty(), "refused: {refused:?}");
     assert!(remuxed >= 50, "only {remuxed} files re-muxed");
 }
+
+/// Reader / writer symmetry, item by item: every image item of every
+/// file — grid tiles, thumbnails, auxiliaries, hidden items, tile
+/// items, not only what a viewer shows — imported in one call
+/// (`import_items`: shared inputs once) decodes from the written file
+/// to the picture it decodes to in its source. An item the source
+/// refuses (a protected item without its key, a tile item without
+/// `rloc`) is carried all the same and refused the same way.
+#[test]
+fn every_image_item_remuxes_to_the_same_picture() {
+    use oxideav_heif::decode::{ItemDecoder, decode_item};
+    let (mut files, mut items, mut same_refusal) = (0usize, 0usize, 0usize);
+    for path in inputs() {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let bytes = std::fs::read(&path).unwrap();
+        let Ok(src) = HeifFile::parse(&bytes) else {
+            continue;
+        };
+        let Ok(meta) = src.meta() else {
+            continue;
+        };
+        let Ok(primary) = src.primary_item().map(|p| p.id) else {
+            continue;
+        };
+        let ids: Vec<u32> = meta
+            .items
+            .iter()
+            .filter(|i| i.is_image())
+            .map(|i| i.id)
+            .collect();
+        let mut w = HeifWriter::new();
+        let new_ids = w
+            .import_items(&src, &ids)
+            .unwrap_or_else(|e| panic!("{name}: import: {e}"));
+        let at = ids.iter().position(|i| *i == primary).unwrap();
+        w.set_primary(new_ids[at]);
+        let out = w
+            .write_to_vec()
+            .unwrap_or_else(|e| panic!("{name}: write: {e}"));
+        let dst = HeifFile::parse(&out).unwrap_or_else(|e| panic!("{name}: re-parse: {e}"));
+        // Nothing imported twice: at most one item per source item.
+        assert!(
+            dst.meta().unwrap().items.len() <= meta.items.len(),
+            "{name}: {} items written for {} in the source",
+            dst.meta().unwrap().items.len(),
+            meta.items.len()
+        );
+        for (old, new) in ids.iter().zip(&new_ids) {
+            let a = decode_item(&src, *old, ItemDecoder::direct());
+            let b = decode_item(&dst, *new, ItemDecoder::direct());
+            match (a, b) {
+                (Ok(a), Ok(b)) => {
+                    assert_eq!(a.frame, b.frame, "{name}: item {old} → {new}: pixels");
+                    items += 1;
+                }
+                (Err(_), Err(_)) => same_refusal += 1,
+                (a, b) => panic!(
+                    "{name}: item {old} → {new}: source {:?}, re-mux {:?}",
+                    a.map(|i| (i.width(), i.height()))
+                        .map_err(|e| e.to_string()),
+                    b.map(|i| (i.width(), i.height()))
+                        .map_err(|e| e.to_string())
+                ),
+            }
+        }
+        files += 1;
+    }
+    eprintln!(
+        "item re-mux: {files} files, {items} image items decode to the same picture, \
+         {same_refusal} refused on both sides"
+    );
+    assert!(items >= 60, "only {items} items compared");
+}
+
+/// The whole collection of a file (`from_collection`: every
+/// displayable item, shared inputs once, the groups among them) shows
+/// what the source shows, and writing it is a fixed point: the
+/// collection of the written file writes the same bytes.
+#[test]
+fn a_collection_remux_is_a_fixed_point() {
+    use oxideav_heif::decode_all_partial;
+    let opts = DecodeOptions::default().with_strict(false);
+    let (mut files, mut frames) = (0usize, 0usize);
+    for path in inputs() {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let bytes = std::fs::read(&path).unwrap();
+        let Ok(src) = HeifFile::parse(&bytes) else {
+            continue;
+        };
+        if src.primary_item().is_err() {
+            continue;
+        }
+        let once = HeifWriter::from_collection(&bytes)
+            .unwrap_or_else(|e| panic!("{name}: collection: {e}"))
+            .write_to_vec()
+            .unwrap_or_else(|e| panic!("{name}: write: {e}"));
+        let twice = HeifWriter::from_collection(&once)
+            .unwrap_or_else(|e| panic!("{name}: collection of the re-mux: {e}"))
+            .write_to_vec()
+            .unwrap();
+        assert!(once == twice, "{name}: the re-mux of the re-mux differs");
+        // The stills a viewer is shown, in order (a source's tracks
+        // are not items and stay behind).
+        let stills = |b: &[u8]| -> Vec<_> {
+            let Ok(p) = decode_all_partial(b, &opts) else {
+                return Vec::new();
+            };
+            p.frames
+                .into_iter()
+                .filter(|f| f.track_id.is_none())
+                .map(|f| {
+                    (
+                        f.image.width,
+                        f.image.height,
+                        f.image.format,
+                        f.image.planes,
+                    )
+                })
+                .collect()
+        };
+        let (a, b) = (stills(&bytes), stills(&once));
+        assert_eq!(a.len(), b.len(), "{name}: stills shown");
+        assert!(a == b, "{name}: the collection shows other pictures");
+        frames += a.len();
+        files += 1;
+    }
+    eprintln!("collection re-mux: {files} files, {frames} stills, byte-stable on the second pass");
+    assert!(files >= 50, "only {files} collections re-muxed");
+}

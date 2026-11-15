@@ -1042,26 +1042,85 @@ impl HeifWriter {
     /// item keeps its extents — `cexg`), properties re-typed through
     /// [`Property::parse`] (unknown boxes verbatim), the hidden flags
     /// and item names kept; ids are re-assigned. Returns the new id of
-    /// `id`. A `tili` tiled item comes along with its tile data, `deti`
+    /// `id`; the items are added in the order the source lists them
+    /// (`iinf`). A `tili` tiled item comes along with its tile data, `deti`
     /// entry and tile properties (in-file tiles; external tiles are a
     /// typed refusal). A protected item is imported as it is — the
     /// encrypted body, the `ienc` property, the `sinf` of its `ipro`
     /// entry byte for byte and the auxiliary information item behind
     /// its `auxr` reference (with its `iaux`) — so the re-muxed file
     /// decrypts under the same keys; no cipher is involved. The caller
-    /// chooses the primary.
+    /// chooses the primary. An HEVC tile item (`hvt1`, B.2.5) brings
+    /// the HEVC image item its `tbas` reference names and the tile
+    /// items its `dpnd` references name.
     pub fn import_item<D: AsRef<[u8]>>(&mut self, file: &HeifFile<D>, id: u32) -> Result<u32> {
+        Ok(self.import_items(file, &[id])?[0])
+    }
+
+    /// [`Self::import_item`] for several items of one file at once:
+    /// what two of them share — a tile of two grids, the alpha plane
+    /// of several masters, the picture behind a set of tile items — is
+    /// imported once, and an entity group is kept when all its members
+    /// are among the imported items (a `brst` burst, a `ster` pair, a
+    /// `pymd` pyramid). Returns the new ids in the order of `ids`; an
+    /// id given twice maps to the same item.
+    pub fn import_items<D: AsRef<[u8]>>(
+        &mut self,
+        file: &HeifFile<D>,
+        ids: &[u32],
+    ) -> Result<Vec<u32>> {
         use std::collections::BTreeMap;
         let meta = file.meta()?;
         let mut map: BTreeMap<u32, u32> = BTreeMap::new();
-        let mut work = vec![id];
+        // What the items need: their inputs, and the items that
+        // describe or accompany them.
+        let mut wanted: HashSet<u32> = HashSet::new();
+        let mut work: Vec<u32> = ids.to_vec();
         while let Some(src) = work.pop() {
-            if map.contains_key(&src) {
+            if !wanted.insert(src) {
                 continue;
             }
             let info = meta
                 .item(src)
                 .ok_or_else(|| HeifError::invalid(format!("import: item {src} is not in iinf")))?;
+            if info.protection_index != 0 {
+                // The auxiliary information item of a protected item.
+                work.extend(meta.references_from(src, b"auxr"));
+            }
+            work.extend(meta.references_from(src, &reference::DIMG));
+            // Decoding dependencies: the external base layer of an
+            // `lhv1` item (HEIF B.2.2.1.3 `exbl`) and the items a
+            // predictively coded item is predicted from (§6.4.9 `pred`).
+            work.extend(meta.references_from(src, &reference::EXBL));
+            work.extend(meta.references_from(src, &reference::PRED));
+            // An HEVC tile item is read out of the picture its `tbas`
+            // names (B.2.5, §6.5.7); its dependent slice segments
+            // belong to the slice of the tile item `dpnd` names.
+            work.extend(meta.references_from(src, &reference::TBAS));
+            work.extend(meta.references_from(src, &reference::DPND));
+            for t in [reference::AUXL, reference::THMB, reference::CDSC] {
+                work.extend(meta.references_to(src, &t));
+            }
+            for g in meta.groups_containing(src, b"altr") {
+                // An entity may be a track (MIAF §7.3.11.2: an image
+                // and a track as alternates); only items are imported.
+                work.extend(
+                    g.entity_ids
+                        .iter()
+                        .copied()
+                        .filter(|e| meta.item(*e).is_some()),
+                );
+            }
+        }
+        // Imported in the order the source lists them (`iinf`), so the
+        // collection reads in the same order and a re-mux of the
+        // written file writes the same file.
+        for info in meta.items.iter().filter(|i| wanted.contains(&i.id)) {
+            let src = info.id;
+            if map.contains_key(&src) {
+                // A second `infe` for an id already imported.
+                continue;
+            }
             // A protected item (ISO/IEC 14496-12 §8.11.5, 23001-7
             // Amd 1 §8.3 / §8.4) travels as it is: the body still
             // encrypted, its `ienc` among the properties, the `sinf`
@@ -1194,28 +1253,6 @@ impl HeifWriter {
             map.insert(src, new_id);
             if let Some(sinf) = protection {
                 self.protections.push((new_id, sinf));
-                work.extend(meta.references_from(src, b"auxr"));
-            }
-            // What this item needs: its inputs, and the items that
-            // describe or accompany it.
-            work.extend(dimg);
-            // Decoding dependencies: the external base layer of an
-            // `lhv1` item (HEIF B.2.2.1.3 `exbl`) and the items a
-            // predictively coded item is predicted from (§6.4.9 `pred`).
-            work.extend(meta.references_from(src, &reference::EXBL));
-            work.extend(meta.references_from(src, &reference::PRED));
-            for t in [reference::AUXL, reference::THMB, reference::CDSC] {
-                work.extend(meta.references_to(src, &t));
-            }
-            for g in meta.groups_containing(src, b"altr") {
-                // An entity may be a track (MIAF §7.3.11.2: an image
-                // and a track as alternates); only items are imported.
-                work.extend(
-                    g.entity_ids
-                        .iter()
-                        .copied()
-                        .filter(|e| meta.item(*e).is_some()),
-                );
             }
         }
         // References among the imported items, in file order.
@@ -1255,7 +1292,43 @@ impl HeifWriter {
                 g.payload.clone(),
             ));
         }
-        Ok(map[&id])
+        ids.iter()
+            .map(|id| {
+                map.get(id)
+                    .copied()
+                    .ok_or_else(|| HeifError::invalid(format!("import: item {id} is not in iinf")))
+            })
+            .collect()
+    }
+
+    /// A writer holding the whole image collection of one file: every
+    /// displayable image item ([`crate::meta::Meta::display_order`], each `altr`
+    /// group with all its members) and the primary item, with
+    /// everything they need ([`Self::import_items`] — shared inputs
+    /// once, the groups among them kept), in the source's order, the
+    /// source's primary as the primary. The collection of a file
+    /// written from one writes the same bytes. Items no displayable
+    /// image reaches (an orphan hidden item, a metadata item
+    /// describing nothing) are left behind, and so are the file's
+    /// image-sequence tracks, which are not items.
+    pub fn from_collection<B: AsRef<[u8]>>(bytes: B) -> Result<Self> {
+        let f = HeifFile::parse_borrowed(bytes.as_ref())?;
+        let meta = f.meta()?;
+        let primary = f.primary_item()?.id;
+        let mut roots = vec![primary];
+        let mut listed: HashSet<u32> = HashSet::from([primary]);
+        for entry in meta.display_order() {
+            for id in entry {
+                // An `altr` entity may be a track; only items are imported.
+                if meta.item(id).is_some() && listed.insert(id) {
+                    roots.push(id);
+                }
+            }
+        }
+        let mut w = Self::new();
+        let ids = w.import_items(&f, &roots)?;
+        w.set_primary(ids[0]);
+        Ok(w)
     }
 
     /// A writer holding the primary images of `files` (every one a
