@@ -1623,8 +1623,20 @@ fn parse_sample_table(stbl: &[u8], file_len: u64) -> Result<Vec<Sample>> {
             )));
         }
         if sample_size != 0 {
+            // Samples of one non-zero size: each takes its own bytes of
+            // the file within a chunk, so a table declaring more
+            // samples than the file has bytes is not backed by data —
+            // refused before anything is sized by the count.
+            if count as u64 > file_len {
+                return Err(HeifError::invalid(format!(
+                    "stsz declares {count} samples of {sample_size} bytes in a {file_len}-byte file"
+                )));
+            }
             SampleSizes::Fixed(sample_size, count)
         } else {
+            if count > r.remaining() / 4 {
+                return Err(HeifError::invalid("stsz sample_count exceeds the box"));
+            }
             let mut v = Vec::with_capacity(count);
             for _ in 0..count {
                 v.push(r.u32("stsz entry_size")?);
@@ -1641,6 +1653,14 @@ fn parse_sample_table(stbl: &[u8], file_len: u64) -> Result<Vec<Sample>> {
             return Err(HeifError::exhausted(format!(
                 "stz2 declares {count} samples"
             )));
+        }
+        // 4, 8 or 16 bits per entry: the count is held to the bytes
+        // that follow before the table is sized by it.
+        if !matches!(field_size, 4 | 8 | 16) {
+            return Err(HeifError::invalid(format!("stz2 field_size {field_size}")));
+        }
+        if count as u64 * u64::from(field_size) > r.remaining() as u64 * 8 {
+            return Err(HeifError::invalid("stz2 sample_count exceeds the box"));
         }
         let mut v = Vec::with_capacity(count);
         match field_size {
@@ -1717,17 +1737,23 @@ fn parse_sample_table(stbl: &[u8], file_len: u64) -> Result<Vec<Sample>> {
     if n > r.remaining() / 8 {
         return Err(HeifError::invalid("stts entry_count exceeds the box"));
     }
+    // One duration per sample the size table declares: a run-length
+    // entry is expanded only as far as there are samples to time.
     let mut durations: Vec<u32> = Vec::with_capacity(sample_count);
+    let mut timed = 0usize;
     for _ in 0..n {
         let count = r.u32("stts sample_count")? as usize;
         let delta = r.u32("stts sample_delta")?;
-        if durations.len() + count > MAX_SAMPLES {
+        timed = timed.saturating_add(count);
+        if timed > MAX_SAMPLES {
             return Err(HeifError::exhausted("stts expands past the sample cap"));
         }
-        durations.extend(std::iter::repeat_n(delta, count));
+        let take = count.min(sample_count - durations.len());
+        durations.extend(std::iter::repeat_n(delta, take));
     }
     // Composition offsets.
     let mut cts_offsets: Vec<i64> = Vec::new();
+    let mut offset_runs = 0usize;
     if let Some(p) = ctts {
         let (v, _f, body) = parse_full_box(p)?;
         let mut r = Reader::new(body);
@@ -1742,10 +1768,12 @@ fn parse_sample_table(stbl: &[u8], file_len: u64) -> Result<Vec<Sample>> {
             } else {
                 r.u32("ctts sample_offset")? as i64
             };
-            if cts_offsets.len() + count > MAX_SAMPLES {
+            offset_runs = offset_runs.saturating_add(count);
+            if offset_runs > MAX_SAMPLES {
                 return Err(HeifError::exhausted("ctts expands past the sample cap"));
             }
-            cts_offsets.extend(std::iter::repeat_n(off, count));
+            let take = count.min(sample_count - cts_offsets.len());
+            cts_offsets.extend(std::iter::repeat_n(off, take));
         }
     }
     // Sync samples.
@@ -2081,5 +2109,86 @@ mod tests {
             description_index: 1,
         };
         assert_eq!(s.pts(), 0);
+    }
+
+    /// A sample table is sized by what its boxes and the file back, not
+    /// by the counts they declare: a fixed-size `stsz` naming more
+    /// samples than the file has bytes, a size table or `stz2` longer
+    /// than its box, are refused before the count sizes anything, and
+    /// a run-length `stts` / `ctts` entry is expanded only as far as
+    /// there are samples.
+    #[test]
+    fn sample_tables_are_sized_by_their_bytes() {
+        use crate::boxes::write::full_boxed;
+        let be = |v: u32| v.to_be_bytes();
+        let stbl = |stsz: Vec<u8>, stts_count: u32, ctts_count: u32, per_chunk: u32| {
+            let mut b = Vec::new();
+            b.extend(full_boxed(
+                b"stts",
+                0,
+                0,
+                &[be(1), be(stts_count), be(10)].concat(),
+            ));
+            b.extend(full_boxed(
+                b"ctts",
+                0,
+                0,
+                &[be(1), be(ctts_count), be(3)].concat(),
+            ));
+            b.extend(full_boxed(
+                b"stsc",
+                0,
+                0,
+                &[be(1), be(1), be(per_chunk), be(1)].concat(),
+            ));
+            b.extend(stsz);
+            b.extend(full_boxed(b"stco", 0, 0, &[be(1), be(0)].concat()));
+            b
+        };
+        let fixed =
+            |size: u32, count: u32| full_boxed(b"stsz", 0, 0, &[be(size), be(count)].concat());
+        // Four 2-byte samples in a 64-byte file; the timing boxes run
+        // on for 2^24 samples.
+        let samples = parse_sample_table(&stbl(fixed(2, 4), 1 << 24, 1 << 24, 4), 64).unwrap();
+        assert_eq!(samples.len(), 4);
+        assert_eq!(
+            samples
+                .iter()
+                .map(|s| (s.offset, s.dts, s.cts_offset))
+                .collect::<Vec<_>>(),
+            [(0, 0, 3), (2, 10, 3), (4, 20, 3), (6, 30, 3)]
+        );
+        // … and past the cap they are still refused.
+        assert!(parse_sample_table(&stbl(fixed(2, 4), (1 << 24) + 1, 1, 4), 64).is_err());
+        // 2^24 one-byte samples declared in a 64-byte file.
+        let e = parse_sample_table(&stbl(fixed(1, 1 << 24), 1, 1, 1 << 24), 64).unwrap_err();
+        assert!(e.to_string().contains("64-byte file"), "{e}");
+        // A size table of 2^20 entries in a 12-byte box.
+        let table = full_boxed(b"stsz", 0, 0, &[be(0), be(1 << 20), be(1)].concat());
+        let e = parse_sample_table(&stbl(table, 1, 1, 1), 64).unwrap_err();
+        assert!(e.to_string().contains("exceeds the box"), "{e}");
+        // The same through stz2, at every field size; a count the box
+        // does back still parses (two 4-bit sizes in one byte).
+        for field in [4u8, 8, 16] {
+            let stz2 = full_boxed(
+                b"stz2",
+                0,
+                0,
+                &[&[0, 0, 0, field][..], &be(1 << 20), &[0x11, 0x11]].concat(),
+            );
+            let e = parse_sample_table(&stbl(stz2, 1, 1, 1), 64).unwrap_err();
+            assert!(
+                e.to_string().contains("exceeds the box"),
+                "field {field}: {e}"
+            );
+        }
+        let stz2 = full_boxed(
+            b"stz2",
+            0,
+            0,
+            &[&[0, 0, 0, 4][..], &be(2), &[0x12]].concat(),
+        );
+        let samples = parse_sample_table(&stbl(stz2, 2, 2, 2), 64).unwrap();
+        assert_eq!(samples.iter().map(|s| s.size).collect::<Vec<_>>(), [1, 2]);
     }
 }
