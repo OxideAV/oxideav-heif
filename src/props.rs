@@ -1429,6 +1429,22 @@ pub struct PropertyEntry {
     pub property: Property,
 }
 impl PropertyEntry {
+    /// The rectangle this entry's `clap` cuts out of a `width × height`
+    /// input, or `None` when the reader leaves the property out of the
+    /// chain. §6.3: the chain is formed from every essential
+    /// transformative property and *any set* of the non-essential ones,
+    /// so a non-essential aperture that cannot be applied to its input
+    /// (larger than it, off the pixel grid, zero) is left out and the
+    /// rest of the chain applies; an essential one is an error.
+    #[doc(hidden)]
+    pub fn selected_clap(&self, clap: &Clap, width: u32, height: u32) -> Result<Option<CropRect>> {
+        match clap.resolve(width, height) {
+            Ok(r) => Ok(Some(r)),
+            Err(_) if !self.essential => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Every field as a positional argument, in declaration order.
     pub fn new(index: u16, essential: bool, property: Property) -> Self {
         Self {
@@ -1843,9 +1859,10 @@ impl ItemProperties {
             }
             match &e.property {
                 Property::Clap(c) => {
-                    let r = c.resolve(w, h)?;
-                    w = r.width;
-                    h = r.height;
+                    if let Some(r) = e.selected_clap(c, w, h)? {
+                        w = r.width;
+                        h = r.height;
+                    }
                 }
                 Property::Irot(r) => {
                     if r.angle % 2 == 1 {

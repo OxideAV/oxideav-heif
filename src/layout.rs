@@ -214,7 +214,9 @@ pub fn predict_output(node: &ImageNode) -> Result<(HeifPixelFormat, (u32, u32))>
     for e in node.properties.transformative() {
         match &e.property {
             Property::Clap(c) => {
-                let r = c.resolve(w, h)?;
+                let Some(r) = e.selected_clap(c, w, h)? else {
+                    continue;
+                };
                 if needs_444(
                     fmt.chroma,
                     r.x % 2 == 1 || r.width % 2 == 1,

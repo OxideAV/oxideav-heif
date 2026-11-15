@@ -367,7 +367,12 @@ pub fn apply_transforms<'a>(
         }
         let input = cur.as_ref().unwrap_or(f);
         let next = match &e.property {
-            Property::Clap(c) => apply_clap(input, c)?,
+            Property::Clap(c) => match e.selected_clap(c, input.width, input.height)? {
+                Some(r) => crop(input, r.x, r.y, r.width, r.height)?,
+                // A non-essential aperture that does not fit: left out
+                // of the chain (§6.3).
+                None => continue,
+            },
             Property::Irot(r) => apply_irot(input, r)?,
             Property::Imir(m) => apply_imir(input, m)?,
             Property::Iscl(s) => apply_iscl(input, s)?,
@@ -405,7 +410,10 @@ pub fn apply_transforms_owned_threads<'a>(
             continue;
         }
         cur = match &e.property {
-            Property::Clap(c) => apply_clap(&cur, c)?,
+            Property::Clap(c) => match e.selected_clap(c, cur.width, cur.height)? {
+                Some(r) => crop(&cur, r.x, r.y, r.width, r.height)?,
+                None => continue,
+            },
             // No turn: the picture as it is, not a copy of it.
             Property::Irot(r) if r.angle & 3 == 0 => continue,
             Property::Irot(r) => apply_irot_threads(&cur, r, threads)?,
@@ -2259,6 +2267,40 @@ mod tests {
             (half.width, half.height),
             (f.width.div_ceil(2), f.height.div_ceil(2))
         );
+    }
+
+    /// §6.3: a non-essential aperture that does not fit its input is
+    /// left out of the chain (the rest applies); an essential one is
+    /// an error; one that fits applies whatever its flag.
+    #[test]
+    fn non_essential_clap_that_does_not_fit_is_left_out() {
+        use crate::props::Clap;
+        let f = ramp(4, 2, Chroma::Yuv444);
+        let chain = |essential: bool, w: u32, h: u32| {
+            vec![
+                PropertyEntry {
+                    index: 1,
+                    essential,
+                    property: Property::Clap(Clap::integer(w, h, 0, 0)),
+                },
+                PropertyEntry {
+                    index: 2,
+                    essential: false,
+                    property: Property::Irot(Irot { angle: 1 }),
+                },
+            ]
+        };
+        let turned = apply_irot(&f, &Irot { angle: 1 }).unwrap();
+        let out = apply_transforms(&f, &chain(false, 40, 20), false).unwrap();
+        assert_eq!(out, turned);
+        let owned = apply_transforms_owned(f.clone(), &chain(false, 40, 20), false).unwrap();
+        assert_eq!(owned, turned);
+        assert!(apply_transforms(&f, &chain(true, 40, 20), false).is_err());
+        assert!(apply_transforms_owned(f.clone(), &chain(true, 40, 20), false).is_err());
+        for essential in [false, true] {
+            let cut = apply_transforms(&f, &chain(essential, 2, 2), false).unwrap();
+            assert_eq!((cut.width, cut.height), (2, 2));
+        }
     }
 
     #[test]

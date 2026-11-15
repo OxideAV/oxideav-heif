@@ -16,7 +16,9 @@ mod common;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use common::cipher::{OpenSsl, keys};
 use oxideav_heif::HeifFile;
+use oxideav_heif::cenc::CencReading;
 use oxideav_heif::decode::{ItemDecoder, decode_item};
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -41,12 +43,8 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// What gates a refused item, from its error.
 fn gate(message: &str) -> &'static str {
-    const GATES: [(&str, &str); 10] = [
+    const GATES: [(&str, &str); 9] = [
         ("encrypted", "protected item, no cipher given"),
-        (
-            "clean aperture",
-            "clap larger than the item's picture (a thumbnail carrying its master's)",
-        ),
         ("has no rloc", "hvt1 tile item without the mandatory rloc"),
         (
             "external",
@@ -93,7 +91,8 @@ fn every_image_item_decodes_or_is_a_known_refusal() {
     // A debug build leaves the pictures above 4 MP to a release run
     // (every tile of a 12 MP grid, unoptimised, is minutes).
     let full = !cfg!(debug_assertions) || std::env::var("OXIDEAV_HEIF_MATRIX_FULL").is_ok();
-    let (mut items, mut decoded, mut skipped) = (0usize, 0usize, 0usize);
+    let (mut items, mut decoded, mut skipped, mut keyed) = (0usize, 0usize, 0usize, 0usize);
+    let have_cipher = common::have_binary("openssl");
     let mut refused: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
     for path in &files {
         let Ok(bytes) = std::fs::read(path) else {
@@ -117,7 +116,29 @@ fn every_image_item_decodes_or_is_a_known_refusal() {
                 continue;
             }
             items += 1;
-            match decode_item(&file, item.id, ItemDecoder::direct()) {
+            // A protected item is decoded under its test keys when the
+            // black-box AES-128 is there (the crate ships no cipher).
+            let cipher = (meta.protection_scheme(item.id).is_some() && have_cipher)
+                .then(|| {
+                    let cfg = path.parent()?.join("drm_cfg").join(format!(
+                        "{}.xml",
+                        path.file_stem()?
+                            .to_string_lossy()
+                            .trim_start_matches("image_")
+                    ));
+                    Some(OpenSsl(keys(&std::fs::read_to_string(cfg).ok()?)))
+                })
+                .flatten();
+            let decoder = match &cipher {
+                Some(c) => {
+                    keyed += 1;
+                    ItemDecoder::direct()
+                        .with_decryptor(c)
+                        .with_cenc_reading(CencReading::compat())
+                }
+                None => ItemDecoder::direct(),
+            };
+            match decode_item(&file, item.id, decoder) {
                 Ok(img) => {
                     assert!(
                         img.width() > 0 && img.height() > 0,
@@ -134,7 +155,7 @@ fn every_image_item_decodes_or_is_a_known_refusal() {
         }
     }
     eprintln!(
-        "item sweep: {} files, {items} image items, {decoded} decode, {} refused, {skipped} left to a release run",
+        "item sweep: {} files, {items} image items, {decoded} decode ({keyed} under their test keys), {} refused, {skipped} left to a release run",
         files.len(),
         items - decoded
     );
@@ -150,4 +171,26 @@ fn every_image_item_decodes_or_is_a_known_refusal() {
         "items refused outside the known gates: {:#?}",
         refused.get("other")
     );
+}
+
+/// MIAF007's thumbnail (128×72) is associated with its 1280×720
+/// master's non-essential `clap` (640×360), `irot` and `imir`. §6.3
+/// lets a reader apply any set of the non-essential transformative
+/// properties: the aperture that does not fit the thumbnail is left
+/// out, the rotation applies — 72×128, the master's 360×640 aspect.
+#[test]
+fn a_non_essential_clap_larger_than_its_picture_is_left_out() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/image/heif/conformance/heic/MIAF007.heic");
+    let Ok(bytes) = std::fs::read(&path) else {
+        eprintln!("SKIP: docs/image/heif/conformance not checked out");
+        return;
+    };
+    let file = HeifFile::parse(&bytes).unwrap();
+    let node = oxideav_heif::derived::build_graph(&file, 1005).unwrap();
+    assert_eq!(node.output_size().unwrap(), (72, 128));
+    let thumb = decode_item(&file, 1005, ItemDecoder::direct()).unwrap();
+    assert_eq!((thumb.width(), thumb.height()), (72, 128));
+    let master = decode_item(&file, 1002, ItemDecoder::direct()).unwrap();
+    assert_eq!((master.width(), master.height()), (360, 640));
 }

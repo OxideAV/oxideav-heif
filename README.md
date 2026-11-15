@@ -232,12 +232,25 @@ and the one that left the list:
 **Item sweep** (`tests/item_sweep.rs`, r488): every image item of the
 same files decoded on its own with `decode_item` — each grid tile,
 thumbnail, auxiliary and hidden item as the image item it is, not only
-what a viewer shows. **402 image items in 152 files: 384 decode, 18 are
-typed refusals** — the 13 protected items (no cipher given; they
-decode under their keys, above), the 4 `hvt1` items without `rloc`,
-and the thumbnail of MIAF007, a 128×72 item associated with its
-1280×720 master's `clap` (640×360: a clean aperture larger than the
-picture). The test fails on a refusal outside the known gates.
+what a viewer shows. **402 image items in 152 files: 398 decode, 4 are
+typed refusals** (r489; r488: 384 / 18). The 13 protected items are
+decoded under their `drm_cfg` test keys behind the black-box AES-128
+(without it they are the typed `encrypted_item` refusal, and the sweep
+counts them so). The thumbnail of MIAF007 — a 128×72 item associated
+with its 1280×720 master's *non-essential* `clap` (640×360), `irot`
+and `imir` — decodes to 72×128: §6.3 forms the chain from every
+essential transformative property and any set of the non-essential
+ones, so a non-essential aperture that cannot be applied to its input
+is left out and the rest of the chain applies (an essential one stays
+an error). What is left is the 4 `hvt1` items of
+`iff_hevc_tile_multiple_items_tbas`, each blocked twice over: no
+`rloc` (above), and an `ispe` of 1920×1088 — the coded tile — where
+the 3840×2160 picture they belong to is cropped from 3840×2176 by its
+conformance window, so the bottom pair does not lie inside the
+reconstructed image of the base item even once placed (sibling ask:
+the luma rectangle a set of slice segments covers, and the picture
+before conformance cropping). The test fails on a refusal outside the
+known gates.
 
 `decode_all_partial(bytes, &opts)` (r486) is `decode_all_with` for a
 viewer that shows what it can: an entry that does not decode — a
