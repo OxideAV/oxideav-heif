@@ -34,7 +34,9 @@
 //! builds one `SIDE × SIDE` HEVC picture with `N × N` `hvt1` tile items
 //! over it (`tbas` + `rloc`) and a `grid` of them as the primary, and
 //! times the decode of the grid — the picture decoded once, every tile
-//! cut out of it — next to the decode of the picture alone; `OUT`
+//! cut out of it — next to the decode of the picture alone and to
+//! `decode_all` (the grid, the picture and every tile item as entries
+//! of the collection: one decode of the picture for all of them); `OUT`
 //! keeps the file (for `heifbench`'s peak RSS).
 
 use std::io::Cursor;
@@ -212,15 +214,23 @@ fn tile_items(runs: usize, side: u32, n: u32, out: Option<String>) {
             .expect("grid of tile items")
             .width()
     });
-    println!("| picture | tile items | file | picture alone | grid of tile items | per tile |");
-    println!("|---|---|---|---|---|---|");
+    // Every entry of the collection: the grid, the picture and each
+    // tile item as a picture of its own.
+    let (t_all, shown) = timed(1, || {
+        oxideav_heif::decode_all(&bytes).expect("decode_all").len()
+    });
     println!(
-        "| {side}×{side} | {} | {} KiB | {} | {} | {:.1} µs |",
+        "| picture | tile items | file | picture alone | grid of tile items | per tile | decode_all ({shown} entries) |"
+    );
+    println!("|---|---|---|---|---|---|---|");
+    println!(
+        "| {side}×{side} | {} | {} KiB | {} | {} | {:.1} µs | {} |",
         n * n,
         bytes.len() / 1024,
         ms(t_pic),
         ms(t_grid),
         (t_grid.as_secs_f64() - t_pic.as_secs_f64()) * 1e6 / f64::from(n * n),
+        ms(t_all),
     );
     println!("\n(times in ms, median of {runs})");
 }

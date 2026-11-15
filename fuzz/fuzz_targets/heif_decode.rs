@@ -8,8 +8,9 @@
 //! protected items (ISO/IEC 23001-7 Amd 1: `ienc` / `iaux` / `auxi`
 //! under a toy block cipher, the strict and the compat reading),
 //! layered `lhv1` items with the base-layer fallback, predictively
-//! coded items, and `decode_all_partial` against `decode_all_with`.
-//! The contract is "the call returns".
+//! coded items, `decode_all_partial` against `decode_all_with`, and
+//! the partial decode under a thread budget against the serial one.
+//! The contract is "the call returns" plus those equalities.
 
 use libfuzzer_sys::fuzz_target;
 
@@ -83,6 +84,29 @@ fuzz_target!(|data: &[u8]| {
             assert!(!p.frames.is_empty());
         }
         Err(_) => assert!(whole.is_err(), "the partial decode refused a file decode_all takes"),
+    }
+    // The thread budget changes nothing: the entries of a collection
+    // decoded as parallel jobs (and tiles on workers) give the frames
+    // and the skipped entries of the serial decode, in its order.
+    let serial = oxideav_heif::decode_all_partial(data, &keyed);
+    let threaded = oxideav_heif::decode_all_partial(data, &keyed.clone().with_threads(Some(3)));
+    match (serial, threaded) {
+        (Ok(a), Ok(b)) => {
+            assert_eq!(a.frames.len(), b.frames.len(), "frames under a budget");
+            for (x, y) in a.frames.iter().zip(&b.frames) {
+                assert_eq!((x.item_id, x.track_id), (y.item_id, y.track_id));
+                assert!(x.image.planes == y.image.planes, "pixels under a budget");
+            }
+            let entries = |p: &oxideav_heif::PartialDecode| -> Vec<_> {
+                p.skipped
+                    .iter()
+                    .map(|s| (s.item_ids.clone(), s.track_id))
+                    .collect()
+            };
+            assert_eq!(entries(&a), entries(&b), "skipped entries under a budget");
+        }
+        (Err(_), Err(_)) => {}
+        _ => panic!("the thread budget changed whether the file decodes"),
     }
     // External `tili` tiles (Amd 2 §6.11.2): every tile request is
     // answered from the input itself, at an offset picked by the tile

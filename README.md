@@ -1659,6 +1659,7 @@ same before and after and at every thread budget.
 |---|---|---|
 | `grid` of 4 096 `hvt1` tile items over one 2048×2048 picture (`heifscale --tile-items 2048 64`; the picture alone: 163 – 227 ms) | 1 101 – 1 655 ms | 181 – 233 ms |
 | … 256 tile items (`--tile-items 2048 16`; the picture alone: 176 – 256 ms) | 207 – 275 ms | 175 – 276 ms |
+| `decode_all` of a 2048×2048 picture with 64 tile items — 66 entries: the grid, the picture, each tile item (`--tile-items 2048 8`) | 9.8 – 11.2 s | 0.30 – 0.32 s |
 | 12 MP still with a 12 MP alpha plane (4032×3024, both tiled, `heifbench --no-encode --runs 15`), 1 worker | 0.48 – 0.53 s, 107 – 108 MiB | 0.48 – 0.59 s, 43 – 44 MiB |
 | … 8 workers | 0.071 – 0.074 s, 125 – 129 MiB | 0.072 – 0.077 s, 60 – 65 MiB |
 | `decode_all` of a burst of 1 024 single-item 64×64 pictures (`heifscale --decode 1024`), 1 worker | 110 – 112 ms | 112 – 113 ms |
@@ -1672,6 +1673,16 @@ same before and after and at every thread budget.
   quadratic in the tile items, 4 096 × 6 MiB of copies. A tile is now
   cut out of the cached planes and the node is built once, for the
   decode.
+  Shown as entries of a collection (`decode_all`: the grid, the
+  picture, every tile item as a picture of its own) the tile items
+  used to decode their picture once each; the item decodes of one
+  `decode_all` now share a `decode::TilePictures` store
+  (`ItemDecoder::with_tile_pictures` for callers decoding items one by
+  one), so the picture is decoded once for all of them — see the
+  `decode_all` row. The store holds each such picture until the
+  `decode_all` call returns (one picture more in memory than the
+  frames being returned); a caller that would rather decode per item
+  and hold nothing calls `decode_item` without a store.
 * **Alpha attachment**: `attach_alpha` copied the alpha plane four
   times (as a luma frame, through the same-size resize, the same-depth
   rescale and into the output) and the master's planes once. The

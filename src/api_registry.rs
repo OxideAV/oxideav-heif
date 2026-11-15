@@ -105,10 +105,25 @@ fn decode_checked_item<D: AsRef<[u8]>>(
     id: u32,
     opts: &DecodeOptions,
 ) -> Result<DecodedImage> {
+    decode_checked_item_sharing(file, id, opts, None)
+}
+
+/// [`decode_checked_item`] as one of several item decodes of `file`
+/// that share the pictures behind its HEVC tile items.
+fn decode_checked_item_sharing<D: AsRef<[u8]>>(
+    file: &HeifFile<D>,
+    id: u32,
+    opts: &DecodeOptions,
+    tile_pictures: Option<&crate::decode::TilePictures>,
+) -> Result<DecodedImage> {
     let node = build_graph(file, id)?;
     let (w, h) = node.output_size()?;
     opts.check_dims(w, h)?;
-    let img = decode_item(file, id, item_decoder_for(opts))?;
+    let mut decoder = item_decoder_for(opts);
+    if let Some(t) = tile_pictures {
+        decoder = decoder.with_tile_pictures(t);
+    }
+    let img = decode_item(file, id, decoder)?;
     // A tone-mapped reconstruction / layered output may differ from the
     // announced size (the tmap's own geometry): re-check what came out.
     opts.check_dims(img.frame.width, img.frame.height)?;
@@ -237,10 +252,11 @@ fn decode_entry<D: AsRef<[u8]>>(
     file: &HeifFile<D>,
     alternatives: &[u32],
     opts: &DecodeOptions,
+    tile_pictures: &crate::decode::TilePictures,
 ) -> EntryOutcome {
     let mut first_err = None;
     for &id in alternatives {
-        match decode_checked_item(file, id, opts) {
+        match decode_checked_item_sharing(file, id, opts, Some(tile_pictures)) {
             Ok(img) => return Ok(Some((id, HeifImage::from(img)))),
             Err(e) => {
                 first_err.get_or_insert(e);
@@ -258,6 +274,7 @@ fn decode_entries_parallel<D: AsRef<[u8]> + Sync>(
     file: &HeifFile<D>,
     entries: &[Vec<u32>],
     opts: &DecodeOptions,
+    tile_pictures: &crate::decode::TilePictures,
     workers: usize,
     stop_on_error: bool,
 ) -> Vec<Option<EntryOutcome>> {
@@ -278,7 +295,7 @@ fn decode_entries_parallel<D: AsRef<[u8]> + Sync>(
                     let Some(alternatives) = entries.get(i) else {
                         break;
                     };
-                    let outcome = decode_entry(file, alternatives, opts);
+                    let outcome = decode_entry(file, alternatives, opts, tile_pictures);
                     if outcome.is_err() {
                         failed.store(true, Ordering::Relaxed);
                     }
@@ -325,11 +342,21 @@ fn decode_all_inner(
         // ordered parallel jobs (a burst of single-item pictures has
         // nothing else to spend the budget on); one entry at a time
         // otherwise, each with the whole budget.
+        // The tile items of one picture, shown as entries of their
+        // own, share one decode of it.
+        let tile_pictures = crate::decode::TilePictures::new();
         let budget = opts.threads.unwrap_or(1).max(1);
         let workers = budget.min(entries.len());
         let mut outcomes = if workers > 1 {
             let per_entry = opts.clone().with_threads(Some((budget / workers).max(1)));
-            decode_entries_parallel(&file, &entries, &per_entry, workers, skipped.is_none())
+            decode_entries_parallel(
+                &file,
+                &entries,
+                &per_entry,
+                &tile_pictures,
+                workers,
+                skipped.is_none(),
+            )
         } else {
             Vec::new()
         }
@@ -337,7 +364,7 @@ fn decode_all_inner(
         for alternatives in entries {
             let outcome = match outcomes.next() {
                 Some(o) => o,
-                None => Some(decode_entry(&file, &alternatives, opts)),
+                None => Some(decode_entry(&file, &alternatives, opts, &tile_pictures)),
             };
             match outcome {
                 Some(Ok(Some((id, image)))) => {

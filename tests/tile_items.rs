@@ -163,6 +163,40 @@ fn tile_items_are_regions_of_their_image_item() {
         let all = oxideav_heif::decode_all(&bytes).unwrap();
         // The grid (primary), the picture, the four tiles, the odd one.
         assert_eq!(all.len(), 7, "{bundle}");
+        // Shown as entries of a collection, the tile items share one
+        // decode of their picture (`TilePictures`): the frames are the
+        // ones of the item decodes, at every thread budget.
+        for f in &all {
+            let id = f.item_id.unwrap();
+            let alone = decode_item(&file, id, ItemDecoder::direct()).unwrap();
+            assert_eq!(
+                oxideav_heif::HeifImage::from(alone).planes,
+                f.image.planes,
+                "{bundle}: item {id} in the collection"
+            );
+        }
+        let budget = oxideav_heif::decode_all_with(
+            &bytes,
+            &oxideav_heif::DecodeOptions::default().with_threads(Some(4)),
+        )
+        .unwrap();
+        assert_eq!(budget.len(), all.len());
+        for (a, b) in all.iter().zip(&budget) {
+            assert_eq!(a.item_id, b.item_id, "{bundle}");
+            assert_eq!(a.image.planes, b.image.planes, "{bundle}: 4 threads");
+        }
+        let store = oxideav_heif::decode::TilePictures::new();
+        assert!(store.is_empty());
+        for (id, _) in &tiles {
+            let shared =
+                decode_item(&file, *id, ItemDecoder::direct().with_tile_pictures(&store)).unwrap();
+            let alone = decode_item(&file, *id, ItemDecoder::direct()).unwrap();
+            assert_eq!(
+                shared.frame, alone.frame,
+                "{bundle}: tile {id} from the store"
+            );
+            assert_eq!(store.len(), 1, "{bundle}: one picture for every tile item");
+        }
         {
             use oxideav_core::{Frame, RuntimeContext};
             let mut ctx = RuntimeContext::new();

@@ -85,6 +85,56 @@ pub struct ItemDecoder<'r> {
     tile_resolver: Option<&'r dyn crate::tiled::ExternalTileResolver>,
     decryptor: Option<&'r dyn crate::cenc::BlockCipher>,
     cenc_reading: crate::cenc::CencReading,
+    tile_pictures: Option<&'r TilePictures>,
+}
+
+/// The decoded pictures HEVC tile items (`hvt1`, HEIF B.2.5) are cut
+/// from, kept across the item decodes of one file
+/// ([`ItemDecoder::with_tile_pictures`]): the tile items of a picture
+/// decoded one by one — the entries of a collection — share one decode
+/// of it instead of decoding it once each. Keyed by item id, so a
+/// store belongs to one file and one set of decoder options.
+#[derive(Default)]
+pub struct TilePictures {
+    pictures: std::sync::Mutex<HashMap<u32, std::sync::Arc<HeifFrame>>>,
+    /// Held while a picture is decoded, so concurrent item decodes
+    /// wait for it instead of decoding it again.
+    decoding: std::sync::Mutex<()>,
+}
+
+impl TilePictures {
+    /// An empty store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The number of pictures decoded into the store.
+    pub fn len(&self) -> usize {
+        self.pictures.lock().map_or(0, |p| p.len())
+    }
+
+    /// `true` when no picture has been decoded into the store.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn get(&self, item: u32) -> Option<std::sync::Arc<HeifFrame>> {
+        self.pictures.lock().ok()?.get(&item).cloned()
+    }
+
+    fn insert(&self, item: u32, picture: std::sync::Arc<HeifFrame>) {
+        if let Ok(mut p) = self.pictures.lock() {
+            p.insert(item, picture);
+        }
+    }
+}
+
+impl std::fmt::Debug for TilePictures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TilePictures")
+            .field("pictures", &self.len())
+            .finish()
+    }
 }
 
 impl<'r> ItemDecoder<'r> {
@@ -100,6 +150,7 @@ impl<'r> ItemDecoder<'r> {
             tile_resolver: None,
             decryptor: None,
             cenc_reading: crate::cenc::CencReading::strict(),
+            tile_pictures: None,
         }
     }
 
@@ -115,6 +166,7 @@ impl<'r> ItemDecoder<'r> {
             tile_resolver: None,
             decryptor: None,
             cenc_reading: crate::cenc::CencReading::strict(),
+            tile_pictures: None,
         }
     }
 
@@ -146,6 +198,15 @@ impl<'r> ItemDecoder<'r> {
         resolver: &'r dyn crate::tiled::ExternalTileResolver,
     ) -> Self {
         self.tile_resolver = Some(resolver);
+        self
+    }
+
+    /// Share the pictures behind HEVC tile items (`hvt1`) with the
+    /// other item decodes that are given the same store: each picture
+    /// is decoded once for all of them. Without a store a picture is
+    /// decoded once per item decode (per [`decode_item`] call).
+    pub fn with_tile_pictures(mut self, pictures: &'r TilePictures) -> Self {
+        self.tile_pictures = Some(pictures);
         self
     }
 
@@ -1652,6 +1713,8 @@ struct Session<'a, 'r, D> {
     /// The extra output layers of a layered root item (see
     /// [`DecodedImage::layers`]).
     root_layers: Vec<LayerFrame>,
+    /// The pictures tile items are cut from, by `tbas` item id.
+    tile_bases: HashMap<u32, std::sync::Arc<HeifFrame>>,
 }
 
 /// Count the coded items `node` reaches through `dimg` inputs and
@@ -1720,24 +1783,48 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
             )));
         }
         // Several tile items of one picture (a grid of them, a burst)
-        // decode it once: the picture stays cached for the session and
-        // every tile is cut out of the cached planes (no copy of the
-        // picture per tile).
-        if !self.cache.contains_key(&base) {
-            // The picture's node is built for its decode only: every
-            // tile item of the picture refers to it, and walking those
-            // references once per tile would make a grid of tile items
-            // quadratic.
-            let base_node = build_graph(self.file, base)?;
-            // The use `coded` takes now …
-            *self.uses.entry(base).or_insert(0) += 1;
-            let picture = self.coded(&base_node)?;
-            // … and one that is never taken, so the graph's own uses of
-            // the base item leave it in the cache.
-            *self.uses.entry(base).or_insert(0) += 1;
-            self.cache.insert(base, picture);
-        }
-        let picture = &self.cache[&base];
+        // decode it once: the picture is kept for the session — and,
+        // with a store, for every item decode sharing it — and each
+        // tile is cut out of the kept planes (no copy of the picture
+        // per tile).
+        let picture = match self.tile_bases.get(&base) {
+            Some(p) => std::sync::Arc::clone(p),
+            None => {
+                let store = self.decoder.tile_pictures;
+                // One decode at a time into a shared store: a second
+                // item decode waits here and finds the picture.
+                let _decoding = store.and_then(|s| s.decoding.lock().ok());
+                let p = match store.and_then(|s| s.get(base)) {
+                    Some(p) => p,
+                    None => {
+                        // The picture's node is built for its decode
+                        // only: every tile item of the picture refers
+                        // to it, and walking those references once per
+                        // tile would make a grid of tile items
+                        // quadratic.
+                        let base_node = build_graph(self.file, base)?;
+                        // Decoded as a single use (nothing is copied
+                        // into the session cache); the graph's own
+                        // uses of the base item are served from the
+                        // kept picture and counted as they were.
+                        let graph_uses = self.uses.insert(base, 1);
+                        let decoded = self.coded(&base_node);
+                        match graph_uses {
+                            Some(n) => self.uses.insert(base, n),
+                            None => self.uses.remove(&base),
+                        };
+                        let p = std::sync::Arc::new(decoded?);
+                        if let Some(s) = store {
+                            s.insert(base, std::sync::Arc::clone(&p));
+                        }
+                        p
+                    }
+                };
+                self.tile_bases.insert(base, std::sync::Arc::clone(&p));
+                p
+            }
+        };
+        let picture = &*picture;
         crate::compose::region(picture, rloc.horizontal_offset, rloc.vertical_offset, w, h).map_err(
             |e| match e {
                 HeifError::InvalidData(m) => HeifError::invalid(format!("hvt1 item {id}: {m}")),
@@ -1753,6 +1840,10 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
         let id = node.item.id;
         if node.item.item_type == crate::meta::ITEM_TYPE_HVT1 {
             return self.tile_item(node);
+        }
+        // The picture behind tile items already decoded in this session.
+        if let Some(p) = self.tile_bases.get(&id) {
+            return Ok(HeifFrame::clone(p));
         }
         let left = self.uses.get(&id).copied().unwrap_or(1).saturating_sub(1);
         self.uses.insert(id, left);
@@ -2386,6 +2477,7 @@ pub fn decode_item<D: AsRef<[u8]>>(
         uses,
         decodes: 0,
         root_layers: Vec::new(),
+        tile_bases: HashMap::new(),
     };
     let frame = session.output(&node)?;
     let depth = match &node.depth {
