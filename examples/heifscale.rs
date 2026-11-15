@@ -21,10 +21,21 @@
 //! does), `open` (the `"heif"` demuxer opened: streams described),
 //! `packets` (every packet pulled, one run; each still packet is the
 //! file with its `pitm` naming the item) and `remux`
-//! (`HeifWriter::from_files` + write). `--decode` adds the
-//! primary's decode at 1 and 8 workers for the `grid` shape (the
-//! codec's time, for scale). Prints a Markdown table; the README's
+//! (`HeifWriter::from_files` + write). `--decode` adds the decode at
+//! 1 and 8 workers — the primary of the `grid` shape, every item of
+//! the `burst` shape (`decode_all_with`) — for scale against the
+//! codec's time. Prints a Markdown table; the README's
 //! performance section carries the last run on the reference machine.
+//!
+//! ```text
+//! heifscale [--runs N] --tile-items SIDE N [OUT]
+//! ```
+//!
+//! builds one `SIDE × SIDE` HEVC picture with `N × N` `hvt1` tile items
+//! over it (`tbas` + `rloc`) and a `grid` of them as the primary, and
+//! times the decode of the grid — the picture decoded once, every tile
+//! cut out of it — next to the decode of the picture alone; `OUT`
+//! keeps the file (for `heifbench`'s peak RSS).
 
 use std::io::Cursor;
 use std::time::{Duration, Instant};
@@ -122,6 +133,98 @@ fn burst_file(n: usize, data: &[u8], props: &[(Property, bool)]) -> HeifWriter {
     w
 }
 
+/// A `side × side` HEVC picture, `n × n` `hvt1` tile items over it and
+/// a `grid` of the tile items as the primary; returns the file and the
+/// id of the picture's item.
+fn tile_item_file(side: u32, n: u32) -> (Vec<u8>, u32) {
+    use oxideav_heif::props::{Ispe, Rloc};
+    let format = HeifPixelFormat::new(oxideav_heif::Chroma::Yuv420, 8, false).expect("layout");
+    let mut frame = HeifFrame::filled(side, side, format, 128).expect("frame");
+    for y in 0..side {
+        for x in 0..side {
+            frame.set_sample(0, x, y, ((x * 3 + y * 2) % 256) as u16);
+        }
+    }
+    let opts = EncodeOptions::default()
+        .with_thumbnail_max_dim(None)
+        .with_grid_tile(None);
+    let bytes = encode_still(&frame, &opts).expect("encode the picture");
+    let file = HeifFile::parse(&bytes).expect("parse the picture file");
+    let id = file.primary_item().expect("primary").id;
+    let props: Vec<(Property, bool)> = ItemProperties::resolve(file.meta().expect("meta"), id)
+        .expect("properties")
+        .entries
+        .into_iter()
+        .map(|e| (e.property, e.essential))
+        .collect();
+    let hvcc = props
+        .iter()
+        .find(|(p, _)| matches!(p, Property::HvcC(_)))
+        .expect("hvcC")
+        .0
+        .clone();
+    let mut w = HeifWriter::new();
+    let pic = w.add_coded_item(*b"hvc1", file.item_data_owned(id).expect("data"), props);
+    let step = side / n;
+    let mut tiles = Vec::new();
+    for ty in 0..n {
+        for tx in 0..n {
+            // The reader cuts a tile item out of its `tbas` picture;
+            // the item's own bytes are not decoded.
+            let t = w.add_coded_item(
+                *b"hvt1",
+                vec![0; 4],
+                vec![
+                    (hvcc.clone(), true),
+                    (Property::Ispe(Ispe::new(step, step)), false),
+                    (Property::Rloc(Rloc::new(tx * step, ty * step)), false),
+                ],
+            );
+            w.add_reference(*b"tbas", t, vec![pic]);
+            tiles.push(t);
+        }
+    }
+    let grid = w
+        .add_grid(
+            GridDescriptor::new(n as u16, n as u16, step * n, step * n),
+            &tiles,
+            Vec::new(),
+        )
+        .expect("grid");
+    w.set_primary(grid);
+    (w.write_to_vec().expect("write"), pic)
+}
+
+fn tile_items(runs: usize, side: u32, n: u32, out: Option<String>) {
+    use oxideav_heif::decode::{ItemDecoder, decode_item, decode_primary};
+    let (bytes, pic) = tile_item_file(side, n);
+    if let Some(path) = &out {
+        std::fs::write(path, &bytes).expect("write the file");
+    }
+    let file = HeifFile::parse_borrowed(&bytes).expect("parse");
+    let (t_pic, _) = timed(runs, || {
+        decode_item(&file, pic, ItemDecoder::direct())
+            .expect("picture")
+            .width()
+    });
+    let (t_grid, _) = timed(runs, || {
+        decode_primary(&file, ItemDecoder::direct())
+            .expect("grid of tile items")
+            .width()
+    });
+    println!("| picture | tile items | file | picture alone | grid of tile items | per tile |");
+    println!("|---|---|---|---|---|---|");
+    println!(
+        "| {side}×{side} | {} | {} KiB | {} | {} | {:.1} µs |",
+        n * n,
+        bytes.len() / 1024,
+        ms(t_pic),
+        ms(t_grid),
+        (t_grid.as_secs_f64() - t_pic.as_secs_f64()) * 1e6 / f64::from(n * n),
+    );
+    println!("\n(times in ms, median of {runs})");
+}
+
 fn main() {
     let mut runs = 3usize;
     let mut decode = false;
@@ -131,6 +234,15 @@ fn main() {
         match a.as_str() {
             "--runs" => runs = args.next().and_then(|v| v.parse().ok()).unwrap_or(3).max(1),
             "--decode" => decode = true,
+            "--tile-items" => {
+                let mut num = || args.next().and_then(|v| v.parse::<u32>().ok());
+                let (side, n) = (num().expect("SIDE"), num().expect("N"));
+                assert!(
+                    (1..=255).contains(&n) && side % (2 * n) == 0,
+                    "SIDE a multiple of 2 N"
+                );
+                return tile_items(runs, side, n, args.next());
+            }
             other => counts.push(other.parse().expect("an item count")),
         }
     }
@@ -242,7 +354,18 @@ fn main() {
                         row.push_str(&format!(" {} |", ms(t)));
                     }
                 } else {
-                    row.push_str(" — | — |");
+                    // Every displayable item of the burst.
+                    for threads in [1usize, 8] {
+                        let (t, _) = timed(1, || {
+                            oxideav_heif::decode_all_with(
+                                &bytes,
+                                &oxideav_heif::DecodeOptions::default().with_threads(Some(threads)),
+                            )
+                            .expect("decode_all")
+                            .len()
+                        });
+                        row.push_str(&format!(" {} |", ms(t)));
+                    }
                 }
             }
             println!("{row}");

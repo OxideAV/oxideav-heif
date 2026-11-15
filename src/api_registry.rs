@@ -20,7 +20,7 @@ use crate::api::{
     ColorInfo, ColorRange, DecodeOptions, Frame, HeifImage, Metadata, PartialDecode, PixelFormat,
     RgbImage, RgbaImage, SkippedEntry, sequence_tracks,
 };
-use crate::compose::{apply_clap, attach_alpha};
+use crate::compose::{apply_clap, attach_alpha_owned};
 use crate::decode::{
     DecodedImage, ItemDecoder, StreamShape, ToneMapOutput, adopt_stream_params, decode_item,
     frame_from_planes,
@@ -227,6 +227,74 @@ pub fn decode_all_partial(bytes: &[u8], opts: &DecodeOptions) -> Result<PartialD
     Ok(PartialDecode::new(frames, skipped))
 }
 
+/// What one entry of the display order decodes to: the item shown and
+/// its image, `None` for an entry without alternatives, or the error
+/// of the first alternative when none decodes.
+type EntryOutcome = Result<Option<(u32, HeifImage)>>;
+
+/// One entry of the display order: its first alternative that decodes.
+fn decode_entry<D: AsRef<[u8]>>(
+    file: &HeifFile<D>,
+    alternatives: &[u32],
+    opts: &DecodeOptions,
+) -> EntryOutcome {
+    let mut first_err = None;
+    for &id in alternatives {
+        match decode_checked_item(file, id, opts) {
+            Ok(img) => return Ok(Some((id, HeifImage::from(img)))),
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    first_err.map_or(Ok(None), Err)
+}
+
+/// [`decode_entry`] for every entry on `workers` threads, in entry
+/// order. Entries are taken in order; with `stop_on_error` no entry is
+/// started after one has failed (those stay `None` — they all follow
+/// the failed entry, whose error the caller returns).
+fn decode_entries_parallel<D: AsRef<[u8]> + Sync>(
+    file: &HeifFile<D>,
+    entries: &[Vec<u32>],
+    opts: &DecodeOptions,
+    workers: usize,
+    stop_on_error: bool,
+) -> Vec<Option<EntryOutcome>> {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let slots: Vec<Mutex<Option<EntryOutcome>>> =
+        entries.iter().map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    if stop_on_error && failed.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(alternatives) = entries.get(i) else {
+                        break;
+                    };
+                    let outcome = decode_entry(file, alternatives, opts);
+                    if outcome.is_err() {
+                        failed.store(true, Ordering::Relaxed);
+                    }
+                    if let Ok(mut slot) = slots[i].lock() {
+                        *slot = Some(outcome);
+                    }
+                }
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|s| s.into_inner().unwrap_or(None))
+        .collect()
+}
+
 fn decode_all_inner(
     bytes: &[u8],
     opts: &DecodeOptions,
@@ -253,30 +321,35 @@ fn decode_all_inner(
         {
             entries.insert(0, vec![p]);
         }
+        // Under a thread budget the entries of a collection decode as
+        // ordered parallel jobs (a burst of single-item pictures has
+        // nothing else to spend the budget on); one entry at a time
+        // otherwise, each with the whole budget.
+        let budget = opts.threads.unwrap_or(1).max(1);
+        let workers = budget.min(entries.len());
+        let mut outcomes = if workers > 1 {
+            let per_entry = opts.clone().with_threads(Some((budget / workers).max(1)));
+            decode_entries_parallel(&file, &entries, &per_entry, workers, skipped.is_none())
+        } else {
+            Vec::new()
+        }
+        .into_iter();
         for alternatives in entries {
-            let mut decoded = false;
-            let mut entry_err = None;
-            for &id in &alternatives {
-                match decode_checked_item(&file, id, opts) {
-                    Ok(img) => {
-                        frames.push(Frame::new(HeifImage::from(img), None, Some(id), None));
-                        decoded = true;
-                        break;
-                    }
-                    Err(e) => {
-                        if entry_err.is_none() {
-                            entry_err = Some(e);
-                        }
-                    }
+            let outcome = match outcomes.next() {
+                Some(o) => o,
+                None => Some(decode_entry(&file, &alternatives, opts)),
+            };
+            match outcome {
+                Some(Ok(Some((id, image)))) => {
+                    frames.push(Frame::new(image, None, Some(id), None));
                 }
-            }
-            if decoded {
-                continue;
-            }
-            let Some(e) = entry_err else { continue };
-            match skipped.as_deref_mut() {
-                Some(list) => list.push(SkippedEntry::new(alternatives, None, e)),
-                None => return Err(e),
+                Some(Err(e)) => match skipped.as_deref_mut() {
+                    Some(list) => list.push(SkippedEntry::new(alternatives, None, e)),
+                    None => return Err(e),
+                },
+                // An entry without alternatives; or one the workers
+                // never started, which only follows a failed entry.
+                Some(Ok(None)) | None => {}
             }
         }
     }
@@ -478,9 +551,10 @@ fn decode_track<D: AsRef<[u8]>>(
     pts_sorted.sort_unstable();
     let timescale = track.timescale.max(1) as u64;
     let mut frames = Vec::with_capacity(pictures.len());
+    let mut alpha = alpha.map(|a| a.into_iter());
     for (i, mut pic) in pictures.into_iter().enumerate() {
-        if let Some(alpha) = alpha.as_ref().and_then(|a| a.get(i)) {
-            pic = attach_alpha(&pic, alpha)?;
+        if let Some(plane) = alpha.as_mut().and_then(|a| a.next()) {
+            pic = attach_alpha_owned(pic, plane)?;
         }
         let mut metadata = metadata.clone();
         if let Some(pts) = pts_sorted.get(i) {

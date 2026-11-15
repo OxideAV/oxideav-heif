@@ -594,6 +594,27 @@ pub fn attach_alpha(master: &HeifFrame, alpha: &HeifFrame) -> Result<HeifFrame> 
     master.with_alpha_plane(&depth)
 }
 
+/// [`attach_alpha`] taking both pictures by value: when the auxiliary
+/// has the master's size and bit depth — the usual case — its luma
+/// plane is moved next to the master's colour planes and nothing is
+/// copied; otherwise the plane is resized / rescaled as
+/// [`attach_alpha`] does. The frame is the one [`attach_alpha`]
+/// returns.
+#[doc(hidden)]
+pub fn attach_alpha_owned(mut master: HeifFrame, mut alpha: HeifFrame) -> Result<HeifFrame> {
+    let fits = (alpha.width, alpha.height) == (master.width, master.height)
+        && alpha.format.bit_depth == master.format.bit_depth
+        && !alpha.planes.is_empty();
+    if !fits {
+        return attach_alpha(&master, &alpha);
+    }
+    master.planes.truncate(master.format.chroma.colour_planes());
+    master.format = master.format.without_alpha().with_alpha();
+    master.planes.push(alpha.planes.swap_remove(0));
+    master.validate()?;
+    Ok(master)
+}
+
 /// One rotation or mirror of a transformative chain (`irot` / `imir`),
 /// as [`GridCanvas::with_reorientation`] takes the leading ones of a
 /// grid item's chain.
@@ -2727,6 +2748,39 @@ mod tests {
         assert_eq!(o5.sample(0, 3, 3), 99);
         assert_eq!(o5.sample(1, 1, 1), 99);
         assert_eq!(o5.sample(1, 0, 0), 10);
+    }
+
+    #[test]
+    fn owned_alpha_attachment_is_the_borrowed_one() {
+        let ramp_alpha = |w: u32, h: u32, chroma: Chroma, depth: u8| {
+            let mut a = HeifFrame::filled(w, h, fmt(chroma, depth, false), 0).unwrap();
+            for y in 0..h {
+                for x in 0..w {
+                    a.set_sample(0, x, y, ((x * 7 + y * 13) % (1 << depth)) as u16);
+                }
+            }
+            a
+        };
+        for chroma in [Chroma::Yuv420, Chroma::Yuv444, Chroma::Mono] {
+            let master = ramp(8, 6, chroma);
+            // Same size and depth (moved), another size, another depth,
+            // an auxiliary coded 4:2:0, a master that already has alpha.
+            let cases = [
+                (master.clone(), ramp_alpha(8, 6, Chroma::Mono, 8)),
+                (master.clone(), ramp_alpha(8, 6, Chroma::Yuv420, 8)),
+                (master.clone(), ramp_alpha(4, 2, Chroma::Mono, 8)),
+                (master.clone(), ramp_alpha(8, 6, Chroma::Mono, 10)),
+                (
+                    attach_alpha(&master, &ramp_alpha(8, 6, Chroma::Mono, 8)).unwrap(),
+                    ramp_alpha(8, 6, Chroma::Yuv444, 8),
+                ),
+            ];
+            for (m, a) in cases {
+                let borrowed = attach_alpha(&m, &a).unwrap();
+                let owned = attach_alpha_owned(m, a).unwrap();
+                assert_eq!(owned, borrowed, "{chroma:?}");
+            }
+        }
     }
 
     #[test]

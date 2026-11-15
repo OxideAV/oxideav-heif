@@ -25,9 +25,7 @@ use oxideav_core::{
 use std::collections::HashMap;
 
 use crate::av1c::Av1Config;
-use crate::compose::{
-    GridCanvas, OverlayInput, apply_transforms_owned, attach_alpha, composite_overlay,
-};
+use crate::compose::{GridCanvas, OverlayInput, apply_transforms_owned, composite_overlay};
 use crate::derived::{ImageKind, ImageNode, build_graph};
 use crate::error::{HeifError, Result};
 use crate::file::HeifFile;
@@ -1709,27 +1707,44 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
             ))
         })?;
         let (w, h) = node.reconstructed_size()?;
-        let base_node = build_graph(self.file, base)?;
-        if !matches!(
-            base_node.item.item_type,
-            crate::meta::ITEM_TYPE_HVC1 | crate::meta::ITEM_TYPE_HEV1
-        ) {
+        if let Some(base_type) = meta.item(base).map(|i| i.item_type)
+            && !matches!(
+                base_type,
+                crate::meta::ITEM_TYPE_HVC1 | crate::meta::ITEM_TYPE_HEV1
+            )
+        {
             return Err(HeifError::invalid(format!(
                 "hvt1 item {id}: its 'tbas' reference names item {base} ('{}'), not an HEVC \
                  image item",
-                crate::boxes::fourcc_str(&base_node.item.item_type)
+                crate::boxes::fourcc_str(&base_type)
             )));
         }
         // Several tile items of one picture (a grid of them, a burst)
-        // decode it once: the picture stays cached for the session.
-        *self.uses.entry(base).or_insert(1) += 1;
-        let picture = self.coded(&base_node)?;
-        crate::compose::region(&picture, rloc.horizontal_offset, rloc.vertical_offset, w, h)
-            .map_err(|e| match e {
+        // decode it once: the picture stays cached for the session and
+        // every tile is cut out of the cached planes (no copy of the
+        // picture per tile).
+        if !self.cache.contains_key(&base) {
+            // The picture's node is built for its decode only: every
+            // tile item of the picture refers to it, and walking those
+            // references once per tile would make a grid of tile items
+            // quadratic.
+            let base_node = build_graph(self.file, base)?;
+            // The use `coded` takes now …
+            *self.uses.entry(base).or_insert(0) += 1;
+            let picture = self.coded(&base_node)?;
+            // … and one that is never taken, so the graph's own uses of
+            // the base item leave it in the cache.
+            *self.uses.entry(base).or_insert(0) += 1;
+            self.cache.insert(base, picture);
+        }
+        let picture = &self.cache[&base];
+        crate::compose::region(picture, rloc.horizontal_offset, rloc.vertical_offset, w, h).map_err(
+            |e| match e {
                 HeifError::InvalidData(m) => HeifError::invalid(format!("hvt1 item {id}: {m}")),
                 HeifError::Unsupported(m) => HeifError::unsupported(format!("hvt1 item {id}: {m}")),
                 other => other,
-            })
+            },
+        )
     }
 
     /// A decoded coded item: from the cache (the last use takes it
@@ -2339,7 +2354,7 @@ impl<D: AsRef<[u8]>> Session<'_, '_, D> {
             if let Some(info) = a.properties.alpha_information() {
                 crate::compose::normalise_alpha(&mut alpha, &info);
             }
-            out = attach_alpha(&out, &alpha)?;
+            out = crate::compose::attach_alpha_owned(out, alpha)?;
         }
         Ok(out)
     }

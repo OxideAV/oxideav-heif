@@ -769,3 +769,105 @@ mod registry {
         assert_eq!(back.color, img.color);
     }
 }
+
+/// `decode_all` under a thread budget decodes the entries of a
+/// collection as ordered parallel jobs: the frames (order, item ids,
+/// pixels, colour, metadata), the skipped entries of the partial
+/// decode and the error of the strict one are those of the serial
+/// decode for every budget.
+#[cfg(feature = "registry")]
+#[test]
+fn a_collection_decodes_the_same_on_every_thread_budget() {
+    use oxideav_heif::{DecodeOptions, HeifFile, HeifWriter, decode_all_partial, decode_all_with};
+    // A collection of every vendored still (a grid, alpha, 10-bit,
+    // monochrome, 4:4:4 … — pictures of several sizes and layouts).
+    let files: Vec<Vec<u8>> = all_bundles()
+        .into_iter()
+        .filter(|(root, _)| *root == common::vendored_root())
+        .map(|(root, bundle)| fixture_bytes(&root, bundle))
+        .filter(|b| HeifFile::parse(b).is_ok_and(|f| f.primary_item().is_ok()))
+        .collect();
+    assert!(files.len() >= 8, "{} vendored stills", files.len());
+    let collection = HeifWriter::from_files(&files)
+        .unwrap()
+        .write_to_vec()
+        .unwrap();
+    // The same collection with one entry that does not decode: a coded
+    // item whose bytes are not a picture, under the first still's
+    // properties.
+    let broken = {
+        let first = HeifFile::parse(&files[0]).unwrap();
+        let id = first.primary_item().unwrap().id;
+        let props = oxideav_heif::props::ItemProperties::resolve(first.meta().unwrap(), id)
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|e| (e.property, e.essential))
+            .collect();
+        let mut w = HeifWriter::from_files(&files[..4]).unwrap();
+        w.add_coded_item(
+            first.primary_item().unwrap().item_type,
+            vec![0xff; 64],
+            props,
+        );
+        for f in &files[4..] {
+            let src = HeifFile::parse(f).unwrap();
+            w.import_item(&src, src.primary_item().unwrap().id).unwrap();
+        }
+        w.write_to_vec().unwrap()
+    };
+    let shape = |frames: &[oxideav_heif::Frame]| -> Vec<_> {
+        frames
+            .iter()
+            .map(|f| {
+                (
+                    f.item_id,
+                    f.image.width,
+                    f.image.height,
+                    f.image.format,
+                    f.image.planes.clone(),
+                    f.image.color,
+                    f.image.metadata.clone(),
+                )
+            })
+            .collect()
+    };
+    let opts = |threads: usize| {
+        DecodeOptions::default()
+            .with_strict(false)
+            .with_threads(Some(threads))
+    };
+    let serial = decode_all_with(&collection, &opts(1)).unwrap();
+    assert_eq!(serial.len(), files.len());
+    let serial_partial = decode_all_partial(&broken, &opts(1)).unwrap();
+    assert_eq!(serial_partial.frames.len(), files.len());
+    assert_eq!(serial_partial.skipped.len(), 1);
+    let serial_err = decode_all_with(&broken, &opts(1)).unwrap_err().to_string();
+    for threads in [2, 3, 8, 64] {
+        let all = decode_all_with(&collection, &opts(threads)).unwrap();
+        assert!(shape(&all) == shape(&serial), "{threads} threads: frames");
+        let partial = decode_all_partial(&broken, &opts(threads)).unwrap();
+        assert!(
+            shape(&partial.frames) == shape(&serial_partial.frames),
+            "{threads} threads: the frames of the partial decode"
+        );
+        let skipped = |p: &oxideav_heif::PartialDecode| -> Vec<_> {
+            p.skipped
+                .iter()
+                .map(|s| (s.item_ids.clone(), s.track_id, s.error.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            skipped(&partial),
+            skipped(&serial_partial),
+            "{threads} threads"
+        );
+        assert_eq!(
+            decode_all_with(&broken, &opts(threads))
+                .unwrap_err()
+                .to_string(),
+            serial_err,
+            "{threads} threads: the strict error"
+        );
+    }
+}
