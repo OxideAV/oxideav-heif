@@ -624,7 +624,7 @@ and real-world producers, and the production defaults.
 |------|--------|
 | ISOBMFF boxes | size 0 / 1 / `largesize` / `uuid`, FullBox, bounded recursive walk |
 | Brands | `mif1` `mif2` `mif3` `msf1` `heic` `heix` `hevc` `hevx` `heim` `heis` `hevm` `hevs` `miaf` `MiHB` `MiHA` `MiHE` `MiAB` `avif` `avis` `avio` `MA1B` `MA1A` `jpeg` `avci` `avcs` `vvic` `vvis` `vvi3` `tmap` `1pic` `pred`, `styp` |
-| Low-overhead files | Amd 2:2026 Annex O `mini` box (O.3.2 in full: bit-packed header, chunk sizes, HDR block with gain map) expanded to the normative O.4 equivalent `meta` + `mdat` on parse (`HeifFile::minimized`; a `vvi3` file's `CompactVvcDecoderConfigurationRecord` becomes the equivalent `vvcC` and its header-less `IDR_N_LP` payload the `VVCItemData`, L.4.3.3.4); `encode_still_minimized` writes `mif3` files (HEVC / AV1 / VVC, alpha, ICC, Exif, XMP, gain map, Exif orientation) that libheif renders identically to the regular file; `image/hif2`, `.hmg`; `dExf` / deflated XMP inflate (`deflate` feature); a box declaring alpha coded natively in the main item expands with O.4.6 entry 30 as the draft `alpx` property (r487 — see *Alpha information* below) |
+| Low-overhead files | Amd 2:2026 Annex O `mini` box (O.3.2 in full: bit-packed header, chunk sizes, HDR block with gain map) expanded to the normative O.4 equivalent `meta` + `mdat` on parse (`HeifFile::minimized`; a `vvi3` file's `CompactVvcDecoderConfigurationRecord` becomes the equivalent `vvcC` and its header-less `IDR_N_LP` payload the `VVCItemData`, L.4.3.3.4); `encode_still_minimized` writes `mif3` files (HEVC / AV1 / VVC, alpha, ICC, Exif, XMP, gain map, Exif orientation) that the black-box image decoder renders identically to the regular file (r493 live matrix: 8 files, HEVC and AV1, with and without alpha); a foreign `mif3` file that leaves its item and configuration types to be inferred from a `heic` / `avif` `minor_version` (`explicit_codec_types_flag` = 0 — what the black-box encoder writes) is **refused**: Amd 2 defines that inference for `vvi3` only; `image/hif2`, `.hmg`; `dExf` / deflated XMP inflate (`deflate` feature); a box declaring alpha coded natively in the main item expands with O.4.6 entry 30 as the draft `alpx` property (r487 — see *Alpha information* below) |
 | `meta` tree | `hdlr`, `pitm` v0/v1, `iinf` v0/v1 + `infe` v2/v3 (`mime` / `uri ` tails, hidden flag), `iloc` v0–v2 (all widths, construction methods 0 / 1 / 2, multi-extent, zero-length "to end"), `iref` v0/v1, `iprp` / `ipco` / `ipma` v0/v1 (7 / 15-bit indices, essential flag, index-0 placeholders), `idat`, `grpl`, `dinf` / `dref`, `ipro` |
 | Properties | `ispe` `pixi` `colr` (nclx + `rICC` / `prof`) `pasp` `clap` `irot` `imir` `iscl` `auxC` `hvcC` `av1C` `lhvC` `oinf` `tols` `avcC` `vvcC` (14496-15 §11.2.4 FullBox, `VvcPtlRecord`, `ptl_present_flag = 0` records read the SPS head in their arrays) `clli` `mdcv` `cclv` `amve` (14496-12 8th ed. §12.1.6–9 plain-Box syntax, FullBox-prefixed writers tolerated) `rloc` `lsel` `a1op` `a1lx` `rref` `crtt` `mdft` `udes` `altt` `reve` `ndwt` `cexg` `dadj` `stag` (Amd 1:2025 §6.5.41–45) `tilC` + `tipa` and the per-channel `pixi` (`px_flags & 1`, Amd 2:2026), `alpx` (alpha information — **draft**, r487); §6.5.1 descriptive-before-transformative order, unrecognised-essential refusal, exact rational `clap` |
 | Coded items | `hvc1` / `hev1` → oxideav-h265 (`hvcC` extradata, length-prefixed AU, layer 0 only — B.2.2.1.2; `pred` items through the bitstream their references form, §6.4.9); `hvt1` HEVC tile items (B.2.5, r486) as the region of their `tbas` image item's reconstructed image that `rloc` + `ispe` name (§6.5.7) — on their own, in a `grid`, in a burst, the picture decoded once per session; `av01` → oxideav-av1 (`av1C` extradata, temporal unit); `avc1` → oxideav-h264 (`avcC` extradata, length-prefixed AU; byte-exact against a black-box AVC decoder on Baseline / Main / High / 4:2:2 / 4:4:4 / 10-bit); `lhv1` → oxideav-h265's multi-layer decoder (`hvcC` ++ `lhvC` extradata, or the `lhvC` parameter sets in band without an `hvcC`; `layer=<lsel>` / `ols=<tols>`; an `exbl` item's picture as the external base layer — SHVC SNR / hybrid AVC base / MV-HEVC conformance files exact, below): the stereo shape (two `lhv1` items with `lsel` 0 / 1 in a `ster` group) yields each view, an item without `lsel` every output layer its `oinf` names (`DecodedImage::layers`; taken from a layer-set decode when the codec's output layer set yields others — r488), both views byte-exact against a black-box decoder's per-view output; an enhancement picture that is not an IRAP picture decodes from its own access unit (r488; `irap_layers_only` refuses it); an alpha layer rides as an `lhv1` auxiliary item with `lsel` over its master's access unit; `vvc1` → oxideav-h266's Annex B stream decoder through this crate's `vvcdec` wrapper (the h266 registry factory is a parser-only placeholder on 0.0.9): `vvcC` arrays + `VVCItemData` re-assembled per L.2.2.2 (AUD / OPI first, the L.2.2.1.2 `tols` OPI rule), conformance window applied, byte-exact against ffmpeg's VVC decoder on every item; `cexg` items decode extent by extent (an `ExtentDecoderConfigurationRecord` — defined by no coding-format binding — is kept opaque; the item's own configuration property decodes the tiles); 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8–16 bit; via direct factories or a caller `CodecRegistry`; grid / `tili` / `cexg` tiles decode in parallel under `ItemDecoder::with_execution_context` (byte-identical for every budget) |
@@ -1126,6 +1126,209 @@ absolute luminance for a PQ alternate; the reconstruction uses
 203 cd/m² (the example in its 3.6) unless `with_reference_white`
 overrides it, and relative transfers put the peak signal at
 2^H_alternate × reference white (3.6 / 3.10).
+
+## Live black-box matrix (r493, this machine: macOS 26.6 / Apple M4 Max)
+
+`tests/live_matrix.rs` writes its files on the spot — nothing is
+committed, the staged corpus is not involved — and holds every one of
+them against two black-box decoders. It runs wherever `heif-dec` and
+`ffmpeg` are installed (both references are needed for a verdict) and
+skips otherwise; a producer that is absent contributes no cells.
+`cargo test --release --test live_matrix -- --nocapture` prints one
+line per file; `OXIDEAV_HEIF_LIVE_BIG=1` adds the large cells.
+
+**Reader direction — foreign files read here.** Producers: `heif-enc`
+(libheif 1.23.4 with x265 4.3 and aom 3.15), the platform tool `sips`
+(HEIC and AVIF), `magick` 7, `ffmpeg` 8 (libsvtav1). The sweep is every
+option the tool exposes that changes the file:
+
+| Producer | Cells | What is swept |
+|---|---|---|
+| `heif-enc`, HEVC and AV1 | 350 | quality 0 … 100 and lossless (RGB and the codec's own); 4:2:0 / 4:2:2 / 4:4:4 × 8 / 10 / 12 bits × even / odd size; monochrome 8 / 10 / 12; alpha (8 / 10 / 12 bits, grey + alpha, pre-multiplied, dropped); thumbnails with and without alpha; 1×1, 2×2, 7×5, 1×33, 65×1, 97×81, 513×385, 1280×720; three rotations, two mirrors and three combinations on odd 4:2:0, even 4:2:0, odd 4:2:2 and odd 4:4:4 pictures, on alpha and on grids; `clli`, `pasp`; five colour presets, matrices 0 / 1 / 2 / 5 / 6 / 9, PQ, limited range (colour, 10-bit, 4:4:4, monochrome); grids of 64 / 128 / 256 (alpha, thumbnail, 10-bit, 4:4:4, monochrome); unified ids, an extra brand, a description, the low-overhead form; PNG / JPEG / TIFF sources carrying Exif, XMP and an ICC profile, both colour boxes at once, the omnidirectional projection property; three chroma downsamplers; a three-image collection; image sequences (frame rate, time base, repetitions 3 / infinite, three GOP structures, key-frame distance, frame cap, alpha, 10-bit, 4:4:4, lossless) and a video track; x265 CTU 16 / 32 / 64, presets, tunes, WPP + slices, loop filters off, AMP / rect / TU depth, transform skip, scaling lists, constrained intra; aom speeds, tiles, CDEF / restoration off, screen content, film grain, 128-pixel superblocks, intra block copy off, real-time, tunes, a quantiser window, alpha quality |
+| `sips`, HEIC and AVIF | 71 | its quality scale (numbers and names); the eight sizes; grey, 16-bit, alpha, grey + alpha; JPEG / TIFF / PNG sources carrying Exif, XMP and an ICC profile; three rotations, two mirrors, crop, pad, resample; an image sequence |
+| `magick`, HEIC and AVIF | 33 | quality 1 / 50 / 100, lossless, three chroma formats, 10 and 12 bits, alpha, grey, Exif, ICC, an Exif orientation, 1×1, 513×385, a collection |
+| `ffmpeg`, AV1 | 19 | 8 and 10 bits, odd size, tiles, two rate points, a slow preset, limited-range BT.709, image sequences (plain, looped, 10-bit), the track header's matrix (three rotations, two mirrors, two mirror-and-turn combinations) |
+| large (`OXIDEAV_HEIF_LIVE_BIG=1`) | 11 | 12 MP by three producers, 48 MP (8064×6048) and 16 384×2048 from the platform tool, five of the platform's own pictures (up to 6016×6016, 144 tiles) |
+
+Every file is checked four ways:
+
+* **coded planes** — every stream the black-box video decoder exposes
+  (items, grid tiles, alpha and thumbnail items, every track sample,
+  taken before the container's clean aperture and display matrix, in
+  the stream's own sample format) must equal one of this crate's
+  reconstructed pictures **sample for sample**;
+* **rendered picture** — the primary image, every image of a
+  collection and every frame of a sequence, converted to RGB(A), must
+  equal the black-box image decoder's PNG within 2 codes in 8-bit
+  units, alpha exactly. The tolerance is for the YCbCr → RGB step: the
+  equations of H.273 8.3 are real-valued and each implementation
+  rounds them once; the largest difference measured in the whole
+  matrix is 1 (2 on one 10-bit sequence frame). A transformed picture
+  is held against the black-box render of the same coded picture
+  written without the property, turned in RGB by the definition of
+  the property — the black-box decoder resamples chroma differently
+  once it turns a picture, so its own render of the transformed file
+  is not a sample-exact reference;
+* **metadata** — Exif, XMP and ICC bytes, the `nclx` triple and range,
+  bit depth, alpha and pre-multiplication, thumbnails, `clli`, `pasp`,
+  frame durations and repetitions must equal the black-box reports;
+* **surfaces** — `decode_primary`, the contract `decode` / `info` /
+  `decode_all` and the registry demuxer + `"heif"` decoder must agree.
+
+Result of the run: **473 cells, 3 refused by their producer (`sips`
+on two AVIF quality settings and a 16-bit grey AVIF), 470 files, 462
+pass; with the large cells 481 files, 473 pass.** The eight that do
+not pass are refused by this crate, and both refusals are reported as
+gaps in the staged documents rather than guessed at:
+
+* the black-box encoder's four **low-overhead (`mini`) files** (HEVC
+  and AV1, with and without alpha). They carry `heic` / `avif` as
+  `ftyp.minor_version` with `explicit_codec_types_flag` = 0; Amd
+  2:2026 defines the item and configuration types such a file infers
+  for the `vvi3` brand only (L.4.3), and no staged document defines
+  them for another brand. The files this crate writes in that form
+  carry explicit types and are read by the black-box image decoder
+  (below);
+* its four files with the **omnidirectional projection property**: an
+  essential `prfr` on the item, which is not a HEIF / MIAF property;
+  an item with an essential property the reader does not recognise
+  shall not be processed (ISO/IEC 14496-12 8.11.14). The
+  black-box image decoder renders them as ordinary pictures.
+
+What the run found in this crate, fixed in the same round:
+
+* **Mirrored odd pictures were one chroma sample off.** `imir`
+  reversed each plane on its own; a subsampled picture whose mirrored
+  extent is odd then pairs every chroma sample with the wrong luma
+  columns: the black-box encoder's AV1 cells mirroring a 97×81
+  picture came out up to 41 codes off. Such a picture is now promoted to
+  4:4:4 first, as a rotation of it already was.
+* **Tracks without a `colr` box ignored the bitstream's colour.** A
+  sequence written by a video encoder (limited range in the AV1
+  sequence header, no `colr` on the sample entry) rendered up to 20
+  codes off: 3 cells. The box over-rides the bitstream (ISO/IEC
+  14496-12 12.1.5.1); without one the bitstream stands.
+* **The track header's matrix was read and never applied.** HEIF
+  7.2.1 has readers support a mirror and / or quarter turns on a
+  sequence track; `decode_all` returned the coded frames. 7 cells —
+  now equal, sample for sample, to the black-box video decoder's own
+  display of the track for every matrix.
+* `heifdump --framework` could not show a planar-RGB (`matrix` 0)
+  picture (the example, not the library).
+
+Where the references themselves stop (each measured, none a defect of
+a file): the black-box video decoder cuts a clean aperture to even
+sizes and refuses a 1-sample one, shows a grid as its tiles, and does
+not read low-overhead files or `iden` derivations; the black-box image
+decoder shows a track's coded pictures (neither a sample entry's clean
+aperture nor the track matrix is applied — the frames are cut and
+turned by definition before comparing); every
+reader on the machine shows **limited-range monochrome unscaled**,
+where this crate scales luma by the range flag whatever the chroma
+format (and the black-box encoder flags limited range on full-range
+grey samples) — there is no reference rendering for those 2 + 2 cells,
+their coded planes are exact; the black-box report calls a track
+without an edit list "played once" where MIAF Amd 1:2025 A.2 says
+indefinitely, which is what `Track::loop_behaviour` answers.
+
+**Writer direction — files written here.** 296 files from every
+path of the writer, each put through the same four checks (the
+black-box decoders must reconstruct, sample for sample, what this
+crate decodes from its own file) plus a fifth: `heif-info`, `heif-dec`
+and `ffmpeg` must take the file with **nothing on their error
+streams**, and the platform reader must open it.
+
+| Writer path | Cells | Shapes |
+|---|---|---|
+| `encode_still`, × HEVC lossy, HEVC lossless, AV1 lossy, AV1 lossless | 242 | 4:2:0 / 4:2:2 / 4:4:4 / monochrome × 8 / 10 / 12 bits, odd sizes, alpha on each layout, 10-bit alpha, pre-multiplied alpha; 1×1, 2×2, 7×5, 1×33, 65×1, 513×385; grids (alpha + thumbnail, 4:4:4 10-bit); thumbnail; Exif + XMP + ICC; limited range (colour and monochrome), BT.709, BT.2020 PQ 10-bit, the identity matrix; `irot` 1 / 2 / 3, `imir` 0 / 1 and two combinations on odd 4:4:4, even 4:2:0 and odd 4:2:0; `clap` on 4:4:4 and 4:2:0; transforms on an `iden`; a depth auxiliary |
+| other writers, × the same four | 32 | `encode_overlay`; `encode_still_minimized` with and without alpha; contract `encode_rgb8` / `encode_rgba8`; `encode_all` as a three-image collection, a five-frame sequence and one with an alpha track |
+| rate and structure | 13 | HEVC QP 1 / 51, CTB 16 / 32 / 64, tiles, RD, loop filters off, a threaded grid; AV1 quality 1 / 100, both speeds |
+| re-mux (`HeifWriter::from_collection`) of foreign files | 9 | thumbnail + alpha, grids, pre-multiplied alpha, `clli`, a collection, Exif / XMP / ICC from the platform tool and from `magick` |
+
+Result: **296 written, 296 pass** — every written file is
+reconstructed by the black-box decoders to the samples this crate
+decodes, rendered within tolerance, reported with the metadata that
+was written, and taken silently by the three command-line readers
+except where a reader has no support for the shape from any producer
+(noted per cell: the black-box video decoder on 1-sample-wide
+pictures, low-overhead files and `iden`; the platform reader on
+low-overhead files and on 12-bit 4:2:2 / 4:4:4 HEVC — the black-box
+encoder's files of those shapes are refused the same way). Overlays
+are held to 4 codes instead of 2: the canvas is composed in 8-bit
+YCbCr here and in RGB there, so the sRGB fill passes through one more
+quantisation.
+
+What the writer direction found, fixed in the same round:
+
+* **The still encoder could not declare pre-multiplied alpha.**
+  `EncodeOptions::with_premultiplied_alpha` adds the `prem` reference.
+* **The platform reader refuses a `prem` master whose alpha auxiliary
+  is a hidden item** (it opens the same bytes with the hidden flag
+  cleared, and hidden straight alpha): the alpha auxiliary of a
+  pre-multiplied master is written visible.
+
+The platform reader's own rendering is recorded per cell and not
+asserted: on this matrix's noisy 4:2:0 pictures it differs from every
+other reader by up to ~80 codes at single pixels (mean ≈ 4.5; 4:4:4
+and monochrome pictures are within 2) — its chroma reconstruction is
+its own — and it reports `irot` / `imir` as an orientation instead of
+applying them.
+
+**Never verified against an outside file** (no tool on this machine
+writes them; covered by the staged conformance / device corpus and by
+this crate's own round trips only): depth and other non-alpha
+auxiliaries, `iovl` and `iden` from a foreign writer, `clap` away from
+the origin, gain maps (`tmap`), `tili` tiled items, AVC / VVC / L-HEVC
+items, predictively coded items, protected items, metadata tracks,
+`pixi`-described unusual channel layouts, 16-bit coded samples.
+
+## A viewer's path: open, decode, RGBA (r493)
+
+`heifbench --rgba [--runs N] [--threads N] <file>...` times what a
+viewer does with a still — parse and `info`, decode the primary, turn
+it into packed RGBA (`HeifImage::to_rgba8`) — and measures the peak
+resident set of a fresh process doing all three. The files are the
+live matrix's large cells: a 12 MP (4032×3024) and a 48 MP (8064×6048)
+picture converted from JPEG by the platform tool (grids of 512-pixel
+tiles, as a phone writes them) and one of the platform's own 6016×6016
+pictures. Nine other builds shared the machine during the run: each
+figure is the median of 7, and the two RGBA columns are measured in
+the same process, back to back, so their ratio holds whatever the
+load.
+
+| File | Open | Decode | RGBA, r493 | RGBA, the per-sample kernel it replaces | Total | Peak RSS |
+|---|---|---|---|---|---|---|
+| 12 MP HEIC, 1 worker | 0.13 ms | 421 ms | 47 ms | 101 ms | 471 ms | 75 MiB |
+| 12 MP AVIF, 1 worker | 0.07 ms | 315 ms | 35 ms | 67 ms | 350 ms | 76 MiB |
+| 48 MP HEIC, 1 worker | 0.20 ms | 1464 ms | 178 ms | 333 ms | 1643 ms | 282 MiB |
+| 6016×6016 HEIC, 1 worker | 0.22 ms | 1232 ms | 103 ms | 205 ms | 1337 ms | 234 MiB |
+| 12 MP HEIC, 4 workers | 0.11 ms | 101 ms | 12 ms | 73 ms | 114 ms | 88 MiB |
+| 48 MP HEIC, 4 workers | 0.22 ms | 406 ms | 41 ms | 299 ms | 446 ms | 318 MiB |
+| 6016×6016 HEIC, 4 workers | 0.25 ms | 366 ms | 30 ms | 222 ms | 397 ms | 273 MiB |
+
+Opening a file is a tenth of a millisecond at any size and decode is
+the codec crates' time (the profile of the 12 MP HEIC is HEVC residual
+decoding and transforms; the container's own copies and clears are 3 %
+of it). What the container side was wasting was the last step: the
+conversion called a closure per pixel that located every sample by
+offset arithmetic, re-evaluated every term of the H.273 equations in
+floating point and grew the output one pixel at a time. It now
+computes each term that depends on a single sample once per sample
+*value* (tables of 2^depth entries; for 8-bit pictures the quantised
+red and blue of every (luma, chroma) pair as well), walks rows through
+slices, and evaluates only green — the one channel that depends on
+all three samples — per pixel, with the very operations the kernel
+used: **the bytes are identical** (`rgb::tests`: every layout, depth,
+matrix, range and alpha combination against the kernel, which stays
+public as `rgb::for_each_pixel`; the digest column of `heifbench`; the
+benchmark asserts it on every run). In a quieter run the 12 MP figure
+was 28 – 29 ms against 84 ms. `HeifImage::to_rgba8_with_threads` /
+`to_rgb8_with_threads` (`rgb::planes_to_rgb8_threads`) convert bands
+of rows on a caller-granted budget — same bytes — which is the
+4-worker column: 6 – 7× the old conversion, and the RGBA step falls
+from two fifths of the 4-worker total to a tenth. `to_rgba8` / `to_rgb8`
+stay serial. The peak is the decoded planes plus the RGBA buffer
+(48 MP: 70 + 186 MiB); the conversion's tables add at most 0.2 MiB.
 
 ## Conformance matrix (r474, this machine: macOS 26.6 / Apple M4 Max)
 

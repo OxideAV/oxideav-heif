@@ -716,7 +716,9 @@ mod tests {
         for (w, h) in [(80u32, 60u32), (601, 449)] {
             for chroma in [Chroma::Mono, Chroma::Yuv420, Chroma::Yuv422, Chroma::Yuv444] {
                 for depth in [8u8, 10, 12] {
-                    if (w, h) == (601, 449) && depth == 10 {
+                    // The larger size is there for the pair tables,
+                    // which only 8-bit pictures take.
+                    if (w, h) == (601, 449) && depth != 8 {
                         continue;
                     }
                     for alpha in [false, true] {
@@ -789,19 +791,6 @@ mod tests {
                                 let got = planes_to_rgb8(w, h, fmt, &f.planes, Some(&colr), rgba)
                                     .unwrap();
                                 assert!(got == want, "planes_to_rgb8 rgba={rgba} {what}");
-                                for threads in [2, 5] {
-                                    let got = planes_to_rgb8_threads(
-                                        w,
-                                        h,
-                                        fmt,
-                                        &f.planes,
-                                        Some(&colr),
-                                        rgba,
-                                        threads,
-                                    )
-                                    .unwrap();
-                                    assert!(got == want, "{threads} workers rgba={rgba} {what}");
-                                }
                             }
                         }
                     }

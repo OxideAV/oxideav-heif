@@ -1,9 +1,11 @@
-//! Live black-box matrix, reader direction: files written on the spot
-//! by the foreign producers on this machine — `heif-enc` (HEVC and
-//! AV1), the platform tool `sips`, `magick`, `ffmpeg` — over every
-//! option they expose that changes the file, each decoded by this
-//! crate through every public surface and held against two black-box
-//! decoders:
+//! Live black-box matrix, both directions. **Reader direction**: files
+//! written on the spot by the foreign producers on this machine —
+//! `heif-enc` (HEVC and AV1), the platform tool `sips`, `magick`,
+//! `ffmpeg` — over every option they expose that changes the file.
+//! **Writer direction**: files written by every path of this crate's
+//! writer, and its re-muxes of foreign files. Each file is decoded by
+//! this crate through every public surface and held against two
+//! black-box decoders:
 //!
 //! * **coded planes, bit-exact** — every stream `ffmpeg` exposes from
 //!   the file (image items, tiles, auxiliaries, thumbnails, track
@@ -29,6 +31,10 @@
 //!   `heif-info` / `ffprobe` report;
 //! * **surfaces** — `decode_primary`, the contract `decode` / `info` /
 //!   `decode_all`, and the registry demuxer + `"heif"` decoder agree.
+//! * **readers** (written files) — `heif-info`, `heif-dec` and `ffmpeg`
+//!   take the file with nothing on their error streams and the
+//!   platform reader opens it; what a reader cannot do with any
+//!   producer's file of the shape is noted on the cell.
 //!
 //! Nothing is committed: the files live in a scratch directory. The
 //! test SKIPS when `heif-dec` or `ffmpeg` is absent (both references
@@ -2769,7 +2775,7 @@ fn known_refusal(tag: &str) -> Option<&'static str> {
         // An essential `prfr` property on the item: not a HEIF / MIAF
         // property (no staged document defines it), and an item with
         // an essential property the reader does not recognise shall
-        // not be processed (HEIF 6.5.1).
+        // not be processed (ISO/IEC 14496-12 8.11.14).
         return Some("essential property defined outside the staged documents");
     }
     None
