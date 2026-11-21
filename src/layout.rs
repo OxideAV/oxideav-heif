@@ -239,6 +239,16 @@ pub fn predict_output(node: &ImageNode) -> Result<(HeifPixelFormat, (u32, u32))>
                     }
                 }
             }
+            Property::Imir(m) => {
+                let horizontal = m.axis & 1 == 1;
+                if needs_444(
+                    fmt.chroma,
+                    horizontal && w % 2 == 1,
+                    !horizontal && h % 2 == 1,
+                ) {
+                    fmt.chroma = Chroma::Yuv444;
+                }
+            }
             Property::Iscl(s) => {
                 let (nw, nh) = s.output_size(w, h)?;
                 w = nw;

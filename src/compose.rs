@@ -317,8 +317,24 @@ fn rotate_rows(
 
 /// Apply an `imir` property (§6.5.12): axis 0 exchanges top and bottom,
 /// axis 1 exchanges left and right.
+///
+/// A subsampled picture whose extent along the mirrored direction is
+/// odd has a last chroma sample that covers one luma position only;
+/// reversed, the chroma grid would start on that half-covered sample
+/// and every chroma sample would sit one luma position off. Such a
+/// picture is promoted to 4:4:4 first (MIAF §7.3.6.7, NOTE 2), as a
+/// rotation of it is.
 pub fn apply_imir(f: &HeifFrame, imir: &Imir) -> Result<HeifFrame> {
-    let mut out = f.tight();
+    let horizontal = imir.axis & 1 == 1;
+    let mut out = if needs_444(
+        f.format.chroma,
+        horizontal && f.width % 2 == 1,
+        !horizontal && f.height % 2 == 1,
+    ) {
+        f.promote_to_444()?
+    } else {
+        f.tight()
+    };
     let bps = out.format.bytes_per_sample();
     for p in 0..out.format.plane_count() {
         let (pw, ph) = out.plane_dims(p);
@@ -2138,6 +2154,55 @@ mod tests {
         let m = apply_imir(&deep, &Imir { axis: 1 }).unwrap();
         assert_eq!(m.sample(0, 0, 0), 7);
         assert_eq!(m.sample(0, 2, 0), 1000);
+    }
+
+    /// A mirror along an odd subsampled extent promotes to 4:4:4: the
+    /// reversed chroma plane would pair every chroma sample with the
+    /// wrong luma columns (the last source chroma column covers one
+    /// luma column only). Each output pixel must keep the chroma
+    /// sample its source pixel had.
+    #[test]
+    fn mirror_of_an_odd_subsampled_picture_keeps_each_pixel_s_chroma() {
+        for chroma in [Chroma::Yuv420, Chroma::Yuv422] {
+            let f = ramp(5, 3, chroma);
+            let (sx, sy) = chroma.shift();
+            let h = apply_imir(&f, &Imir { axis: 1 }).unwrap();
+            assert_eq!(h.format.chroma, Chroma::Yuv444, "{chroma:?} odd width");
+            let v = apply_imir(&f, &Imir { axis: 0 }).unwrap();
+            assert_eq!(
+                v.format.chroma,
+                if sy == 1 { Chroma::Yuv444 } else { chroma },
+                "{chroma:?} odd height"
+            );
+            for y in 0..3u32 {
+                for x in 0..5u32 {
+                    for p in 0..3 {
+                        let src = |x: u32, y: u32| {
+                            if p == 0 {
+                                f.sample(0, x, y)
+                            } else {
+                                f.sample(p, x >> sx, y >> sy)
+                            }
+                        };
+                        assert_eq!(h.sample(p, x, y), src(4 - x, y), "h {chroma:?} {p} {x},{y}");
+                        let got = if p == 0 || v.format.chroma == Chroma::Yuv444 {
+                            v.sample(p, x, y)
+                        } else {
+                            v.sample(p, x >> sx, y >> sy)
+                        };
+                        assert_eq!(got, src(x, 2 - y), "v {chroma:?} {p} {x},{y}");
+                    }
+                }
+            }
+            // Even extents keep the layout.
+            let even = ramp(4, 2, chroma);
+            for axis in 0..2 {
+                assert_eq!(
+                    apply_imir(&even, &Imir { axis }).unwrap().format.chroma,
+                    chroma
+                );
+            }
+        }
     }
 
     /// §6.5.10 sample by sample — the definition the band-wise
