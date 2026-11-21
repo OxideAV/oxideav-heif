@@ -107,9 +107,22 @@ pub fn info_of<D: AsRef<[u8]>>(file: &HeifFile<D>) -> Result<ImageInfo> {
                 .find(|c| matches!(c, Colr::Nclx { .. }))
                 .map(ColorInfo::from_colr)
                 .unwrap_or_default();
+            // The size `decode_all` yields: the sample entry's, through
+            // its clean aperture and the track header's quarter turns.
+            let (mut width, mut height) = (entry.width as u32, entry.height as u32);
+            if let Some(r) = entry
+                .clap
+                .as_ref()
+                .and_then(|c| c.resolve(width, height).ok())
+            {
+                (width, height) = (r.width, r.height);
+            }
+            if track.orientation().is_some_and(|o| o.rotation & 1 == 1) {
+                std::mem::swap(&mut width, &mut height);
+            }
             Ok(ImageInfo {
-                width: entry.width as u32,
-                height: entry.height as u32,
+                width,
+                height,
                 format: PixelFormat::from_layout_promoting(layout, false),
                 frames: sequence_frames.min(u32::MAX as u64) as u32,
                 has_alpha,

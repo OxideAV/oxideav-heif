@@ -444,7 +444,7 @@ fn decode_samples<D: AsRef<[u8]>>(
     file: &HeifFile<D>,
     track: &Track,
     opts: &DecodeOptions,
-) -> Result<(Vec<HeifFrame>, Vec<u32>, HeifPixelFormat)> {
+) -> Result<(Vec<HeifFrame>, Vec<u32>, Option<oxideav_core::ColorSignal>)> {
     let entry = track
         .primary_entry()
         .ok_or_else(|| HeifError::invalid(format!("track {}: no sample entry", track.track_id)))?;
@@ -480,6 +480,9 @@ fn decode_samples<D: AsRef<[u8]>>(
     dec.flush()
         .map_err(|e| HeifError::invalid(format!("track {}: flush: {e}", track.track_id)))?;
     drain(&mut dec, &mut out)?;
+    // What the bitstream says of its own colour (VUI / sequence
+    // header), for a sample entry without a `colr`.
+    let signal = dec.output_params().map(|p| p.color_signal);
     // Durations in composition order.
     let mut by_pts: Vec<(u64, u32)> = track
         .samples
@@ -488,7 +491,7 @@ fn decode_samples<D: AsRef<[u8]>>(
         .collect();
     by_pts.sort_by_key(|(pts, _)| *pts);
     let durations = by_pts.into_iter().map(|(_, d)| d).collect();
-    Ok((out, durations, layout))
+    Ok((out, durations, signal))
 }
 
 /// Pull every picture `dec` has ready into `out`, read at `shape` —
@@ -523,8 +526,37 @@ fn drain_track(
     }
 }
 
+/// The colour description of a track's pictures: the sample entry's
+/// `nclx` `colr`; without one, what the bitstream signals (ISO/IEC
+/// 14496-12 §12.1.5.1: the box over-rides the information in the
+/// bitstream — which therefore stands when there is no box), each
+/// code point it leaves unspecified, and the range when it names
+/// none, taken from the MIAF §7.3.6.4 default.
+fn track_color(colrs: &[Colr], bitstream: Option<&oxideav_core::ColorSignal>) -> ColorInfo {
+    if let Some(colr) = colrs.iter().find(|c| matches!(c, Colr::Nclx { .. })) {
+        return ColorInfo::from_colr(colr);
+    }
+    let default = ColorInfo::from_colr(&Colr::MIAF_DEFAULT);
+    let Some(signal) = bitstream else {
+        return default;
+    };
+    let signalled = ColorInfo::from_color_signal(signal);
+    // 2 is H.273's "unspecified" for all three code points.
+    let pick = |v: u8, d: u8| if v == 2 { d } else { v };
+    ColorInfo::new(
+        match signalled.range {
+            ColorRange::Unspecified => default.range,
+            r => r,
+        },
+        pick(signalled.primaries, default.primaries),
+        pick(signalled.transfer, default.transfer),
+        pick(signalled.matrix, default.matrix),
+    )
+}
+
 /// The frames of one image-sequence track (its alpha track composed
-/// in, its sample entry's `clap` applied).
+/// in, its sample entry's `clap` applied, then the track header's
+/// rotation / mirror).
 fn decode_track<D: AsRef<[u8]>>(
     file: &HeifFile<D>,
     movie: &Movie,
@@ -534,7 +566,7 @@ fn decode_track<D: AsRef<[u8]>>(
     let entry = track
         .primary_entry()
         .ok_or_else(|| HeifError::invalid(format!("track {}: no sample entry", track.track_id)))?;
-    let (pictures, durations, _) = decode_samples(file, track, opts)?;
+    let (pictures, durations, signal) = decode_samples(file, track, opts)?;
     let alpha = match movie.alpha_track_of(track.track_id) {
         Some(a) => {
             let mut planes = decode_samples(file, a, opts)?.0;
@@ -549,13 +581,7 @@ fn decode_track<D: AsRef<[u8]>>(
         }
         None => None,
     };
-    let colr = entry
-        .colr
-        .iter()
-        .find(|c| matches!(c, Colr::Nclx { .. }))
-        .cloned()
-        .unwrap_or(Colr::MIAF_DEFAULT);
-    let color = ColorInfo::from_colr(&colr);
+    let color = track_color(&entry.colr, signal.as_ref());
     // The sequence-level metadata (HEIF §8.3: the track's MetaBox) on
     // every frame, refined per frame by the time-parallel samples of
     // the Exif / XMP metadata tracks describing this track.
@@ -579,6 +605,7 @@ fn decode_track<D: AsRef<[u8]>>(
     let timescale = track.timescale.max(1) as u64;
     let mut frames = Vec::with_capacity(pictures.len());
     let mut alpha = alpha.map(|a| a.into_iter());
+    let orientation = track.orientation();
     for (i, mut pic) in pictures.into_iter().enumerate() {
         if let Some(plane) = alpha.as_mut().and_then(|a| a.next()) {
             pic = attach_alpha_owned(pic, plane)?;
@@ -605,6 +632,18 @@ fn decode_track<D: AsRef<[u8]>>(
         }
         if let Some(clap) = &entry.clap {
             pic = apply_clap(&pic, clap)?;
+        }
+        // The track header's matrix (HEIF §7.2.1: a mirror and / or a
+        // rotation by a multiple of 90°, which readers shall support),
+        // after the clean aperture (its NOTE 2). A matrix outside the
+        // permitted set is left unapplied.
+        if let Some(o) = orientation {
+            if o.mirror {
+                pic = crate::compose::apply_imir(&pic, &crate::props::Imir::new(1))?;
+            }
+            if o.rotation & 3 != 0 {
+                pic = crate::compose::apply_irot(&pic, &crate::props::Irot::new(o.rotation))?;
+            }
         }
         let delay = durations.get(i).map(|d| {
             let d = *d as u64;
@@ -1424,6 +1463,40 @@ mod tests {
     /// `Frame::StreamParams` event re-shapes the pictures after it (the
     /// sample entry's layout / size before), is never a picture, and
     /// the layer side channel never an image plane.
+    /// A track's colour: the sample entry's `nclx` over the
+    /// bitstream's, the bitstream's over the MIAF default, code point
+    /// by code point where the bitstream leaves one unspecified.
+    #[test]
+    fn track_colour_falls_back_to_the_bitstream_then_the_default() {
+        use oxideav_core::{ColorRange as R, ColorSignal};
+        let default = ColorInfo::new(ColorRange::Full, 1, 13, 6);
+        assert_eq!(track_color(&[], None), default);
+        // Limited range, nothing else named (what a video encoder
+        // writes for an untagged source).
+        let limited = ColorSignal::from_code_points(2, 2, 2, false);
+        assert_eq!(
+            track_color(&[], Some(&limited)),
+            ColorInfo::new(ColorRange::Limited, 1, 13, 6)
+        );
+        let bt2020 = ColorSignal::new(R::Unspecified, 9.into(), 16.into(), 9.into());
+        assert_eq!(
+            track_color(&[], Some(&bt2020)),
+            ColorInfo::new(ColorRange::Full, 9, 16, 9)
+        );
+        // The box wins (ISO/IEC 14496-12 12.1.5.1), an ICC box alone
+        // does not stand in for the code points.
+        let nclx = Colr::Nclx {
+            primaries: 1,
+            transfer: 1,
+            matrix: 1,
+            full_range: true,
+        };
+        assert_eq!(
+            track_color(std::slice::from_ref(&nclx), Some(&limited)),
+            ColorInfo::new(ColorRange::Full, 1, 1, 1)
+        );
+    }
+
     #[test]
     fn track_drain_follows_the_codec_shape_events() {
         use crate::image::Chroma;

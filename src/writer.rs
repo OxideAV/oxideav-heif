@@ -2342,6 +2342,12 @@ pub struct SequenceWriter {
     /// `cprt` boxes of the master track's `udta` (§8.10.2: a `cprt`
     /// in a track applies to that track).
     pub track_copyrights: Vec<crate::sequence::Copyright>,
+    /// The orientation the tracks are shown in, written as the
+    /// `TrackHeaderBox` matrix of the picture track and its alpha track
+    /// (HEIF §7.2.1: a mirror and / or a rotation by a multiple of
+    /// 90°, applied by readers after the sample entry's clean
+    /// aperture). `None` writes the unity matrix.
+    pub orientation: Option<crate::sequence::TrackOrientation>,
 }
 impl SequenceWriter {}
 
@@ -2374,7 +2380,17 @@ impl SequenceWriter {
             metadata_tracks: Vec::new(),
             copyrights: Vec::new(),
             track_copyrights: Vec::new(),
+            orientation: None,
         }
+    }
+
+    /// Set the display orientation (see [`SequenceWriter::orientation`]).
+    pub fn with_orientation(
+        mut self,
+        orientation: Option<crate::sequence::TrackOrientation>,
+    ) -> Self {
+        self.orientation = orientation;
+        self
     }
 
     /// Add a copyright declaration for the picture track (`cprt` in
@@ -2658,6 +2674,10 @@ impl SequenceWriter {
             b.extend_from_slice(&next_track_id.to_be_bytes()); // next_track_ID
             full_boxed(b"mvhd", 0, 0, &b)
         };
+        let matrix = self
+            .orientation
+            .unwrap_or(crate::sequence::TrackOrientation::new(0, false))
+            .matrix();
         let master = TrackSpec {
             track_id: 1,
             handler: *b"pict",
@@ -2672,6 +2692,7 @@ impl SequenceWriter {
             samples: &self.samples,
             tref_auxl: None,
             looping: self.looping,
+            matrix,
             meta: &track_meta,
             udta: &track_udta,
         };
@@ -2690,6 +2711,7 @@ impl SequenceWriter {
             samples: &a.samples,
             tref_auxl: Some(1),
             looping: self.looping,
+            matrix,
             meta: &[],
             udta: &[],
         });
@@ -2948,6 +2970,8 @@ struct TrackSpec<'a> {
     samples: &'a [SequenceSample],
     tref_auxl: Option<u32>,
     looping: Option<crate::sequence::LoopBehaviour>,
+    /// The `tkhd` matrix.
+    matrix: [i32; 9],
     /// A serialized track-level `meta` box (empty = none).
     meta: &'a [u8],
     /// A serialized `udta` box (track-level `cprt`s), or empty.
@@ -3022,7 +3046,7 @@ fn trak_box(t: &TrackSpec<'_>, ts: u32, chunk_offset: u64) -> Vec<u8> {
         b.extend_from_slice(&tkhd_duration.to_be_bytes());
         b.extend_from_slice(&[0u8; 8]);
         b.extend_from_slice(&[0u8; 8]); // layer, alternate_group, volume, reserved
-        for m in [0x10000u32, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000] {
+        for m in t.matrix {
             b.extend_from_slice(&m.to_be_bytes());
         }
         let (pw, ph) = presentation_size(t.width, t.height, t.entry_properties);

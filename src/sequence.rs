@@ -256,7 +256,36 @@ impl TrackOrientation {
     pub fn new(rotation: u8, mirror: bool) -> Self {
         Self { rotation, mirror }
     }
+
+    /// The §7.2.1 `TrackHeaderBox` matrix of this orientation (`a b u
+    /// c d v x y w`, 16.16 with a 2.30 `w`; no translation), the
+    /// inverse of [`Track::orientation`]. `rotation` is taken modulo 4.
+    pub fn matrix(&self) -> [i32; 9] {
+        let [a, b, c, d] = ORIENTATION_MATRICES
+            .iter()
+            .find(|(_, r, m)| *r == self.rotation & 3 && *m == self.mirror)
+            .map(|(abcd, _, _)| *abcd)
+            .unwrap_or([MATRIX_ONE, 0, 0, MATRIX_ONE]);
+        [a, b, 0, c, d, 0, 0, 0, 0x4000_0000]
+    }
 }
+
+/// 1.0 in the 16.16 fixed point of the matrix's `a b c d`.
+const MATRIX_ONE: i32 = 0x0001_0000;
+
+/// `(a b; c d)` for 0 / 90 / 180 / 270 degrees anti-clockwise in the
+/// ISOBMFF `(x, y) → (x·a + y·c, x·b + y·d)` convention, and their
+/// horizontally mirrored variants: `(matrix, rotation, mirror)`.
+const ORIENTATION_MATRICES: [([i32; 4], u8, bool); 8] = [
+    ([MATRIX_ONE, 0, 0, MATRIX_ONE], 0, false),
+    ([0, -MATRIX_ONE, MATRIX_ONE, 0], 1, false),
+    ([-MATRIX_ONE, 0, 0, -MATRIX_ONE], 2, false),
+    ([0, MATRIX_ONE, -MATRIX_ONE, 0], 3, false),
+    ([-MATRIX_ONE, 0, 0, MATRIX_ONE], 0, true),
+    ([0, MATRIX_ONE, MATRIX_ONE, 0], 1, true),
+    ([MATRIX_ONE, 0, 0, -MATRIX_ONE], 2, true),
+    ([0, -MATRIX_ONE, -MATRIX_ONE, 0], 3, true),
+];
 
 /// A sample-to-group mapping (`sbgp`, ISO/IEC 14496-12 §8.9.2, or the
 /// compact `csgp`, §8.9.5, expanded to the same run list).
@@ -674,25 +703,11 @@ impl Track {
     /// §7.2.1: decode the matrix into rotation / mirror when it is one
     /// of the permitted combinations; `None` for any other matrix.
     pub fn orientation(&self) -> Option<TrackOrientation> {
-        const ONE: i32 = 0x0001_0000;
         let [a, b, _u, c, d, _v, _x, _y, w] = self.matrix;
         if w != 0x4000_0000 {
             return None;
         }
-        // Rotation matrices (a b; c d) for 0/90/180/270 anti-clockwise
-        // in the ISOBMFF (x, y) → (x·a + y·c, x·b + y·d) convention, and
-        // their horizontally mirrored variants.
-        let table = [
-            ([ONE, 0, 0, ONE], 0u8, false),
-            ([0, -ONE, ONE, 0], 1, false),
-            ([-ONE, 0, 0, -ONE], 2, false),
-            ([0, ONE, -ONE, 0], 3, false),
-            ([-ONE, 0, 0, ONE], 0, true),
-            ([0, ONE, ONE, 0], 1, true),
-            ([ONE, 0, 0, -ONE], 2, true),
-            ([0, -ONE, -ONE, 0], 3, true),
-        ];
-        table
+        ORIENTATION_MATRICES
             .iter()
             .find(|(m, _, _)| *m == [a, b, c, d])
             .map(|(_, rotation, mirror)| TrackOrientation {

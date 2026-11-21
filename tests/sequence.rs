@@ -627,3 +627,101 @@ fn copyright_declarations_round_trip_through_cprt() {
     let plain = none.write_to_vec().unwrap();
     assert!(!plain.windows(4).any(|w| w == b"udta"));
 }
+
+/// The track header's matrix (HEIF §7.2.1): every orientation the
+/// writer can declare reads back as that orientation, and `decode_all`
+/// shows the frames mirrored, then turned anti-clockwise — after the
+/// sample entry's clean aperture — with `info` announcing the turned
+/// size. Lossless frames, so the comparison is exact.
+#[cfg(feature = "registry")]
+#[test]
+fn track_matrix_orients_the_frames() {
+    use oxideav_heif::compose::{apply_imir, apply_irot};
+    use oxideav_heif::encode::encode_hevc_picture;
+    use oxideav_heif::image::Chroma;
+    use oxideav_heif::props::{Colr, Imir, Irot, Ispe, Pixi, Property};
+    use oxideav_heif::sequence::{TrackOrientation, parse_movie};
+    use oxideav_heif::writer::SequenceWriter;
+    use oxideav_heif::{HeifFile, HeifFrame, HeifPixelFormat};
+
+    let picture = |i: u32| {
+        let mut f = HeifFrame::zeroed(
+            48,
+            32,
+            HeifPixelFormat::new(Chroma::Yuv420, 8, false).unwrap(),
+        )
+        .unwrap();
+        for y in 0..32 {
+            for x in 0..48 {
+                f.set_sample(0, x, y, ((x * 3 + y * 5 + i * 40) % 256) as u16);
+            }
+        }
+        for y in 0..16 {
+            for x in 0..24 {
+                f.set_sample(1, x, y, ((x * 7 + i * 11) % 256) as u16);
+                f.set_sample(2, x, y, ((y * 9 + i * 13) % 256) as u16);
+            }
+        }
+        f
+    };
+    let pictures: Vec<HeifFrame> = (0..2).map(picture).collect();
+    let coded: Vec<_> = pictures
+        .iter()
+        .map(|p| encode_hevc_picture(p, "pcm", 0).unwrap())
+        .collect();
+    for rotation in 0..4u8 {
+        for mirror in [false, true] {
+            let orientation = TrackOrientation::new(rotation, mirror);
+            let mut sw = SequenceWriter::new(*b"hvc1", coded[0].config.clone(), 48, 32, 10)
+                .with_orientation(Some(orientation));
+            for c in &coded {
+                sw.push_sample(c.data.clone(), 1, true);
+            }
+            let bytes = sw.write_to_vec().unwrap();
+            let file = HeifFile::parse(&bytes).unwrap();
+            let movie = parse_movie(&file).unwrap().unwrap();
+            let read = movie.tracks[0].orientation();
+            assert_eq!(read, Some(orientation), "{orientation:?}");
+            let frames = oxideav_heif::decode_all(&bytes).unwrap();
+            assert_eq!(frames.len(), 2);
+            for (frame, source) in frames.iter().zip(&pictures) {
+                let mut want = source.clone();
+                if mirror {
+                    want = apply_imir(&want, &Imir::new(1)).unwrap();
+                }
+                want = apply_irot(&want, &Irot::new(rotation)).unwrap();
+                assert_eq!(frame.image.to_frame().unwrap(), want, "{orientation:?}");
+            }
+            let info = oxideav_heif::api::info(&bytes).unwrap();
+            let turned = if rotation % 2 == 1 {
+                (32, 48)
+            } else {
+                (48, 32)
+            };
+            assert_eq!((info.width, info.height), turned, "{orientation:?}");
+        }
+    }
+    // A cover still is not touched by the track's matrix.
+    let mut still = oxideav_heif::HeifWriter::new();
+    let cover = still.add_coded_item(
+        *b"hvc1",
+        coded[0].data.clone(),
+        vec![
+            (coded[0].config.clone(), true),
+            (Property::Ispe(Ispe::new(48, 32)), false),
+            (Property::Pixi(Pixi::new(vec![8, 8, 8])), false),
+            (Property::Colr(Colr::MIAF_DEFAULT), false),
+        ],
+    );
+    still.set_primary(cover);
+    let mut sw = SequenceWriter::new(*b"hvc1", coded[0].config.clone(), 48, 32, 10)
+        .with_orientation(Some(TrackOrientation::new(1, false)));
+    sw.push_sample(coded[0].data.clone(), 1, true);
+    sw.still = Some(still);
+    let frames = oxideav_heif::decode_all(&sw.write_to_vec().unwrap()).unwrap();
+    let sizes: Vec<_> = frames
+        .iter()
+        .map(|f| (f.item_id.is_some(), f.image.width, f.image.height))
+        .collect();
+    assert_eq!(sizes, vec![(true, 48, 32), (false, 32, 48)]);
+}
