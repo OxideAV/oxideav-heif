@@ -173,7 +173,11 @@ fn decode_framework(bytes: Vec<u8>) -> Result<Decoded, String> {
         still.params.width.ok_or("no width")?,
         still.params.height.ok_or("no height")?,
     );
-    let frame = HeifFrame::from_core(&v, w, h, pf).map_err(|e| format!("from_core: {e}"))?;
+    // Planar RGB (an item with `matrix_coefficients = 0`) comes out as
+    // the `Gbrp*` family: the same three planes, labelled.
+    let frame = HeifFrame::from_core(&v, w, h, pf)
+        .or_else(|_| HeifFrame::from_core_gbr(&v, w, h, pf))
+        .map_err(|e| format!("from_core: {e}"))?;
     let info = format!("streams={} pf={pf:?}", streams.len());
     Ok((frame, None, info))
 }
