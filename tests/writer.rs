@@ -1718,3 +1718,59 @@ fn auxiliary_planes_of_a_tiled_picture_are_grids() {
         );
     }
 }
+
+/// Pre-multiplied alpha (HEIF §6.9.1): the option adds the `prem`
+/// reference from the master to its alpha auxiliary and the decode
+/// reports it; the auxiliary of a pre-multiplied master is a visible
+/// item (the platform reader refuses a hidden one there —
+/// `tests/live_matrix.rs`), a straight-alpha auxiliary stays hidden.
+/// The samples are written as given either way.
+#[test]
+fn premultiplied_alpha_is_declared_and_read_back() {
+    let src = picture_with_alpha(64, 48);
+    for codec in [StillCodec::Hevc, StillCodec::Av1] {
+        let base = if codec == StillCodec::Hevc {
+            lossless()
+        } else {
+            EncodeOptions::default().with_codec(StillCodec::Av1)
+        };
+        let mut pictures = Vec::new();
+        for premultiplied in [false, true] {
+            let bytes =
+                encode_still(&src, &base.clone().with_premultiplied_alpha(premultiplied)).unwrap();
+            let f = HeifFile::parse(&bytes).unwrap();
+            let rep = check(&f, MiafProfile::Miaf).unwrap();
+            assert!(rep.is_conformant(), "{codec:?}: {:#?}", rep.violations);
+            let meta = f.meta().unwrap();
+            let prem: Vec<_> = meta
+                .references
+                .iter()
+                .filter(|r| &r.reference_type == b"prem")
+                .collect();
+            let auxl = meta
+                .references
+                .iter()
+                .find(|r| &r.reference_type == b"auxl")
+                .expect("an alpha auxiliary");
+            let alpha = meta
+                .items
+                .iter()
+                .find(|i| i.id == auxl.from_item_id)
+                .unwrap();
+            if premultiplied {
+                assert_eq!(prem.len(), 1, "{codec:?}");
+                assert_eq!(prem[0].from_item_id, meta.primary_item_id.unwrap());
+                assert_eq!(prem[0].to_item_ids, vec![alpha.id]);
+                assert!(!alpha.is_hidden(), "{codec:?}: alpha of a prem master");
+            } else {
+                assert!(prem.is_empty(), "{codec:?}");
+                assert!(alpha.is_hidden(), "{codec:?}: straight alpha");
+            }
+            let img = decode_primary(&f, ItemDecoder::direct()).unwrap();
+            assert_eq!(img.premultiplied_alpha, premultiplied, "{codec:?}");
+            pictures.push(img.frame);
+        }
+        assert_eq!(pictures[0], pictures[1], "{codec:?}: same samples");
+        assert_eq!(pictures[0], src, "{codec:?}: lossless");
+    }
+}

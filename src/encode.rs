@@ -271,6 +271,12 @@ pub struct EncodeOptions {
     /// picture (explicitly, or the automatic grid above
     /// [`GRID_AUTO_MIN_PIXELS`]).
     pub tile_carrier: TileCarrier,
+    /// The colour samples of a picture with an alpha plane are already
+    /// multiplied by it: the alpha auxiliary is declared with a `prem`
+    /// reference from its master (HEIF §6.9.1) so readers composite
+    /// accordingly. The samples are written as given. Off by default
+    /// (straight alpha); without an alpha plane it has no effect.
+    pub premultiplied_alpha: bool,
 }
 impl EncodeOptions {
     /// Every field as a positional argument, in declaration order
@@ -332,7 +338,14 @@ impl EncodeOptions {
             transform_carrier,
             tile_carrier: TileCarrier::Grid,
             sequence_pixels_in_flight: None,
+            premultiplied_alpha: false,
         }
+    }
+
+    /// Set `premultiplied_alpha`.
+    pub fn with_premultiplied_alpha(mut self, premultiplied_alpha: bool) -> Self {
+        self.premultiplied_alpha = premultiplied_alpha;
+        self
     }
 
     /// Set `tile_carrier`.
@@ -647,6 +660,7 @@ impl Default for EncodeOptions {
             depth_map: None,
             transform_carrier: TransformCarrier::CodedItem,
             tile_carrier: TileCarrier::Grid,
+            premultiplied_alpha: false,
         }
     }
 }
@@ -2225,7 +2239,9 @@ fn add_auxiliary_plane(
             w.add_grid(desc, &tiles, props)?
         };
         drop(a_src);
-        w.set_hidden(id, true);
+        // As `HeifWriter::add_alpha`: hidden, except the alpha of a
+        // pre-multiplied master.
+        w.set_hidden(id, is_depth || !premultiplied);
         w.add_reference(crate::meta::reference::AUXL, id, vec![master]);
         if premultiplied && !is_depth {
             w.add_reference(crate::meta::reference::PREM, master, vec![id]);
@@ -3506,7 +3522,7 @@ fn encode_still_planes(
             cfmt.bit_depth,
             alpha_urn(opts),
             ALPHA_HEVC_OPTIONS,
-            false,
+            opts.premultiplied_alpha,
             opts,
         )?;
     }

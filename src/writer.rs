@@ -685,7 +685,11 @@ impl HeifWriter {
 
     /// Add an alpha auxiliary (a coded item) of `master`. An `auxC`
     /// with the codec-independent alpha URN is added when `properties`
-    /// carries none; `premultiplied` adds the `prem` reference.
+    /// carries none; `premultiplied` adds the `prem` reference. The
+    /// auxiliary is a hidden item, except under `premultiplied`: the
+    /// platform reader of one major vendor refuses a `prem` master
+    /// whose alpha auxiliary is hidden (measured, `tests/live_matrix.rs`),
+    /// and HEIF §6.4.2 leaves hiding an auxiliary to the writer.
     pub fn add_alpha(
         &mut self,
         master: u32,
@@ -707,7 +711,7 @@ impl HeifWriter {
             ));
         }
         let id = self.add_coded_item(item_type, data, properties);
-        self.items.last_mut().expect("just pushed").hidden = true;
+        self.items.last_mut().expect("just pushed").hidden = !premultiplied;
         self.references.push((reference::AUXL, id, vec![master]));
         if premultiplied {
             self.references.push((reference::PREM, master, vec![id]));
