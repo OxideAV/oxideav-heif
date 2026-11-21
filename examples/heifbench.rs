@@ -115,6 +115,138 @@ fn main() {
         println!("{}x{}", img.width(), img.height());
         return;
     }
+    // `--child-rgba <file> [threads]`: the contract's packed RGBA of
+    // the primary, once (peak RSS measured by the parent).
+    if args[0] == "--child-rgba" {
+        let bytes = std::fs::read(&args[1]).expect("read");
+        let threads: usize = args.get(2).and_then(|t| t.parse().ok()).unwrap_or(1);
+        let opts = oxideav_heif::api::DecodeOptions::default().with_threads(Some(threads));
+        let rgba = oxideav_heif::decode_with(&bytes, &opts)
+            .expect("decode")
+            .to_rgba8_with_threads(threads);
+        println!("{} bytes", rgba.len());
+        return;
+    }
+    // `--rgba [--runs N] [--threads N] <file>...`: a viewer's path —
+    // open (parse + `info`), decode the primary, convert to packed
+    // RGBA — each phase timed (median of N), the peak RSS of a fresh
+    // process doing all three, and a digest of the RGBA bytes.
+    if args[0] == "--rgba" {
+        let mut runs = 5usize;
+        let mut threads = 1usize;
+        let mut files = Vec::new();
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--runs" => {
+                    runs = args[i + 1].parse().expect("--runs N");
+                    i += 1;
+                }
+                "--threads" => {
+                    threads = args[i + 1].parse().expect("--threads N");
+                    i += 1;
+                }
+                a => files.push(PathBuf::from(a)),
+            }
+            i += 1;
+        }
+        println!(
+            "| File | Picture | Open | Decode | RGBA | RGBA, per-sample kernel | Total (median of {runs}, {threads} worker(s)) | Peak RSS | RGBA FNV-1a |"
+        );
+        println!("|---|---|---|---|---|---|---|---|---|");
+        for path in files {
+            let bytes = std::fs::read(&path).expect("read");
+            let opts = oxideav_heif::api::DecodeOptions::default().with_threads(Some(threads));
+            let (mut open, mut decode, mut rgba, mut total, mut kernel) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let mut digest = 0u64;
+            let mut shape = String::new();
+            for _ in 0..runs {
+                let t0 = Instant::now();
+                let f = HeifFile::parse(&bytes).expect("parse");
+                let info = oxideav_heif::api::info_of(&f).expect("info");
+                let t1 = Instant::now();
+                let img = oxideav_heif::decode_file(&f, &opts).expect("decode");
+                let t2 = Instant::now();
+                let out = img.to_rgba8_with_threads(threads);
+                let t3 = Instant::now();
+                // The conversion `to_rgba8` replaced, run in the same
+                // process under the same load: one call of the
+                // per-sample kernel per pixel, 8-bit quantisation.
+                if let Ok(frame) = img.to_frame() {
+                    let colr = img.color.to_colr();
+                    let top = frame.format.max_value() as f64;
+                    let has_alpha = frame.format.has_alpha;
+                    let mut reference =
+                        Vec::with_capacity(frame.width as usize * frame.height as usize * 4);
+                    let t = Instant::now();
+                    oxideav_heif::rgb::for_each_pixel(
+                        frame.width,
+                        frame.height,
+                        frame.format,
+                        &frame.planes,
+                        Some(&colr),
+                        |rgb, a| {
+                            reference
+                                .extend(rgb.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8));
+                            reference.push(if has_alpha {
+                                (a as f64 / top * 255.0).round().clamp(0.0, 255.0) as u8
+                            } else {
+                                255
+                            });
+                        },
+                    )
+                    .expect("kernel");
+                    kernel.push(t.elapsed());
+                    assert!(reference == out, "the two conversions differ");
+                }
+                open.push(t1 - t0);
+                decode.push(t2 - t1);
+                rgba.push(t3 - t2);
+                total.push(t3 - t0);
+                digest = fnv1a64(&[oxideav_heif::Plane::new(out.len(), out)]);
+                shape = format!("{}×{} {:?}", info.width, info.height, info.format);
+            }
+            let rss = Command::new("/usr/bin/time")
+                .arg(if cfg!(target_os = "macos") {
+                    "-l"
+                } else {
+                    "-v"
+                })
+                .arg(std::env::current_exe().expect("exe"))
+                .arg("--child-rgba")
+                .arg(&path)
+                .arg(threads.to_string())
+                .output()
+                .ok()
+                .and_then(|o| {
+                    String::from_utf8_lossy(&o.stderr)
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().contains("maximum resident set size"))
+                        .and_then(|l| l.split_whitespace().find_map(|w| w.parse::<u64>().ok()))
+                })
+                .map(|v| {
+                    let b = if cfg!(target_os = "macos") {
+                        v
+                    } else {
+                        v * 1024
+                    };
+                    format!("{:.0} MiB", b as f64 / 1048576.0)
+                })
+                .unwrap_or_else(|| "n/a".into());
+            let ms = |v: Vec<Duration>| median(v).as_secs_f64() * 1e3;
+            println!(
+                "| {} | {shape} | {:.2} ms | {:.0} ms | {:.0} ms | {:.0} ms | {:.0} ms | {rss} | {digest:016x} |",
+                path.file_name().unwrap().to_string_lossy(),
+                ms(open),
+                ms(decode),
+                ms(rgba),
+                ms(kernel),
+                ms(total),
+            );
+        }
+        return;
+    }
     let mut runs = 3usize;
     let mut threads = 1usize;
     let mut encode = true;

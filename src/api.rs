@@ -944,6 +944,20 @@ impl HeifImage {
         self.rgb8(true)
     }
 
+    /// [`HeifImage::to_rgba8`] on up to `threads` workers (the same
+    /// bytes for every budget; `to_rgba8` itself stays serial).
+    pub fn to_rgba8_with_threads(&self, threads: usize) -> Vec<u8> {
+        self.rgb8_threads(true, threads)
+            .unwrap_or_else(|_| self.fallback_rgb8(true))
+    }
+
+    /// [`HeifImage::to_rgb8`] on up to `threads` workers (the same
+    /// bytes for every budget; `to_rgb8` itself stays serial).
+    pub fn to_rgb8_with_threads(&self, threads: usize) -> Vec<u8> {
+        self.rgb8_threads(false, threads)
+            .unwrap_or_else(|_| self.fallback_rgb8(false))
+    }
+
     fn fallback_rgb8(&self, alpha: bool) -> Vec<u8> {
         let n = self.width as usize * self.height as usize;
         let out_bpp = if alpha { 4 } else { 3 };
@@ -955,6 +969,10 @@ impl HeifImage {
     }
 
     fn rgb8(&self, alpha: bool) -> Result<Vec<u8>> {
+        self.rgb8_threads(alpha, 1)
+    }
+
+    fn rgb8_threads(&self, alpha: bool, threads: usize) -> Result<Vec<u8>> {
         let (w, h) = (self.width as usize, self.height as usize);
         let out_bpp = if alpha { 4 } else { 3 };
         let first = self
@@ -998,13 +1016,14 @@ impl HeifImage {
                 } else {
                     self.color.to_colr()
                 };
-                crate::rgb::planes_to_rgb8(
+                crate::rgb::planes_to_rgb8_threads(
                     self.width,
                     self.height,
                     layout,
                     &self.planes,
                     Some(&colr),
                     alpha,
+                    threads,
                 )
             }
         }
